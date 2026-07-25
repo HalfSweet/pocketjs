@@ -13,7 +13,7 @@ pocketjs/
 │  ├─ wasm/       core compiled to wasm32 for web/sim hosts (standalone crate)
 │  ├─ symbian/    no_std core static library for the GCCE/Symbian host (standalone crate)
 │  ├─ pocket3d/   the 3D core family (bsp, cook, gu, vita) + desktop examples
-│  ├─ crates/     non-3D engine crates: pocket-mod, pocket-ui-wgpu, pocket-vrm, pocket-widget
+│  ├─ crates/     non-3D engine crates: pocket-mod, pocket-ui-surface, pocket-ui-wgpu, pocket-vrm, pocket-widget
 │  └─ Cargo.toml  the desktop workspace root (core/, wasm/, symbian/, and
 │                 console-toolchain crates are deliberately excluded and
 │                 standalone; see each crate's Cargo.toml for its toolchain)
@@ -21,6 +21,7 @@ pocketjs/
 │  ├─ psp/        QuickJS + rust-psp EBOOT host
 │  ├─ vita/       Vita host
 │  ├─ esp32p4/    reusable ESP-IDF PPA adapter + component smoke build
+│  ├─ pocketbook/ PocketBook e-reader host (inkview, standalone lone-bin crate)
 │  ├─ symbian/    Nokia E7 Qt/QuickJS runtime + visible toolchain probe
 │  ├─ web/        browser dev host (wasm core)
 │  └─ sim/        deterministic headless simulation host (docs/DETERMINISM.md)
@@ -66,6 +67,6 @@ New things go where the axis says — never invent a top-level directory:
   change; the `exports`/`files` maps in package.json absorb internal moves.
 - **Cargo stays non-workspace where toolchains demand it**: `engine/core`,
   `engine/wasm`, `engine/symbian`, `engine/backends/esp32p4-ppa`, `hosts/psp`,
-  `hosts/vita`, and the gu/vita 3D crates each stand alone with their own
-  lockfiles. `engine/Cargo.toml` is the one desktop workspace.
+  `hosts/vita`, `hosts/pocketbook`, and the gu/vita 3D crates each stand alone
+  with their own lockfiles. `engine/Cargo.toml` is the one desktop workspace.
 - **Moves are `git mv`** — history stays traceable.
