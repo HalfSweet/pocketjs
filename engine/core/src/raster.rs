@@ -221,6 +221,24 @@ fn unpack_rgb565(pixel: u16) -> (u32, u32, u32) {
     )
 }
 
+/// Blend one straight-alpha RGB888 source pixel over an RGB565 pixel. Shared
+/// by the full-frame and compact-window targets so a strip render stays
+/// bit-identical to the same window of a full render by construction.
+#[inline]
+fn blend_rgb565_pixel(pixel: &mut u16, r: u32, g: u32, b: u32, a: u32) {
+    if a >= 255 {
+        *pixel = pack_rgb565(r, g, b);
+        return;
+    }
+    if a == 0 {
+        return;
+    }
+    let (dr, dg, db) = unpack_rgb565(*pixel);
+    let ia = 255 - a;
+    let mix = |s: u32, d: u32| (s * a + d * ia + 127) / 255;
+    *pixel = pack_rgb565(mix(r, dr), mix(g, dg), mix(b, db));
+}
+
 impl RenderTarget for Rgb565Target<'_> {
     #[inline]
     fn pixel_len(&self) -> usize {
@@ -229,17 +247,7 @@ impl RenderTarget for Rgb565Target<'_> {
 
     #[inline]
     fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
-        if a >= 255 {
-            self.pixels[offset] = pack_rgb565(r, g, b);
-            return;
-        }
-        if a == 0 {
-            return;
-        }
-        let (dr, dg, db) = unpack_rgb565(self.pixels[offset]);
-        let ia = 255 - a;
-        let mix = |s: u32, d: u32| (s * a + d * ia + 127) / 255;
-        self.pixels[offset] = pack_rgb565(mix(r, dr), mix(g, dg), mix(b, db));
+        blend_rgb565_pixel(&mut self.pixels[offset], r, g, b, a);
     }
 
     #[inline]
@@ -276,17 +284,7 @@ impl RenderTarget for Rgb565WindowTarget<'_> {
     #[inline]
     fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
         let offset = self.local_offset(offset);
-        if a >= 255 {
-            self.pixels[offset] = pack_rgb565(r, g, b);
-            return;
-        }
-        if a == 0 {
-            return;
-        }
-        let (dr, dg, db) = unpack_rgb565(self.pixels[offset]);
-        let ia = 255 - a;
-        let mix = |s: u32, d: u32| (s * a + d * ia + 127) / 255;
-        self.pixels[offset] = pack_rgb565(mix(r, dr), mix(g, dg), mix(b, db));
+        blend_rgb565_pixel(&mut self.pixels[offset], r, g, b, a);
     }
 
     #[inline]
