@@ -78,7 +78,46 @@ const SOLID_UNIVERSAL_RUNTIME_PATH = new URL(
 
 const PACKAGE_NAME = "@pocketjs/framework";
 const CACHE_DIR = new URL("../../.cache/transforms/", import.meta.url).pathname;
-const CACHE_VERSION = "2";
+const CACHE_VERSION = "2"; // manual backstop; compiler sources are hashed in below
+const COMPILER_DIR = new URL("./", import.meta.url).pathname;
+
+/**
+ * Hash of this package's own compiler sources: transform behavior lives here,
+ * and neither dependency versions nor input hashes cover it, so a warm cache
+ * would otherwise serve output from the previous implementation.
+ *
+ * The set is walked from this file's own imports rather than hand-listed - a
+ * literal list rots the moment a compiler module is added or split, which is
+ * exactly the failure this key exists to prevent. Only `framework/compiler` is
+ * in scope: everything under `framework/src` is a transform *input*, hashed as
+ * it is transformed.
+ */
+async function hashCompilerSources(): Promise<string> {
+  const scanner = new Bun.Transpiler({ loader: "ts" });
+  const sources = new Map<string, string>();
+  const pending = [new URL("./jsx-plugin.ts", import.meta.url)];
+  while (pending.length > 0) {
+    const url = pending.pop()!;
+    if (!url.pathname.startsWith(COMPILER_DIR)) continue;
+    const name = url.pathname.slice(COMPILER_DIR.length);
+    if (sources.has(name)) continue;
+    const source = await Bun.file(url).text();
+    sources.set(name, source);
+    for (const { path } of scanner.scanImports(source)) {
+      if (path.startsWith(".")) pending.push(new URL(path, url));
+    }
+  }
+  const h = new Bun.CryptoHasher("sha256");
+  for (const name of [...sources.keys()].sort()) h.update(name + "\0" + sources.get(name)! + "\0");
+  return h.digest("hex");
+}
+
+let implementationHash: Promise<string> | undefined;
+
+function compilerImplementationHash(): Promise<string> {
+  return (implementationHash ??= hashCompilerSources());
+}
+
 const JSX_PARSER_OPTS: ParserOptions = { plugins: ["jsx"] };
 
 const BANNED_SOLID_IMPORTS = new Set(["createResource", "useTransition", "startTransition"]);
@@ -302,6 +341,8 @@ async function hashKey(
   const h = new Bun.CryptoHasher("sha256");
   h.update(
     CACHE_VERSION +
+      "\0" +
+      (await compilerImplementationHash()) +
       "\0" +
       framework +
       "\0" +
