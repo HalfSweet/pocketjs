@@ -18,10 +18,12 @@ import {
   vdomHelperId,
 } from "@vue-jsx-vapor/runtime/raw";
 import type { BunPlugin } from "bun";
+import { compile as octaneCompile } from "octane/compiler";
 import solidPresetPkg from "babel-preset-solid/package.json";
 import compilerSfcPkg from "@vue/compiler-sfc/package.json";
 import vuePkg from "vue/package.json";
 import vueJsxVaporPkg from "vue-jsx-vapor/package.json";
+import octanePkg from "octane/package.json";
 import babelCorePkg from "@babel/core/package.json";
 import tsPresetPkg from "@babel/preset-typescript/package.json";
 import type { PocketFramework } from "../src/config.ts";
@@ -31,12 +33,15 @@ export type { PocketFramework };
 export const RENDERER_PATH = new URL("../src/renderer.ts", import.meta.url).pathname;
 export const RENDERER_SOLID_PATH = new URL("../src/renderer-solid.ts", import.meta.url).pathname;
 export const RENDERER_VUE_VAPOR_PATH = new URL("../src/renderer-vue-vapor.ts", import.meta.url).pathname;
+export const RENDERER_OCTANE_PATH = new URL("../src/renderer-octane.ts", import.meta.url).pathname;
 
 const INDEX_PATH = new URL("../src/index.ts", import.meta.url).pathname;
 const INDEX_VUE_VAPOR_PATH = new URL("../src/index-vue-vapor.ts", import.meta.url).pathname;
+const INDEX_OCTANE_PATH = new URL("../src/index-octane.ts", import.meta.url).pathname;
 const ANIMATION_PATH = new URL("../src/animation.ts", import.meta.url).pathname;
 const COMPONENTS_PATH = new URL("../src/components.ts", import.meta.url).pathname;
 const COMPONENTS_VUE_VAPOR_PATH = new URL("../src/components-vue-vapor.ts", import.meta.url).pathname;
+const COMPONENTS_OCTANE_PATH = new URL("../src/components-octane.tsx", import.meta.url).pathname;
 const CONFIG_PATH = new URL("../src/config.ts", import.meta.url).pathname;
 const CLOCK_PATH = new URL("../src/clock.ts", import.meta.url).pathname;
 const DEVTOOLS_PATH = new URL("../src/devtools.ts", import.meta.url).pathname;
@@ -47,6 +52,7 @@ const INPUT_API_PATH = new URL("../src/input-api.ts", import.meta.url).pathname;
 const LAUNCHER_PATH = new URL("../src/launcher.ts", import.meta.url).pathname;
 const LIFECYCLE_PATH = new URL("../src/lifecycle.ts", import.meta.url).pathname;
 const LIFECYCLE_VUE_VAPOR_PATH = new URL("../src/lifecycle-vue-vapor.ts", import.meta.url).pathname;
+const LIFECYCLE_OCTANE_PATH = new URL("../src/lifecycle-octane.ts", import.meta.url).pathname;
 const OSK_PATH = new URL("../src/osk.tsx", import.meta.url).pathname;
 const MANIFEST_PATH = new URL("../src/manifest/index.ts", import.meta.url).pathname;
 const PACKAGE_PATH = new URL(
@@ -55,6 +61,11 @@ const PACKAGE_PATH = new URL(
 ).pathname;
 const PLATFORM_PATH = new URL("../src/platform.ts", import.meta.url).pathname;
 const PRELUDE_PATH = new URL("../src/prelude.ts", import.meta.url).pathname;
+const SCHEDULER_POLYFILL_PATH = new URL("../src/scheduler-polyfill.ts", import.meta.url).pathname;
+const OCTANE_PROFILING_STUB_PATH = new URL(
+  "../src/octane-profiling-stub.ts",
+  import.meta.url,
+).pathname;
 const GENERATED_STYLES_PATH = new URL(
   "../src/styles.generated.ts",
   import.meta.url,
@@ -172,7 +183,39 @@ export const FRAMEWORKS: Record<
       renderer: RENDERER_VUE_VAPOR_PATH,
     },
   },
+  octane: {
+    label: "Octane",
+    outputSuffix: ".octane",
+    rendererPath: RENDERER_OCTANE_PATH,
+    rootPath: INDEX_OCTANE_PATH,
+    subpaths: {
+      "": INDEX_OCTANE_PATH,
+      animation: ANIMATION_PATH,
+      components: COMPONENTS_OCTANE_PATH,
+      config: CONFIG_PATH,
+      input: INPUT_API_PATH,
+      launcher: LAUNCHER_PATH,
+      lifecycle: LIFECYCLE_OCTANE_PATH,
+      platform: PLATFORM_PATH,
+      prelude: SCHEDULER_POLYFILL_PATH,
+      renderer: RENDERER_OCTANE_PATH,
+    },
+  },
 };
+
+/**
+ * The universal-renderer descriptor handed to the Octane compiler: JSX lowers
+ * to static host plans + dynamic slots and every runtime import retargets to
+ * the pocket renderer module (framework/src/renderer-octane.ts).
+ */
+export const OCTANE_RENDERER_DESCRIPTOR = {
+  id: "pocket",
+  module: `${"@pocketjs/framework"}/octane/renderer`,
+  target: "universal",
+  server: "unsupported",
+  text: "host",
+  capabilities: ["portal"],
+} as const;
 
 function patchVaporHelperCode(code: string): string {
   return code.replace(
@@ -199,8 +242,8 @@ const VAPOR_HELPERS = new Map([
 
 export function parseFramework(value: string | undefined, source: string): PocketFramework {
   if (value === undefined || value === "") return "solid";
-  if (value === "solid" || value === "vue-vapor") return value;
-  throw new Error(`PocketJS ${source}: framework must be "solid" or "vue-vapor"`);
+  if (value === "solid" || value === "vue-vapor" || value === "octane") return value;
+  throw new Error(`PocketJS ${source}: framework must be "solid", "vue-vapor" or "octane"`);
 }
 
 export interface TransformResult {
@@ -354,6 +397,8 @@ async function hashKey(
       "\0" +
       vueJsxVaporPkg.version +
       "\0" +
+      octanePkg.version +
+      "\0" +
       babelCorePkg.version +
       "\0" +
       tsPresetPkg.version +
@@ -392,6 +437,8 @@ function publicSubpath(spec: string, framework: PocketFramework): string | null 
   if (subpath.startsWith("solid/")) return subpath.slice("solid/".length);
   if (subpath === "vue-vapor") return "";
   if (subpath.startsWith("vue-vapor/")) return subpath.slice("vue-vapor/".length);
+  if (subpath === "octane") return "";
+  if (subpath.startsWith("octane/")) return subpath.slice("octane/".length);
   return subpath;
 }
 
@@ -403,6 +450,12 @@ export function packagePath(spec: string, framework: PocketFramework): string | 
   }
   if (spec === `${PACKAGE_NAME}/vue-vapor` || spec.startsWith(`${PACKAGE_NAME}/vue-vapor/`)) {
     return FRAMEWORKS["vue-vapor"].subpaths[subpath] ?? {
+      clock: CLOCK_PATH,
+      effects: EFFECTS_PATH,
+    }[subpath] ?? null;
+  }
+  if (spec === `${PACKAGE_NAME}/octane` || spec.startsWith(`${PACKAGE_NAME}/octane/`)) {
+    return FRAMEWORKS.octane.subpaths[subpath] ?? {
       clock: CLOCK_PATH,
       effects: EFFECTS_PATH,
     }[subpath] ?? null;
@@ -420,8 +473,8 @@ export function packagePath(spec: string, framework: PocketFramework): string | 
 }
 
 export function frameworkVariantPath(path: string, framework: PocketFramework): string {
-  if (framework !== "vue-vapor" || path.includes("/node_modules/") || path.endsWith(".d.ts")) return path;
-  const variant = path.replace(/(\.tsx?)$/, ".vue-vapor$1");
+  if (framework === "solid" || path.includes("/node_modules/") || path.endsWith(".d.ts")) return path;
+  const variant = path.replace(/(\.tsx?)$/, `${FRAMEWORKS[framework].outputSuffix}$1`);
   return variant !== path && existsSync(variant) ? variant : path;
 }
 
@@ -523,6 +576,36 @@ export async function transformFile(
       configFile: false,
       sourceMaps: false,
     });
+  } else if (framework === "octane" && path.endsWith(".tsx")) {
+    // Collector pass on the pristine source (classes/text literals), then the
+    // Octane compiler lowers JSX + hooks against the pocket universal
+    // renderer. Plain .ts modules take the shared TS-preset branch below —
+    // Octane hook modules must be .tsx so their call sites get slots.
+    await transformAsync(src, {
+      filename: path,
+      presets: opts.presets,
+      parserOpts: opts.parserOpts,
+      plugins,
+      babelrc: false,
+      configFile: false,
+      sourceMaps: false,
+    });
+    const compiled = octaneCompile(src, path, {
+      mode: "client",
+      renderer: OCTANE_RENDERER_DESCRIPTOR,
+    }) as { code: string; diagnostics?: readonly unknown[] };
+    res =
+      options.features === undefined
+        ? { code: compiled.code }
+        : await transformAsync(compiled.code, {
+            filename: path,
+            presets: [],
+            parserOpts: opts.parserOpts,
+            plugins: [makeFeatureFolder(options.features)],
+            babelrc: false,
+            configFile: false,
+            sourceMaps: false,
+          });
   } else {
     res = await transformAsync(src, {
       filename: path,
@@ -572,7 +655,7 @@ export function jsxPlugin(
         const path = packagePath(args.path, framework);
         return path ? { path } : undefined;
       });
-      if (framework === "vue-vapor") {
+      if (framework !== "solid") {
         build.onResolve({ filter: /^\.{1,2}\// }, (args) => {
           let resolved: string;
           try {
@@ -583,6 +666,22 @@ export function jsxPlugin(
           const variant = frameworkVariantPath(resolved, framework);
           return variant !== resolved ? { path: variant } : undefined;
         });
+      }
+      if (framework === "octane" && process.env.POCKETJS_OCTANE_PROFILER !== "1") {
+        // Octane's profiler is replaced with a no-op stub in Pocket bundles:
+        // its always-on per-render WeakMap bookkeeping pins render graphs
+        // under the pinned QuickJS's non-ephemeron weak marking (and costs
+        // frame time). See framework/src/octane-profiling-stub.ts.
+        build.onResolve({ filter: /^octane\/profiling$/ }, () => ({
+          path: OCTANE_PROFILING_STUB_PATH,
+        }));
+        build.onResolve({ filter: /^\.\/profiling\.js$/ }, (args) =>
+          args.importer.includes("/node_modules/octane/dist/")
+            ? { path: OCTANE_PROFILING_STUB_PATH }
+            : undefined,
+        );
+      }
+      if (framework === "vue-vapor") {
         build.onResolve({ filter: /^vue$/ }, () => ({ path: VUE_VAPOR_RUNTIME_PATH }));
         build.onResolve({ filter: /^\/vue-jsx-vapor\/(?:props|vdom|vapor|ssr)$/ }, (args) => ({
           path: args.path,

@@ -159,7 +159,9 @@ PocketJS/
     jsx-plugin.ts      babel transformAsync per framework: Solid gets
                        [[babel-preset-solid,{generate:'universal',moduleName}],
                        [@babel/preset-typescript]], Vue Vapor gets vue-jsx-vapor +
-                       preset-typescript; ALSO collects, per file, class strings + text
+                       preset-typescript, Octane gets the octane universal compiler
+                       (static host plans + dynamic slots) retargeted at
+                       renderer-octane.ts; ALSO collects, per file, class strings + text
                        codepoints FROM THE AST (StringLiteral + TemplateLiteral quasis —
                        JSX text compiles to template literals [R]); lints: classList attr,
                        interpolated class, HTML entities in JSX text, solid

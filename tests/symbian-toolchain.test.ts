@@ -72,7 +72,7 @@ describe("canonical Symbian E7 toolchain", () => {
     }
     expect(SYMBIAN_TOOLCHAIN.quickjs).toMatchObject({
       version: "2026-06-04",
-      rev: "0fc946fb670c0c29bc0135f510bcb0f595415a61",
+      rev: "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b",
     });
     expect(SYMBIAN_TOOLCHAIN.runtime).toEqual({
       sisVersion: "1.0.0",

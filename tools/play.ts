@@ -49,7 +49,7 @@ function demos(): string[] {
 function usage(message?: string): never {
   if (message) console.error(`play: ${message}\n`);
   console.error(
-    "usage: bun play vita <demo> [--fullscreen] [--no-build] [--no-launch] [--framework=solid|vue-vapor]\n" +
+    "usage: bun play vita <demo> [--fullscreen] [--no-build] [--no-launch] [--framework=solid|vue-vapor|octane]\n" +
       `demos: ${demos().join(", ")}`,
   );
   process.exit(message ? 2 : 0);
@@ -149,7 +149,8 @@ if (!existsSync(sourceConfig)) {
 }
 
 const requestedFramework =
-  framework?.slice("--framework=".length) || (demo.endsWith("vue-vapor") ? "vue-vapor" : "solid");
+  framework?.slice("--framework=".length) ||
+  (demo.endsWith("vue-vapor") ? "vue-vapor" : demo.endsWith("octane") ? "octane" : "solid");
 
 if (!noBuild) {
   const manifest = demoManifestFor(ROOT, demo, requestedFramework) as Record<string, any>;
