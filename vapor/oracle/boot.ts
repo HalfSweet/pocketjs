@@ -13,12 +13,13 @@ import { paintGrid, type CellGrid } from "./paint.ts";
 
 const ENTRY = join(import.meta.dir, "entry.ts");
 
-let bundleText: string | null = null;
+const bundleTexts = new Map<string, string>();
 
-async function buildOracleBundle(): Promise<string> {
-  if (bundleText) return bundleText;
+async function buildOracleBundle(entry: string): Promise<string> {
+  const cached = bundleTexts.get(entry);
+  if (cached) return cached;
   const result = await Bun.build({
-    entrypoints: [ENTRY],
+    entrypoints: [entry],
     format: "iife",
     target: "browser",
     conditions: ["browser"],
@@ -32,7 +33,8 @@ async function buildOracleBundle(): Promise<string> {
   if (!result.success) {
     throw new Error(`oracle bundle failed:\n${result.logs.join("\n")}`);
   }
-  bundleText = await result.outputs[0].text();
+  const bundleText = await result.outputs[0].text();
+  bundleTexts.set(entry, bundleText);
   return bundleText;
 }
 
@@ -40,6 +42,8 @@ export interface Oracle {
   root: VaporElement;
   /** Deliver one button edge and settle vapor's scheduler. */
   press(button: number): Promise<void>;
+  /** Deliver one relative-axis delta and settle vapor's scheduler. */
+  axisDelta(axis: number, delta: number): Promise<void>;
   /** Current rendered grid. */
   grid(): CellGrid;
   unmount(): void;
@@ -50,10 +54,12 @@ export interface OracleOptions {
   height?: number;
   /** compile-produced style table: class -> pair id/align for the painter */
   styles?: StyleTable;
+  /** bundle entry installing the hooks; defaults to the todo entry */
+  entry?: string;
 }
 
 export async function bootOracle(opts: OracleOptions = {}): Promise<Oracle> {
-  const bundle = await buildOracleBundle();
+  const bundle = await buildOracleBundle(opts.entry ?? ENTRY);
   installOracleDom();
   const g = globalThis as Record<string, unknown>;
   g.__vaporScreenW = opts.width ?? 30;
@@ -63,6 +69,7 @@ export async function bootOracle(opts: OracleOptions = {}): Promise<Oracle> {
   const hooks = globalThis as Record<string, unknown>;
   const boot = hooks.__vaporBoot as (container: unknown) => { unmount(): void };
   const pressHook = hooks.__vaporPress as (button: number) => void;
+  const axisDeltaHook = hooks.__vaporAxisDelta as (axis: number, delta: number) => void;
   const tick = hooks.__vaporTick as () => Promise<void>;
 
   const root = createRootElement();
@@ -73,6 +80,10 @@ export async function bootOracle(opts: OracleOptions = {}): Promise<Oracle> {
     root,
     async press(button: number) {
       pressHook(button);
+      await tick();
+    },
+    async axisDelta(axis: number, delta: number) {
+      axisDeltaHook(axis, delta);
       await tick();
     },
     grid: () => paintGrid(root, opts.width ?? 30, opts.height ?? 20, opts.styles),

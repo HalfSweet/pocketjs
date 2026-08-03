@@ -1,12 +1,11 @@
-// vapor/oracle/entry.ts — bundle entry for the oracle build.
+// vapor/oracle/entry-playdate.ts — oracle bundle entry for the Playdate Todo.
 //
-// Bundled with the repo's vue-vapor jsx plugin: `vue` resolves to the real
-// runtime-with-vapor build and `document` is rewritten to
-// globalThis.__vaporDocument. Executing the bundle just installs hooks; the
-// test side owns the micro-DOM and drives boot/press/tick through them.
+// Identical hook installation to entry.ts, mounting the crank-driven
+// todo.playdate.tsx variant so the relative-axis path replays under the real
+// Vue Vapor runtime exactly like buttons do.
 
 import { createVaporApp, nextTick } from "vue";
-import TodoApp from "../examples/todo/todo.tsx";
+import TodoApp from "../examples/todo/todo.playdate.tsx";
 import {
   __dispatchAxisDelta,
   __dispatchButton,
