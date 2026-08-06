@@ -11,36 +11,39 @@
 //! packed, top-left-origin ARGB32 pixels; those pointers remain valid until
 //! the next capture, viewport change, init, or shutdown call.
 
-#![cfg_attr(target_os = "none", no_std)]
-#![cfg_attr(target_os = "none", feature(alloc_error_handler))]
+#![cfg_attr(any(target_os = "none", feature = "bare-platform"), no_std)]
+#![cfg_attr(
+    any(target_os = "none", feature = "bare-platform"),
+    feature(alloc_error_handler)
+)]
 #![allow(static_mut_refs)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 use core::ffi::c_void;
 use pocketjs_core::damage::{DamagePolicy, DamageTracker, DEFAULT_DAMAGE_REGIONS};
 use pocketjs_core::raster;
 use pocketjs_core::Ui;
 
-#[cfg(any(target_os = "none", test))]
-mod gles2;
 pub mod extension;
+#[cfg(any(target_os = "none", feature = "bare-platform", test))]
+mod gl;
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "none", feature = "bare-platform", test))]
 const C_MALLOC_ALIGNMENT: usize = 8;
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "none", feature = "bare-platform", test))]
 #[inline]
 const fn c_allocator_supports_alignment(alignment: usize) -> bool {
     alignment <= C_MALLOC_ALIGNMENT
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
@@ -48,10 +51,10 @@ unsafe extern "C" {
     fn abort() -> !;
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 struct CAllocator;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 unsafe impl GlobalAlloc for CAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if !c_allocator_supports_alignment(layout.align()) {
@@ -72,17 +75,17 @@ unsafe impl GlobalAlloc for CAllocator {
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[global_allocator]
 static ALLOCATOR: CAllocator = CAllocator;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     unsafe { abort() }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[alloc_error_handler]
 fn allocation_error(_layout: Layout) -> ! {
     unsafe { abort() }
@@ -145,11 +148,11 @@ fn clear_framebuffer() {
 /// Reset the single UI instance. `raster_density == 0` selects density 1.
 #[no_mangle]
 pub extern "C" fn ui_init(raster_density: u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
         // This call may happen without a current GL context, so the backend
         // only marks its caches stale and defers replacement until render.
-        gles2::invalidate_resources();
+        gl::invalidate_resources();
     }
     unsafe {
         UI = Some(Ui::new_with_raster_density(raster_density.max(1)));
@@ -160,9 +163,9 @@ pub extern "C" fn ui_init(raster_density: u32) {
 /// Drop all retained UI, texture, font, and framebuffer allocations.
 #[no_mangle]
 pub extern "C" fn ui_shutdown() {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        gles2::invalidate_resources();
+        gl::invalidate_resources();
     }
     unsafe {
         UI = None;
@@ -347,6 +350,11 @@ pub extern "C" fn ui_hit_test(x: f32, y: f32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn ui_hit_test_bounds(x: f32, y: f32) -> i32 {
+    ui().hit_test_bounds(x, y)
+}
+
+#[no_mangle]
 pub extern "C" fn ui_set_cursor(texture: i32, hot_x: f32, hot_y: f32, width: f32, height: f32) {
     ui().set_cursor(texture, hot_x, hot_y, width, height);
 }
@@ -365,13 +373,13 @@ pub extern "C" fn ui_load_styles(ptr: *const u8, len: usize) -> i32 {
 pub extern "C" fn ui_load_font_atlas(ptr: *const u8, len: usize) -> i32 {
     let blob = unsafe { bytes(ptr, len) };
     let loaded = ui().load_font_atlas(blob);
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     if loaded {
         if let Some(&slot) = blob.get(12) {
             unsafe {
                 // Loading happens in a host callback, not necessarily with
                 // QGLWidget's context current. Defer GL deletion/re-upload.
-                gles2::invalidate_font(slot);
+                gl::invalidate_font(slot);
             }
         }
     }
@@ -392,27 +400,27 @@ pub extern "C" fn ui_tick() {
 
 #[no_mangle]
 pub extern "C" fn ui_gl_initialize() -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        return gles2::initialize() as i32;
+        return gl::initialize() as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(any(target_os = "none", feature = "bare-platform")))]
     0
 }
 
 #[no_mangle]
 pub extern "C" fn ui_gl_reset_resources() {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        gles2::reset_resources();
+        gl::reset_resources();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn ui_gl_shutdown() {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        gles2::shutdown();
+        gl::shutdown();
     }
 }
 
@@ -425,9 +433,9 @@ pub extern "C" fn ui_gl_render(
     window_width: i32,
     window_height: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        return gles2::render(
+        return gl::render(
             ui(),
             target_x,
             target_y,
@@ -437,7 +445,7 @@ pub extern "C" fn ui_gl_render(
             window_height,
         ) as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(any(target_os = "none", feature = "bare-platform")))]
     {
         let _ = (
             target_x,
@@ -463,9 +471,9 @@ pub extern "C" fn ui_gl_render_over(
     window_width: i32,
     window_height: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(any(target_os = "none", feature = "bare-platform"))]
     unsafe {
-        return gles2::render_over(
+        return gl::render_over(
             ui(),
             target_x,
             target_y,
@@ -475,7 +483,7 @@ pub extern "C" fn ui_gl_render_over(
             window_height,
         ) as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(any(target_os = "none", feature = "bare-platform")))]
     {
         let _ = (
             target_x,
