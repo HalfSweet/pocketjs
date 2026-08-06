@@ -23,6 +23,9 @@ use super::{
 
 const GL_PROJECTION: GLenum = 0x1701;
 const GL_MODELVIEW: GLenum = 0x1700;
+const GL_TEXTURE: GLenum = 0x1702;
+const GL_TEXTURE_2D: GLenum = 0x0de1;
+const GL_SMOOTH: GLenum = 0x1d01;
 const GL_VERTEX_ARRAY: GLenum = 0x8074;
 const GL_TEXTURE_COORD_ARRAY: GLenum = 0x8078;
 const GL_COLOR_ARRAY: GLenum = 0x8076;
@@ -41,9 +44,11 @@ unsafe extern "C" {
         pointer: *const c_void,
     );
     fn glDisableClientState(array: GLenum);
+    fn glEnable(capability: GLenum);
     fn glEnableClientState(array: GLenum);
     fn glLoadIdentity();
     fn glMatrixMode(mode: GLenum);
+    fn glShadeModel(mode: GLenum);
     fn glOrthof(
         left: GLfloat,
         right: GLfloat,
@@ -78,15 +83,32 @@ impl Pipeline {
     }
 
     pub(super) unsafe fn new() -> Option<Self> {
-        // Modulate is the ES 1.1 default, but the context is not ours alone —
-        // UIKit may have drawn through it first — so state it rather than
-        // inherit it.
         glActiveTexture(GL_TEXTURE0);
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        Self::state();
         if glGetError() != GL_NO_ERROR {
             return None;
         }
         Some(Self)
+    }
+
+    /// The fixed-function state that stands in for having a shader at all.
+    ///
+    /// `glEnable(GL_TEXTURE_2D)` is the one that is easy to miss and total when
+    /// missed: in ES 1.1 texturing is a per-unit *enable*, and with it off every
+    /// fragment takes only the per-vertex colour — geometry and flat fills look
+    /// right while all text, images and atlas content silently vanish. ES 2 has
+    /// no equivalent, because sampling is written into the fragment shader, so
+    /// nothing in the shared module ever needed to enable it.
+    ///
+    /// Every untextured draw binds the backend's 1x1 white texture, so this can
+    /// stay on for the whole frame rather than toggling per batch.
+    unsafe fn state() {
+        glEnable(GL_TEXTURE_2D);
+        // Modulate is the documented default, but state it rather than inherit
+        // it — the drawable is shared with UIKit's compositor.
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        // Gradients interpolate per-vertex colour across the quad.
+        glShadeModel(GL_SMOOTH);
     }
 
     pub(super) unsafe fn destroy(&mut self) {}
@@ -98,8 +120,13 @@ impl Pipeline {
         glOrthof(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
+        // The DrawList's UVs are already normalized, so the texture matrix must
+        // contribute nothing.
+        glMatrixMode(GL_TEXTURE);
+        glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);
         glActiveTexture(GL_TEXTURE0);
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        Self::state();
     }
 
     /// MBX Lite exposes no `GL_OES_blend_func_separate`, so the destination

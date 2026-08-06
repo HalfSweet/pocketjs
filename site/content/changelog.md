@@ -3,6 +3,44 @@
 Engine and site milestones, newest first. Versions track the
 `@pocketjs/framework` npm package.
 
+## 0.9.1 — August 6, 2026
+
+**The GPU path on the original iPhone was never losing; three stacked measurement bugs said it was.**
+PocketJS 0.9.1 corrects the central performance claim of 0.9.0, fixes the two
+real defects that produced it, and adds the instrument that settled it — the
+device's own framebuffer, read back and diffed against the reference
+rasterizer. The [rewritten deep
+dive](/blog/pocketjs-on-the-first-iphone/) tells it in order.
+
+- **Correction to 0.9.0.** That release reported the OpenGL ES 1.1 path as
+  **2.4× slower** than the software rasterizer on the original iPhone. It is
+  **1.8–2× faster**: 46.7–49.4 fps against 21.9–26.5, and 19.4–20.5 ms per
+  frame against 33.9–40.8. The old comparison timed GL's rasterize *and*
+  present against software's rasterize *only*, because the software
+  composite runs in `drawRect:` later in the run loop.
+- **Fixed: the software fallback never composited.** `+layerClass` returned
+  `CAEAGLLayer` unconditionally, and a GL-backed layer never receives
+  `drawRect:`. The documented fallback — the one the host drops to whenever GL
+  fails — computed frames that could not reach the screen. The layer class now
+  agrees with the selected renderer.
+- **Fixed: the GPU drew colour blocks.** In OpenGL ES 1.1 texturing is a
+  per-unit enable, and `glEnable(GL_TEXTURE_2D)` was missing, so every fragment
+  took only its vertex colour: flat fills looked right while all text, images
+  and font-atlas content silently vanished. ES 2 has no equivalent, which is
+  exactly why deriving the ES 1 pipeline from the ES 2 one hid it. Also states
+  `GL_MODULATE`, `glShadeModel(GL_SMOOTH)` and an identity texture matrix, with
+  a test pinning all four.
+- **Pixel parity, off the device.** A one-shot `glReadPixels` capture writes the
+  phone's framebuffer to a file the host pulls over USB. Against the same guest
+  rendered by the reference core: **mean absolute channel difference 0.04 of
+  255**, no channel off by more than 32, worst single channel 7 — the residue
+  being antialiased glyph edges. First PocketJS host verified by reading pixels
+  back off physical hardware.
+- **A frame rate you can trust.** The device now reports `window_frames` and
+  `window_us`, so the rate is computed from exact on-device counters instead of
+  differencing two status records with one-second timestamps — the ±4 fps of
+  slop that let the original discrepancy hide.
+
 ## 0.9.0 — August 6, 2026
 
 **The runtime reaches the original iPhone, and its GPU backend learns a second generation.**
@@ -10,8 +48,8 @@ PocketJS 0.9.0 adds an experimental ARMv6 target for the 2007 `iPhone1,1`
 running iPhone OS 3.1.3, generalizes the hardware DrawList backend so it
 serves both OpenGL ES 2 and the fixed-function OpenGL ES 1.1 that older
 GPUs speak, and hardens what the project accepts as proof that something
-ran on hardware. The [deep dive](/blog/pocketjs-on-the-first-iphone/)
-includes the part where the new GPU path lost to the software rasterizer.
+ran on hardware. Its performance claim about that GPU path was wrong and is
+corrected in 0.9.1 above.
 
 - **An ARMv6 UIKit host for the original iPhone.** Current Xcode still
   emits ARMv6 and `ld-classic` still links a 2008 sysroot, so the host is
@@ -32,15 +70,14 @@ includes the part where the new GPU path lost to the software rasterizer.
   `glOrthof`, and `texture2D(…) * v_color` is `GL_MODULATE` — so the
   interleaved vertex layout is reused byte for byte. All ten backend tests
   pass on either pipeline, and Symbian's verified ES 2 output is unchanged.
-- **A GPU path measured, and reported honestly.** On the iPhone's PowerVR
-  MBX Lite the new hardware path is **2.4× slower** than the software
-  rasterizer it was meant to replace: 12.4–15.5 ms to submit a frame
-  against 5.5–6.1 ms to rasterize one. The cause is not the GPU but the
-  algorithm — the software path is damage-tracked and the GL path redraws
-  everything — and making the submission damage-aware is the open work.
-  The device record now reports which renderer and which clock actually
-  ran rather than leaving it to be inferred, and a marker file selects
-  between both paths so they can be measured from one binary.
+- **A GPU path measured, and reported wrongly — see 0.9.1.** This release
+  reported the hardware path as 2.4× slower than the software rasterizer. That
+  conclusion was the product of three stacked measurement bugs and is exactly
+  backwards; the corrected figures and the two defects behind them are in
+  0.9.1 above. What stands from this entry: the device record reports which
+  renderer and which clock actually ran rather than leaving it to be inferred,
+  and a marker file selects between both paths so they can be measured from
+  one binary.
 - **Runtime acceptance got harder to fool.** A review found that the
   first "it runs on hardware" receipt could pass before the finger lifted
   and could be re-read from a process that had already died. The record is

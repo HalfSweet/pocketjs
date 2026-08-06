@@ -131,6 +131,26 @@ describe("private iPhone 2G build profile", () => {
     expect(pixelAt(29, 29).slice(0, 3)).toEqual([249, 249, 249]);
   });
 
+  test("the ES 1.1 pipeline enables the fixed-function state ES 2 gets from its shader", () => {
+    const es1 = readFileSync(
+      join(REPOSITORY, "engine/symbian/src/gl/es1.rs"),
+      "utf8",
+    );
+    // Texturing is a per-unit enable in ES 1.1 and has no ES 2 equivalent, so
+    // nothing in the shared backend supplies it. Without it every fragment
+    // takes only the vertex color: flat fills look correct while all text,
+    // images and atlas content silently disappear. That shipped once.
+    expect(es1).toContain("glEnable(GL_TEXTURE_2D)");
+    expect(es1).toContain("glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)");
+    expect(es1).toContain("glShadeModel(GL_SMOOTH)");
+    // Re-stated per frame, not only at initialization, because the drawable is
+    // shared with UIKit's compositor.
+    const beginFrame = es1.slice(es1.indexOf("fn begin_frame"));
+    expect(beginFrame).toContain("Self::state()");
+    // The texture matrix must contribute nothing to already-normalized UVs.
+    expect(beginFrame).toContain("glMatrixMode(GL_TEXTURE)");
+  });
+
   test("targets the restored 7E18 runtime with UIKit 3 and action-level acceptance", () => {
     const info = readFileSync(INFO_PLIST_PATH, "utf8");
     const runtime = readFileSync(RUNTIME_PATH, "utf8");

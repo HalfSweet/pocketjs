@@ -76,6 +76,14 @@ typedef enum {
  * comparing numbers from two binaries that differ in more than the renderer.
  */
 #define POCKET_FORCE_SOFTWARE_PATH "/private/var/tmp/pocketjs-iphone2g.software"
+/*
+ * Touch this file and the next GL frame is read back with glReadPixels and
+ * written next to it, then the request is cleared. It exists so device output
+ * can be compared against the reference core's render pixel by pixel, instead
+ * of against somebody's description of what the screen looked like.
+ */
+#define POCKET_CAPTURE_REQUEST_PATH "/private/var/tmp/pocketjs-iphone2g.capture"
+#define POCKET_CAPTURE_OUTPUT_PATH "/private/var/tmp/pocketjs-iphone2g.frame.rgba"
 #define POCKET_ACCEPTANCE_TEMP "/private/var/tmp/pocketjs-iphone2g.status.new"
 #ifndef POCKET_BUILD_ID
 #define POCKET_BUILD_ID "unknown"
@@ -147,6 +155,18 @@ extern CGImageRef CGImageCreate(
   int rendering_intent
 );
 extern void CGImageRelease(CGImageRef image);
+extern void glReadPixels(
+  int32_t x,
+  int32_t y,
+  int32_t width,
+  int32_t height,
+  uint32_t format,
+  uint32_t type,
+  void *pixels
+);
+extern void glFinish(void);
+extern void *malloc(size_t size);
+extern void free(void *pointer);
 
 static id g_window;
 static id g_view;
@@ -198,6 +218,28 @@ static unsigned long g_touch_sequences;
 static unsigned long g_completed_touch_sequences;
 static unsigned long g_status_heartbeat;
 static unsigned long g_last_record_attempt_frame;
+/*
+ * Raw counters for the delivered frame rate, rather than a rate computed here.
+ * Differencing two fetched records gave +/-4 fps of uncertainty, because the
+ * record is only written every heartbeat and its timestamp has one-second
+ * resolution. These two fields make the window exact: fps is
+ * window_frames * 1e6 / window_us, measured entirely on the device.
+ */
+/*
+ * The software path's CGImage composite happens in drawRect:, which UIKit calls
+ * later in the run loop — outside the tick's timers. Timing it separately is
+ * what makes the two renderers comparable: without this, the software path was
+ * being credited only with its incremental rasterize while the GL path was
+ * charged for rasterize AND present.
+ */
+static unsigned long g_blit_us_total;
+static unsigned long g_blit_frames;
+static unsigned long g_blit_us_mean;
+
+static unsigned long g_window_start_us;
+static unsigned long g_window_start_frame;
+static unsigned long g_window_frames;
+static unsigned long g_window_us;
 static unsigned long g_observed_action_sequence;
 
 static size_t cstring_length(const char *text) {
@@ -248,7 +290,8 @@ static void write_acceptance_record(void) {
     "guest_frames=%lu\ntouch_sequences=%lu\ncompleted_touch_sequences=%lu\n"
     "touch_down=%d\nlast_touch_x=%d\nlast_touch_y=%d\nlast_touch_hit=%d\n"
     "action_name=%s\naction_value=%d\naction_sequence=%lu\n"
-    "renderer=%s\nclock=%s\nframe_us=%lu\nsubmit_us=%lu\npresent_us=%lu\nerror=%s\n",
+    "renderer=%s\nclock=%s\nframe_us=%lu\nsubmit_us=%lu\npresent_us=%lu\n"
+    "window_frames=%lu\nwindow_us=%lu\nblit_us=%lu\nerror=%s\n",
     POCKET_BUILD_ID,
     state,
     (long)getpid(),
@@ -269,6 +312,9 @@ static void write_acceptance_record(void) {
     g_frame_us_mean,
     g_submit_us_mean,
     g_present_us_mean,
+    g_window_frames,
+    g_window_us,
+    g_blit_us_mean,
     g_state == POCKET_STATE_FAILED ? g_status_message : ""
   );
   g_last_record_attempt_frame = g_guest_frames;
@@ -732,6 +778,15 @@ typedef void (*GlGetRenderbufferParameteriv)(
   int32_t *value
 );
 typedef uint32_t (*GlCheckFramebufferStatus)(uint32_t target);
+typedef void (*GlReadPixels)(
+  int32_t x,
+  int32_t y,
+  int32_t width,
+  int32_t height,
+  uint32_t format,
+  uint32_t type,
+  void *pixels
+);
 typedef void (*GlDeleteObjects)(int32_t count, const uint32_t *names);
 
 static id g_gl_context;
@@ -789,10 +844,22 @@ static BOOL send_bool_class_object(Class cls, const char *selector, id value) {
   );
 }
 
-/* The layer class UIKit asks our view for; absent before iPhone OS 2. */
+/*
+ * The layer class UIKit asks our view for.
+ *
+ * This MUST agree with whether we are going to use GL, because a CAEAGLLayer
+ * never receives drawRect: — it is GL-backed. Returning it unconditionally left
+ * the software fallback computing frames that were never composited to the
+ * screen, and made its measured cost look artificially small. UIKit queries
+ * this at view creation, before setup_gl runs, so the decision has to be made
+ * from the same marker file setup_gl consults.
+ */
 static Class pocket_layer_class(id self, SEL command) {
   (void)self;
   (void)command;
+  if (access(POCKET_FORCE_SOFTWARE_PATH, F_OK) == 0) {
+    return objc_getClass("CALayer");
+  }
   return objc_getClass("CAEAGLLayer");
 }
 
@@ -915,6 +982,46 @@ static int setup_gl(id view) {
 }
 
 /*
+ * Read the just-drawn frame back off the GPU when asked. GL reports rows
+ * bottom-up; the raw dump is left in that order and the host-side tool flips
+ * it, so nothing here has an opinion about image formats.
+ */
+static void capture_frame_if_requested(void) {
+  size_t length;
+  uint8_t *pixels;
+  int descriptor;
+  size_t written = 0;
+
+  if (access(POCKET_CAPTURE_REQUEST_PATH, F_OK) != 0) {
+    return;
+  }
+  if (g_gl_width <= 0 || g_gl_height <= 0) {
+    return;
+  }
+  length = (size_t)g_gl_width * (size_t)g_gl_height * 4U;
+  pixels = (uint8_t *)malloc(length);
+  if (pixels == NULL) {
+    return;
+  }
+  glFinish();
+  /* GL_RGBA + GL_UNSIGNED_BYTE is the one combination ES 1.1 always allows. */
+  glReadPixels(0, 0, g_gl_width, g_gl_height, 0x1908U, 0x1401U, pixels);
+  descriptor = open(POCKET_CAPTURE_OUTPUT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (descriptor >= 0) {
+    while (written < length) {
+      ssize_t count = write(descriptor, pixels + written, length - written);
+      if (count <= 0) break;
+      written += (size_t)count;
+    }
+    (void)fsync(descriptor);
+    (void)close(descriptor);
+  }
+  free(pixels);
+  /* One shot: clearing the request is what proves the capture ran. */
+  (void)unlink(POCKET_CAPTURE_REQUEST_PATH);
+}
+
+/*
  * Draw one frame through the GPU. Zero means fall back for good.
  *
  * `submitted_us` is set to the cost of walking the DrawList into GL, which is
@@ -932,6 +1039,7 @@ static int present_gl(unsigned long *submitted_us) {
   if (!pocket_runtime_gl_render(g_gl_width, g_gl_height)) return 0;
   gl_bind_renderbuffer(POCKET_GL_RENDERBUFFER_OES, g_gl_renderbuffer);
   *submitted_us = now_us() - started;
+  capture_frame_if_requested();
   return send_bool_uint(
     g_gl_context,
     "presentRenderbuffer:",
@@ -1043,8 +1151,13 @@ static void pocket_tick(id self, SEL command, id timer) {
      */
     if (!present_gl(&submitted_us)) {
       teardown_gl();
-      g_renderer = "software";
-      copy_status_message("OpenGL ES present failed; using software raster");
+      g_renderer = "software-on-eagl-layer";
+      /*
+       * The view is already CAEAGLLayer-backed at this point, so drawRect: will
+       * never fire and the rasterizer's output cannot reach the screen. Report
+       * it as its own state rather than as a working software path.
+       */
+      copy_status_message("OpenGL ES present failed; layer cannot composite raster");
     }
   }
   if (!g_gl_ready) {
@@ -1061,10 +1174,24 @@ static void pocket_tick(id self, SEL command, id timer) {
   }
   if (g_guest_frames == 1 || completed_touch || reported_action ||
       g_guest_frames - g_last_record_attempt_frame >= POCKET_STATUS_HEARTBEAT_FRAMES) {
+    {
+      unsigned long closed_at = now_us();
+      if (g_window_start_us != 0 && closed_at > g_window_start_us) {
+        g_window_frames = g_guest_frames - g_window_start_frame;
+        g_window_us = closed_at - g_window_start_us;
+      }
+      g_window_start_us = closed_at;
+      g_window_start_frame = g_guest_frames;
+    }
     if (g_timed_frames > 0) {
       g_frame_us_mean = g_frame_us_total / g_timed_frames;
       g_present_us_mean = g_present_us_total / g_timed_frames;
       g_submit_us_mean = g_submit_us_total / g_timed_frames;
+      if (g_blit_frames > 0) {
+        g_blit_us_mean = g_blit_us_total / g_blit_frames;
+        g_blit_us_total = 0;
+        g_blit_frames = 0;
+      }
       g_frame_us_total = 0;
       g_present_us_total = 0;
       g_submit_us_total = 0;
@@ -1080,6 +1207,7 @@ static void pocket_tick(id self, SEL command, id timer) {
 static void pocket_draw_rect(id self, SEL command, CGRect rect) {
   CGContextRef context = current_graphics_context();
   CGRect bounds;
+  unsigned long blit_started_us = now_us();
   (void)command;
   (void)rect;
 
@@ -1097,6 +1225,8 @@ static void pocket_draw_rect(id self, SEL command, CGRect rect) {
   } else {
     draw_status(context, bounds);
   }
+  g_blit_us_total += now_us() - blit_started_us;
+  g_blit_frames += 1;
 }
 
 static void begin_touch(void) {

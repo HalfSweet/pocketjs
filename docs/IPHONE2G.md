@@ -310,6 +310,96 @@ A successful build proves only the host compiler/linker/package layer. It says
 nothing about USB deployment, SpringBoard discovery, process launch, drawing,
 or touch on the phone.
 
+## Render paths
+
+The host has two, and reports which one ran.
+
+| Path | Mechanism | Measured on `iPhone1,1` / 3.1.3 |
+| --- | --- | --- |
+| OpenGL ES 1.1 | The core walks its DrawList into the fixed-function pipeline; the CPU never touches a pixel. | **46.7–49.4 fps**, 1.7–1.8 ms guest + 15.7–16.8 ms submit |
+| Software raster | The core rasterizes ARGB32; `drawRect:` composites it as one `CGImage`. | **21.9–26.5 fps**, 1.4–2.7 ms guest + 9.6–11.5 ms raster + 22.1–26.9 ms composite |
+
+The GPU path is **1.8–2× faster**, and the largest single cost anywhere is the
+software path's full-screen `CGImage` composite. Both figures come from one
+binary with the frame loop on `CADisplayLink`.
+
+`renderer=` and `clock=` in the acceptance record name the path and the clock
+that actually ran. Neither is inferred: a GL failure falls back to the
+rasterizer by design, so without those fields a hardware receipt and a software
+receipt are byte-identical.
+
+Two fields make the rate exact rather than estimated. `window_frames` and
+`window_us` are counted on the device between record writes, because
+differencing two fetched records is worth about ±4 fps — the record is written
+once per heartbeat and its timestamp has one-second resolution.
+
+### Selecting a path
+
+```sh
+# force the software rasterizer for the next launch
+ssh … 'touch /private/var/tmp/pocketjs-iphone2g.software'
+# back to the GPU
+ssh … 'rm -f /private/var/tmp/pocketjs-iphone2g.software'
+```
+
+The marker is read in two places, and **both must agree**: `setup_gl` consults
+it, and so does the view's `+layerClass`. A `CAEAGLLayer` never receives
+`drawRect:`, so a view backed by one cannot composite a software frame at all.
+Returning `CAEAGLLayer` unconditionally left the documented fallback computing
+frames that could not reach the screen.
+
+The app must be restarted for a change to take effect, and iPhone OS 3 has no
+third-party multitasking, so kill it rather than expecting a relaunch to
+replace it:
+
+```sh
+ssh … 'kill -9 $(sed -n "s/^pid=//p" /private/var/tmp/pocketjs-iphone2g.status)'
+bun iphone2g launch
+```
+
+Note that `ps ax` prints nothing on this installation. Use `kill -0 <pid>` to
+test liveness; `ps ax | grep` reports a running process as absent.
+
+### Pixel parity against the reference core
+
+The GPU path is verified by reading the device's own framebuffer back, not by
+looking at the screen:
+
+```sh
+ssh … 'touch /private/var/tmp/pocketjs-iphone2g.capture'
+# the next GL frame is written to pocketjs-iphone2g.frame.rgba and the
+# request is cleared; 614,400 bytes for 320x480 RGBA
+ssh … 'cat /private/var/tmp/pocketjs-iphone2g.frame.rgba' > device-frame.rgba
+```
+
+`glReadPixels` reports rows **bottom-up**, so the host-side tool flips them.
+Rendering the same guest bundle through the wasm core at the same viewport,
+200 frames in with animations settled and no presses, gives:
+
+```text
+mean abs channel diff : 0.04 / 255
+channels off by >32   : 0 of 460800
+worst single channel  : 7
+```
+
+The residue is antialiased glyph edges: the GPU interpolates the gradient and
+filters the font atlas where the software rasterizer does exact integer math.
+
+### ES 1.1 state the ES 2 pipeline does not need
+
+`engine/symbian/src/gl/es1.rs` must state four things that have no ES 2
+equivalent, because sampling there is written into the fragment shader:
+
+- **`glEnable(GL_TEXTURE_2D)`** — texturing is a per-unit enable in ES 1.1.
+  Without it every fragment takes only its vertex colour, so flat fills look
+  correct while all text, images and atlas content vanish. This shipped once.
+- `glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)` — the documented
+  default, stated because the drawable is shared with UIKit's compositor.
+- `glShadeModel(GL_SMOOTH)` — gradients interpolate per-vertex colour.
+- An identity texture matrix, because the DrawList's UVs are already normalized.
+
+A test in `tests/iphone2g-profile.test.ts` pins all four.
+
 ## Historical 1.1.4 incident and preservation record
 
 > **Archive, not a current runbook.** The sections below preserve the exact
