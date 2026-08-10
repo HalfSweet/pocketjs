@@ -187,3 +187,14 @@ invalid input or execution.
 PPSSPP will use the same receipt and comparison formats after the deterministic
 QEMU paths have completed local calibration. PSP receipts will compare only with
 PSP baselines.
+
+## GitHub validation
+
+`.github/workflows/perf.yml` runs the versioned harness on an Ubuntu runner when
+performance-sensitive paths change, and it can also be started manually. The
+workflow first runs the JavaScript, WASM-host and Rust harness checks plus an
+isolated Native A/A comparison. Two subsequent jobs build the pinned QEMU image
+from its verified source archive, exercise the marker/plugin fixtures, and run
+the complete quick suite twice for ARMv7 Thumb-2 and AArch64. **The workflow has
+read-only repository permissions and contains no publish or deployment step.**
+Receipts, comparison reports and failure logs are retained for 7 days.
