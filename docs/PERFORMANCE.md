@@ -192,9 +192,10 @@ PSP baselines.
 
 `.github/workflows/perf.yml` runs the versioned harness on an Ubuntu runner when
 performance-sensitive paths change, and it can also be started manually. The
-workflow first runs the JavaScript, WASM-host and Rust harness checks plus an
-isolated Native A/A comparison. Two subsequent jobs build the pinned QEMU image
-from its verified source archive, exercise the marker/plugin fixtures, and run
-the complete quick suite twice for ARMv7 Thumb-2 and AArch64. **The workflow has
-read-only repository permissions and contains no publish or deployment step.**
-Receipts, comparison reports and failure logs are retained for 7 days.
+workflow runs the JavaScript, WASM-host and Rust harness checks plus an isolated
+Native A/A comparison. Two parallel jobs independently build the pinned QEMU
+image from its verified source archive; one verifies the marker/plugin fixtures,
+and both run the complete quick suite twice for their ARMv7 Thumb-2 or AArch64
+target. **The workflow has read-only repository permissions and contains no
+publish or deployment step.** Receipts, comparison reports and failure logs are
+retained for 7 days.
