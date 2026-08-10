@@ -399,6 +399,7 @@ export function qemuCleanupFallbackArgs(image: string, workDir: string): readonl
     "--network", "none",
     "--read-only",
     "--cap-drop", "ALL",
+    "--cap-add", "DAC_OVERRIDE",
     "--security-opt", "no-new-privileges",
     ...dockerMount(workDir, "/work"),
     "--entrypoint", "find",
@@ -428,7 +429,8 @@ function cleanupWorkDirectory(outDir: string, workDir: string, image: string): v
 
   // Docker builds run as container root so Cargo target directories can be
   // unreadable to an unprivileged Linux host. Limit the privileged fallback to
-  // the validated disposable bind mount, then let the host remove its root.
+  // the validated disposable bind mount. DAC_OVERRIDE is required to enter the
+  // host-owned mode-0700 mkdtemp root; every other capability remains dropped.
   const result = command(qemuCleanupFallbackArgs(image, resolvedWork), outDir);
   if (result.exitCode !== 0) throw failure("cleaning the QEMU work directory", result);
   rmSync(resolvedWork, { recursive: true, force: true });

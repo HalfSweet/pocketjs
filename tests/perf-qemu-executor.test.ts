@@ -72,12 +72,13 @@ describe("QEMU render/build contract", () => {
     const directory = mkdtempSync(join(tmpdir(), "pocketjs-qemu-cleanup-"));
     try {
       const work = join(directory, ".qemu-work-fixture");
-      mkdirSync(work);
+      mkdirSync(work, { mode: 0o700 });
       expect(qemuCleanupFallbackArgs("pocketjs-perf-qemu:11.0.3", work)).toEqual([
         "docker", "run", "--rm",
         "--network", "none",
         "--read-only",
         "--cap-drop", "ALL",
+        "--cap-add", "DAC_OVERRIDE",
         "--security-opt", "no-new-privileges",
         "--mount", `type=bind,source=${realpathSync(work)},target=/work`,
         "--entrypoint", "find",
