@@ -281,9 +281,9 @@ function makeProbe(buttons: string[]) {
       controlError = controlErrorEl && !controlErrorEl.hidden ? controlErrorEl.textContent : null;
       controlFrameAlive = typeof host.frameCb === 'function';
 
-      // Fresh component state, then the same frame count through the visible
-      // gamepad controls. Any final pixel difference is attributable to input,
-      // including for demos whose normal UI animates continuously.
+      // Fresh component state, then the same frame count through the shared
+      // PocketHost input path. The PSP raycast controls call this same method;
+      // their hit proxies are covered separately by the Stage verifier.
       const runButton = document.querySelector('#pg-run');
       if (!runButton) throw new Error('Playground Run button is missing');
       const originalSetText = host.ops.setText;
@@ -322,15 +322,15 @@ function makeProbe(buttons: string[]) {
         await waitForRun();
         host.stop();
         for (const value of sequence) {
-          const button = document.querySelector('[data-btn="' + value + '"]');
-          if (!button) continue;
-          button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          const bit = Number(value);
+          if (!Number.isInteger(bit) || bit <= 0) throw new Error('Invalid input bit ' + value);
+          host.press(bit, true);
           host.stop();
           for (let i = 0; i < edgeFrames; i++) {
             host._safeFrame();
             await Promise.resolve();
           }
-          button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+          host.press(bit, false);
           host.stop();
           for (let i = 0; i < edgeFrames; i++) {
             host._safeFrame();
@@ -446,7 +446,7 @@ async function verifyVariant(demo: string, framework: Framework) {
     errors.push(`${probe.invalidTextWrites} host text write(s) used an invalid native node id`);
   }
   if (probe.pressed.length !== INPUTS[demo].length) {
-    errors.push(`only ${probe.pressed.length}/${INPUTS[demo].length} controls were found`);
+    errors.push(`only ${probe.pressed.length}/${INPUTS[demo].length} inputs were applied`);
   }
   for (const expectedText of EXPECTED_TEXT[demo]) {
     if (!probe.textWrites.some((value) => value.includes(expectedText))) {

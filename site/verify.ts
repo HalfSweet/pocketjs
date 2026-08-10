@@ -172,6 +172,7 @@ try {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   const networkErrors: string[] = [];
+  const networkRequestUrls = new Map<string, string>();
   ws.addEventListener("message", (event: any) => {
     const message = JSON.parse(event.data);
     if (message.sessionId !== sessionId) return;
@@ -184,8 +185,15 @@ try {
         message.params.args.map((arg: any) => arg.value ?? arg.description ?? "").join(" "),
       );
     }
+    if (message.method === "Network.requestWillBeSent") {
+      networkRequestUrls.set(message.params.requestId, message.params.request.url);
+    }
     if (message.method === "Network.loadingFailed") {
-      networkErrors.push(`${message.params.errorText}: ${message.params.requestId}`);
+      const request = networkRequestUrls.get(message.params.requestId) ?? message.params.requestId;
+      networkErrors.push(
+        `${message.params.errorText}: ${request}`
+        + ` (type=${message.params.type ?? "unknown"}, canceled=${message.params.canceled === true})`,
+      );
     }
     if (message.method === "Network.responseReceived" && message.params.response.status >= 400) {
       networkErrors.push(`${message.params.response.status}: ${message.params.response.url}`);
