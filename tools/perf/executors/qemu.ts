@@ -348,8 +348,8 @@ function makeContext(options: QemuBridgeOptions): SuiteContext {
   const outDir = resolve(options.outDir);
   mkdirSync(outDir, { recursive: true });
   const workDir = mkdtempSync(join(outDir, ".qemu-work-"));
+  const image = process.env.POCKETJS_QEMU_IMAGE || DEFAULT_IMAGE;
   try {
-    const image = process.env.POCKETJS_QEMU_IMAGE || DEFAULT_IMAGE;
     const imageIdentity = inspectImage(image, outDir);
     const target = TARGETS[options.executor];
     const rustc = containerVersion(image, outDir, "rustc", "--version");
@@ -388,18 +388,49 @@ function makeContext(options: QemuBridgeOptions): SuiteContext {
       hostArch: process.arch,
     };
   } catch (error) {
-    cleanupWorkDirectory(outDir, workDir);
+    cleanupWorkDirectory(outDir, workDir, image);
     throw error;
   }
 }
 
-function cleanupWorkDirectory(outDir: string, workDir: string): void {
+export function qemuCleanupFallbackArgs(image: string, workDir: string): readonly string[] {
+  return [
+    "docker", "run", "--rm",
+    "--network", "none",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    ...dockerMount(workDir, "/work"),
+    "--entrypoint", "find",
+    image,
+    "/work", "-mindepth", "1", "-delete",
+  ];
+}
+
+function isPermissionError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  return error.code === "EACCES" || error.code === "EPERM";
+}
+
+function cleanupWorkDirectory(outDir: string, workDir: string, image: string): void {
   if (!existsSync(workDir)) return;
   const resolvedWork = realpathSync(workDir);
   if (resolve(resolvedWork, "..") !== realpathSync(outDir) ||
       !basename(resolvedWork).startsWith(".qemu-work-")) {
     throw new Error(`refusing to clean unexpected QEMU work directory ${resolvedWork}`);
   }
+  try {
+    rmSync(resolvedWork, { recursive: true, force: true });
+    return;
+  } catch (error) {
+    if (!isPermissionError(error) || !existsSync(resolvedWork)) throw error;
+  }
+
+  // Docker builds run as container root so Cargo target directories can be
+  // unreadable to an unprivileged Linux host. Limit the privileged fallback to
+  // the validated disposable bind mount, then let the host remove its root.
+  const result = command(qemuCleanupFallbackArgs(image, resolvedWork), outDir);
+  if (result.exitCode !== 0) throw failure("cleaning the QEMU work directory", result);
   rmSync(resolvedWork, { recursive: true, force: true });
 }
 
@@ -1225,6 +1256,6 @@ export async function runQemuSuite(options: QemuBridgeOptions): Promise<QemuSuit
     }
     return { receipts, invalidReasons: [...new Set(invalidReasons)] };
   } finally {
-    cleanupWorkDirectory(context.outDir, context.workDir);
+    cleanupWorkDirectory(context.outDir, context.workDir, context.image);
   }
 }

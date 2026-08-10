@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseScenarioV1 } from "../tools/perf/core/index.ts";
 import {
   QEMU_ENTROPY_PROFILE,
+  qemuCleanupFallbackArgs,
   qemuHarnessFingerprint,
   qemuInvocationProfile,
   qemuQuickJsReplayReasons,
@@ -60,6 +68,27 @@ function quickJsGuestOutput(completeOverrides: Record<string, unknown> = {}): st
 }
 
 describe("QEMU render/build contract", () => {
+  test("confines the permission cleanup fallback to the disposable work directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pocketjs-qemu-cleanup-"));
+    try {
+      const work = join(directory, ".qemu-work-fixture");
+      mkdirSync(work);
+      expect(qemuCleanupFallbackArgs("pocketjs-perf-qemu:11.0.3", work)).toEqual([
+        "docker", "run", "--rm",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--mount", `type=bind,source=${realpathSync(work)},target=/work`,
+        "--entrypoint", "find",
+        "pocketjs-perf-qemu:11.0.3",
+        "/work", "-mindepth", "1", "-delete",
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("separates pinned CPU and deterministic emulator arguments", () => {
     expect(qemuInvocationProfile("qemu-armv7-thumb2")).toEqual({
       cpuArgs: ["-cpu", "cortex-a9,neon=off,vfp-d32=off"],
