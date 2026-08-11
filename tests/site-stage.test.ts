@@ -54,29 +54,69 @@ test("homepage Stage package has one semantic screen and its declared suppressio
   }
 });
 
-test("homepage declares the live launcher and visible attributions", () => {
+test("homepage plays the machine collage", () => {
   const home = readFileSync(ROOT + "site/home.html", "utf8");
-  expect(home).toContain("data-pocket-stage");
-  expect(home).toContain("The live Pocket Launcher");
-  expect(home).toContain("Dibad");
-  expect(home).toContain("creativecommons.org/licenses/by/4.0");
-  expect(home).toContain("Motion studies by (yui540) &middot; credited per author request");
-  expect(home).toMatch(
-    /<div class="lp-hero__wall" aria-hidden="true">[\s\S]*?<\/div>\s*<\/div>\s*<a class="lp-hero__motion-credit"/,
-  );
-  expect(home).not.toContain("Drag to orbit");
-  expect(home).not.toContain("lp-stage__hint");
+  // The 3D stage moved to the playground; the homepage must not mount it.
+  expect(home).not.toContain("data-pocket-stage");
+  expect(home).not.toContain("lp-stage");
+  // House style: no em dashes anywhere on the landing surfaces.
+  for (const file of [
+    "site/home.html",
+    "site/for/shell.html",
+    "site/for/interfaces.html",
+    "site/for/games.html",
+    "site/for/worlds.html",
+    "site/for/agents.html",
+  ]) {
+    const source = readFileSync(ROOT + file, "utf8");
+    expect(source).not.toContain("&mdash;");
+    expect(source).not.toContain("—");
+  }
 
+  // The hero collage: eight machines, every screen a real capture. The Figma
+  // screen is the 8% zoomed-out still (the closer zooms are not used).
+  expect(home).toContain("data-collage");
+  expect(home.match(/class="lp-dev /g)?.length).toBe(8);
+  expect(home).toContain("/assets/wall/figma-8pct.jpg");
+  expect(home).toContain("333 MHz / 32 MB");
+  expect(home).toContain("4.19 MHz / 8 KB");
+  expect(home).toContain("Rich interactive JavaScript where no browser fits.");
+  expect(home).toContain("PocketJS is a compact JavaScript runtime");
+
+  // The use-case cards link the four /for/ pages.
+  for (const slug of ["interfaces", "games", "worlds", "agents"]) {
+    expect(home).toContain(`href="/for/${slug}/"`);
+  }
+  // The retired sections stay retired.
+  expect(home).not.toContain("Ship the application");
+  expect(home).not.toContain("Built for every kind of impossible");
+  expect(home).not.toContain("lp-pkg");
+  expect(home).not.toContain("lp-imposs");
+
+  // The /for/ pages are rendered with the homepage chrome.
+  const build0 = readFileSync(ROOT + "site/build.ts", "utf8");
+  expect(build0).toContain("renderForPage");
+  expect(build0).toContain('for/shell.html');
+
+  // The what-runs-where matrix is retired too.
+  expect(home).not.toContain("data-mx");
+  expect(home).not.toContain("What runs where");
+
+  // The collage glue and styles.
+  const homeGlue = readFileSync(ROOT + "site/assets/home.js", "utf8");
+  expect(homeGlue).toContain("setupHeroCollage");
+  expect(homeGlue).toContain("prefers-reduced-motion");
+  expect(homeGlue).not.toContain("setupRotatingHero");
+  expect(homeGlue).not.toContain("setupMachineMatrix");
   const homeCss = readFileSync(ROOT + "site/assets/home.css", "utf8");
-  const viewportCss = homeCss.match(/\.lp-stage__viewport \{([\s\S]*?)\n\}/)?.[1] ?? "";
-  expect(viewportCss).toContain("background: transparent");
-  expect(viewportCss).not.toContain("border:");
-  expect(viewportCss).not.toContain("box-shadow:");
-  expect(viewportCss).not.toContain("backdrop-filter:");
-  expect(homeCss).not.toContain(".lp-stage__viewport::before");
+  expect(homeCss).not.toContain(".lp-stage");
+  expect(homeCss).not.toContain(".lp-rot");
+  expect(homeCss).not.toContain(".lp-mx");
+  expect(homeCss).toContain(".lp-dev");
 
-  // The stage ships the Pocket Launcher family as .pocket packages
-  // (docs/LAUNCHER.md / docs/PLATFORM.md) — the deploy chain must build and copy them.
+  // The playground stage still ships the Pocket Launcher family as .pocket
+  // packages (docs/LAUNCHER.md / docs/PLATFORM.md) — the deploy chain must
+  // keep building and copying them.
   const build = readFileSync(ROOT + "site/build.ts", "utf8");
   expect(build).toContain("dist/launcher-registry.json");
   expect(build).toContain('copy(source, `stage/apps/${output}.pocket`)');
@@ -96,8 +136,7 @@ test("homepage declares the live launcher and visible attributions", () => {
   }
 });
 
-test("playground wraps its live framebuffer in the homepage PSP model", () => {
-  const home = readFileSync(ROOT + "site/home.html", "utf8");
+test("playground wraps its live framebuffer in the PSP model", () => {
   const playground = readFileSync(ROOT + "site/playground/page.html", "utf8");
   for (const marker of [
     "data-pocket-stage",
@@ -106,7 +145,6 @@ test("playground wraps its live framebuffer in the homepage PSP model", () => {
     "data-stage-screen",
     "data-stage-status",
   ]) {
-    expect(home).toContain(marker);
     expect(playground).toContain(marker);
   }
   expect(playground).toContain('id="pg-canvas" class="pg-stage__screen" data-stage-screen');
@@ -115,12 +153,12 @@ test("playground wraps its live framebuffer in the homepage PSP model", () => {
   expect(playground).not.toContain("screen-emu");
   expect(playground).not.toContain("data-btn");
 
+  // The stage is playground-only now: the homepage must not pull the module.
   const homeGlue = readFileSync(ROOT + "site/assets/home.js", "utf8");
+  expect(homeGlue).not.toContain("pocket-stage-web.js");
   const playgroundGlue = readFileSync(ROOT + "site/playground/playground.js", "utf8");
-  for (const glue of [homeGlue, playgroundGlue]) {
-    expect(glue).toContain('import("/assets/pocket-stage-web.js")');
-    expect(glue).toContain("mountPocketStage");
-  }
+  expect(playgroundGlue).toContain('import("/assets/pocket-stage-web.js")');
+  expect(playgroundGlue).toContain("mountPocketStage");
   expect(playgroundGlue).toContain("host,");
   expect(playgroundGlue).toContain("stageController?.refreshScreen()");
   expect(playgroundGlue).toContain("stageController?.releaseInput();\n      host.reset();");

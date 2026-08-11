@@ -1,7 +1,7 @@
-// site/assets/home.js — homepage behaviors. The background remains a cheap
-// baked demo wall; the live Pocket Stage below the CTA is code-split and boots
-// only when it approaches the viewport. Tab groups (framework tabs on the code
-// card, target chips on the selector) are static HTML — JS only toggles state.
+// site/assets/home.js — homepage behaviors. The hero is a machine collage on
+// a fixed canvas that cover-scales to the viewport, its screens cropped live
+// out of the baked demo wall. Tab groups (framework tabs on the code card,
+// target chips on the selector) are static HTML — JS only toggles state.
 
 function setupTabs(tabAttr, panelAttr) {
   const tabs = [...document.querySelectorAll(`[data-${tabAttr}]`)];
@@ -24,8 +24,6 @@ function setupTabs(tabAttr, panelAttr) {
   }
 }
 
-// Pause the wall when it can't be seen (scrolled away) or shouldn't move
-// (prefers-reduced-motion — the CSS also hides it there).
 function setupCodeCardName() {
   const nameEl = document.getElementById("lp-codecard-name");
   if (!nameEl) return;
@@ -43,14 +41,28 @@ function setupCodeCardName() {
   }
 }
 
-function setupDemoWall() {
-  const video = document.querySelector(".lp-hero__wall-video");
-  if (!video) return;
+// The hero collage: a fixed 1440x820 canvas cover-scaled to fill the hero, so
+// narrow screens crop the collage's sides instead of stacking the devices.
+// The screen videos pause off screen and under prefers-reduced-motion.
+function setupHeroCollage() {
+  const hero = document.querySelector(".lp-hero");
+  const canvas = document.querySelector("[data-collage]");
+  if (!hero || !canvas) return;
+  const fit = () => {
+    const s = Math.max(hero.clientWidth / 1440, hero.clientHeight / 820);
+    canvas.style.transform = `translate(-50%, -50%) scale(${s})`;
+  };
+  addEventListener("resize", fit);
+  fit();
+
+  const videos = [...canvas.querySelectorAll("video")];
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   let visible = true;
   const apply = () => {
-    if (reduced.matches || !visible) video.pause();
-    else video.play().catch(() => {});
+    for (const video of videos) {
+      if (reduced.matches || !visible) video.pause();
+      else video.play().catch(() => {});
+    }
   };
   reduced.addEventListener?.("change", apply);
   const io = new IntersectionObserver(
@@ -60,39 +72,11 @@ function setupDemoWall() {
     },
     { threshold: 0.05 },
   );
-  io.observe(video);
-}
-
-function setupPocketStage() {
-  const root = document.querySelector("[data-pocket-stage]");
-  if (!root) return;
-  let booted = false;
-  const boot = async () => {
-    if (booted) return;
-    booted = true;
-    try {
-      const { mountPocketStage } = await import("/assets/pocket-stage-web.js");
-      await mountPocketStage(root);
-    } catch (error) {
-      root.classList.add("has-error");
-      const status = root.querySelector("[data-stage-status]");
-      if (status) status.textContent = "Pocket Stage could not be loaded.";
-      console.error("Pocket Stage module failed", error);
-    }
-  };
-  const io = new IntersectionObserver(
-    (entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      io.disconnect();
-      void boot();
-    },
-    { rootMargin: "240px 0px", threshold: 0.01 },
-  );
-  io.observe(root);
+  io.observe(hero);
+  apply();
 }
 
 setupTabs("code-tab", "code-panel");
 setupCodeCardName();
 setupTabs("tgt-tab", "tgt-panel");
-setupDemoWall();
-setupPocketStage();
+setupHeroCollage();
