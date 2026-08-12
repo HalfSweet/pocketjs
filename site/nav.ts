@@ -57,6 +57,14 @@ export interface BlogPost {
 
 export const BLOG_POSTS: BlogPost[] = [
   {
+    slug: "pocket-pi-agent-native-runtime",
+    title: "Designing Apps for Humans and Agents in an Agent-Native Runtime",
+    date: "2026-08-11",
+    description:
+      "What should an App be when both a human and an Agent can act on it? Pocket Pi derives the answer from first principles: each App is a firmware-independent product unit executed by one or more isolated PocketJS Guests, built from App-owned SQLite Data, actor-neutral Actions, and a fixed human-facing View. Tools and UI intents become two surfaces over the same behavior; a resident Pi Agent coordinates many isolated Apps and can help evolve each complete product boundary without teaching firmware what the product means.",
+    author: { name: 'Siwei "Jerry" Yuan', url: "https://github.com/siwei-yuan" },
+  },
+  {
     slug: "pocket-voxel",
     title: "Pocket Voxel: A Creature-RPG From First Principles",
     date: "2026-08-07",
