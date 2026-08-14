@@ -15,6 +15,9 @@
 static const char *const kPocketSurfaceHostId = "ios-dev";
 static const uint32_t kPocketSurfaceHostAbi = 7;
 
+// spec FIXED_DT — the rate a realm runs at when `tickRate` is left unset.
+static const uint32_t kPocketSurfaceDefaultTickRate = 60;
+
 typedef struct {
   __weak UITouch *touch;
   CGPoint point;
@@ -199,15 +202,37 @@ static void PocketSurfaceEffectTrampoline(const char *line, void *context) {
   return [self loadPak:pak] && [self evalBundle:bundle label:name];
 }
 
+- (void)setTickRate:(uint32_t)tickRate {
+  // Applied to the realm immediately: the rate has to be declared before the
+  // bundle evaluates (the mount publishes it as ui.__tickHz, and mount-time
+  // animate() calls convert ms to frames at the rate in force). A rejected
+  // set surfaces through lastError/onError and leaves the old rate pinned.
+  uint32_t rate = tickRate > 0 ? tickRate : kPocketSurfaceDefaultTickRate;
+  int32_t status = 0;
+  if (_coreHandle != NULL) {
+    status = pocket_apple_core_set_tick_rate(_coreHandle, rate);
+  } else if (_handle != NULL) {
+    status = pocket_apple_set_tick_rate(_handle, rate);
+  }
+  if (status != 0) {
+    [self captureError];
+    return;
+  }
+  _tickRate = tickRate;
+}
+
 - (void)start {
   if (_running || (_handle == NULL && _coreHandle == NULL)) {
     return;
   }
   _running = YES;
+  // The realm's rate was declared through setTickRate before the bundle
+  // evaluated; the display link is pinned to the same cadence here.
+  uint32_t rate = _tickRate > 0 ? _tickRate : kPocketSurfaceDefaultTickRate;
   _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(handleDisplayTick:)];
   if (@available(iOS 15.0, *)) {
-    // The core advances in exact 1/60 s steps; cap the link to match.
-    _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
+    // The core advances in exact 1/rate s steps; pin the link to match.
+    _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(rate, rate, rate);
   }
   [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }

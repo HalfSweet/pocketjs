@@ -11,10 +11,13 @@
 //! is `Rc<RefCell<..>>`). Create, drive, and destroy a handle from one thread —
 //! in practice the main thread, alongside CADisplayLink.
 //!
-//! Call order per handle: `create` → `load_pak`* → `eval_bundle` → per tick
-//! `frame` then `render` → `destroy`. `load_pak` and `set_identity` are
-//! rejected after `eval_bundle` because the surface publishes both to the
-//! guest at mount time.
+//! Call order per handle: `create` → `load_pak`* → [`set_identity`] →
+//! [`set_tick_rate`] → `eval_bundle` → per tick `frame` then `render` →
+//! `destroy`. `load_pak`, `set_identity` and `set_tick_rate` are all
+//! rejected after `eval_bundle` because the surface publishes them to the
+//! guest at mount time — and the guest converts its mount-time `animate()`
+//! durations to frames at the rate in force while the bundle evaluates, so
+//! a rate declared later would have silently converted them at 60.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, CString};
@@ -31,6 +34,12 @@ use pocketjs_core::spec;
 
 pub const POCKET_APPLE_ABI_VERSION: u32 = 1;
 pub const POCKET_APPLE_MAX_DAMAGE_REGIONS: usize = DEFAULT_DAMAGE_REGIONS;
+
+/// Accepted `set_tick_rate` range: covers every Apple display cadence from a
+/// throttled 1 Hz up to the 240 Hz headroom above ProMotion's 120 (the
+/// core's own ceiling — `pocketjs_core::MAX_TICK_HZ`).
+pub(crate) const MIN_TICK_HZ: u32 = 1;
+pub(crate) const MAX_TICK_HZ: u32 = pocketjs_core::MAX_TICK_HZ;
 
 const OK: i32 = 0;
 const ERR_BAD_ARGUMENT: i32 = -1;
@@ -173,6 +182,31 @@ pub extern "C" fn pocket_apple_set_identity(
             }
             Err(_) => ERR_BAD_ARGUMENT,
         }
+    })
+}
+
+/// Ticks (and therefore `pocket_apple_frame` calls) per second of guest
+/// virtual time. 1..=240; the guest bundle must be built for the same rate.
+/// Rejected after `eval_bundle`, like `set_identity`: the mount publishes
+/// the rate to the guest as `ui.__tickHz`, and the bundle's mount-time
+/// `animate()` calls convert ms to frames at the rate in force while it
+/// evaluates.
+#[unsafe(no_mangle)]
+pub extern "C" fn pocket_apple_set_tick_rate(handle: *mut PocketApple, hz: u32) -> i32 {
+    with_handle(handle, ERR_PANIC, |state| {
+        if state.mounted {
+            set_last_error("tick rate must be set before eval_bundle");
+            return ERR_BAD_STATE;
+        }
+        if !(MIN_TICK_HZ..=MAX_TICK_HZ).contains(&hz) {
+            set_last_error("tick rate must be 1 through 240 Hz");
+            return ERR_BAD_ARGUMENT;
+        }
+        if !state.surface.set_tick_rate(hz) {
+            set_last_error("tick rate must be set before the realm ticks");
+            return ERR_BAD_STATE;
+        }
+        OK
     })
 }
 
