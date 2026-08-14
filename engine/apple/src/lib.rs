@@ -275,8 +275,9 @@ pub extern "C" fn pocket_apple_eval_bundle(
     })
 }
 
-/// `touches`: up to 8 packed words, `(id & 0xff) << 18 | (y & 0x1ff) << 9 |
-/// (x & 0x1ff)` in logical coordinates. Pass `analog = 0x8080` when centered.
+/// `touches`: up to 8 packed words in logical coordinates. Legacy words carry
+/// x:9, y:9, id:8 with bit 31 clear. Wide words set bit 31 and carry x:10,
+/// y:10, id:8. Pass `analog = 0x8080` when centered.
 #[unsafe(no_mangle)]
 pub extern "C" fn pocket_apple_frame(
     handle: *mut PocketApple,
@@ -295,8 +296,20 @@ pub extern "C" fn pocket_apple_frame(
         } else {
             unsafe { slice::from_raw_parts(touches, touch_count.min(8)) }
         };
+        // Resolve each new contact against the committed core frame before the
+        // guest mutates it, then carry that fact in Ui's contact table until
+        // release. This is frame() argument 4 from the touch contract.
+        let mut touch_hits = [0i32; 8];
+        let hit_count = state
+            .surface
+            .with_ui(|ui| ui.touch_hits(touch_words, &mut touch_hits));
         let analog = if analog == 0 { spec::ANALOG_CENTER } else { analog };
-        if let Err(error) = state.guest.frame_with_touches(buttons, analog, touch_words) {
+        if let Err(error) = state.guest.frame_with_touch_hits(
+            buttons,
+            analog,
+            touch_words,
+            &touch_hits[..hit_count],
+        ) {
             set_last_error(format!("guest frame failed: {error}"));
             return ERR_GUEST;
         }
