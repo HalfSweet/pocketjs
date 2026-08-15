@@ -122,6 +122,11 @@ interface PendingBodyRead {
   readonly reject: (error: unknown) => void;
 }
 
+interface ResponseBodyState {
+  phase: "open" | "ended" | "errored";
+  error?: unknown;
+}
+
 type SlotPhase = "headers" | "response" | "retired";
 
 interface OperationSlot {
@@ -137,6 +142,7 @@ interface OperationSlot {
   uploadPullPending: boolean;
   uploadTerminal: boolean;
   pendingRead?: PendingBodyRead;
+  responseBodyState?: ResponseBodyState;
   responseResolve?: (event: HttpResponseHeadersEvent) => void;
   responseReject?: (error: unknown) => void;
   cancelSent: boolean;
@@ -556,6 +562,8 @@ class NetworkV1HttpAdapter {
   #commandSequence = 0;
   #completionSequence = 0;
   #inServiceTurn = false;
+  #poisoned = false;
+  #poisonError: unknown;
 
   constructor(
     table: NetworkV1BindingTable,
@@ -631,6 +639,7 @@ class NetworkV1HttpAdapter {
     }>[];
     features: readonly string[];
   }> {
+    this.#assertHealthy();
     const protocolId = protocol === undefined
       ? NETWORK_V1_LIMIT_PROTOCOL_ANY
       : protocol === "http"
@@ -652,8 +661,13 @@ class NetworkV1HttpAdapter {
       protocol: protocolId,
       role: roleId,
     });
-    const raw = reflectApply(this.#methods.getLimits, this.#table, [query]);
-    const snapshot = snapshotNetworkV1Limits(query, raw, this.#handshake);
+    let snapshot: ReturnType<typeof snapshotNetworkV1Limits>;
+    try {
+      const raw = reflectApply(this.#methods.getLimits, this.#table, [query]);
+      snapshot = snapshotNetworkV1Limits(query, raw, this.#handshake);
+    } catch (error) {
+      throw this.#poison(error);
+    }
     const features: string[] = [];
     for (const id of snapshot.featureIds) {
       features.push(
@@ -674,8 +688,7 @@ class NetworkV1HttpAdapter {
         operation: "network.dispatch",
         protocol: "http",
       });
-      this.#failAll(error);
-      throw error;
+      throw this.#poison(error);
     }
     this.#commandSequence += 1;
     return this.#commandSequence;
@@ -719,6 +732,7 @@ class NetworkV1HttpAdapter {
       slot.uploadPullPending = false;
       slot.uploadTerminal = true;
       slot.pendingRead = undefined;
+      slot.responseBodyState = undefined;
       slot.responseResolve = undefined;
       slot.responseReject = undefined;
       slot.cancelSent = false;
@@ -753,6 +767,7 @@ class NetworkV1HttpAdapter {
     command: HttpRequestStartCommand,
     requestBody: HttpBodyProducer | null,
   ): HttpClientBindingOperation {
+    this.#assertHealthy();
     if (command.opcode !== NetworkV1CommandOpcode.HttpRequestStart) {
       throw abiFault("high-level start used the wrong opcode");
     }
@@ -790,14 +805,15 @@ class NetworkV1HttpAdapter {
             }),
           }),
     });
+    let refused: NetworkV1ErrorMetadata | undefined;
     try {
-      const refused = this.#dispatch(formalCommand);
-      if (refused) {
-        const error = highErrorEvent(refused, command.operationId);
-        this.#retire(slot);
-        throw error;
-      }
+      refused = this.#dispatch(formalCommand);
     } catch (error) {
+      this.#retire(slot);
+      throw this.#poison(error);
+    }
+    if (refused) {
+      const error = highErrorEvent(refused, command.operationId);
       this.#retire(slot);
       throw error;
     }
@@ -821,6 +837,7 @@ class NetworkV1HttpAdapter {
   }
 
   #cancel(slot: OperationSlot, command: OperationCancelCommand): void {
+    this.#assertHealthy();
     if (slot.phase === "retired" || slot.cancelSent) return;
     if (command.opcode !== NetworkV1CommandOpcode.OperationCancel ||
       command.operationId !== slot.highOperationId) {
@@ -831,7 +848,12 @@ class NetworkV1HttpAdapter {
       opcode: NetworkV1CommandOpcode.OperationCancel,
       identity: this.#identity(slot, this.#currentBody(slot)),
     });
-    const refused = this.#dispatch(formal);
+    let refused: NetworkV1ErrorMetadata | undefined;
+    try {
+      refused = this.#dispatch(formal);
+    } catch (error) {
+      throw this.#poison(error);
+    }
     if (refused) this.#failSlot(slot, publicError(refused));
   }
 
@@ -840,10 +862,15 @@ class NetworkV1HttpAdapter {
   }
 
   #serviceTurn(request: NetworkV1ServiceTurnRequest): NetworkV1ServiceTurnResult {
-    if (this.#inServiceTurn) throw abiFault("service dispatcher is reentrant");
-    assertNetworkV1ServiceTurnRequest(request);
-    if (request.runtimeGeneration !== this.#runtimeGeneration) {
-      throw abiFault("service turn uses a stale runtime generation");
+    this.#assertHealthy();
+    if (this.#inServiceTurn) throw this.#poison(abiFault("service dispatcher is reentrant"));
+    try {
+      assertNetworkV1ServiceTurnRequest(request);
+      if (request.runtimeGeneration !== this.#runtimeGeneration) {
+        throw abiFault("service turn uses a stale runtime generation");
+      }
+    } catch (error) {
+      throw this.#poison(error);
     }
     this.#inServiceTurn = true;
     let eventsDelivered = 0;
@@ -913,8 +940,7 @@ class NetworkV1HttpAdapter {
       assertNetworkV1ServiceTurnResult(request, result);
       return result;
     } catch (error) {
-      this.#failAll(error);
-      throw error;
+      throw this.#poison(error);
     } finally {
       this.#inServiceTurn = false;
     }
@@ -933,21 +959,35 @@ class NetworkV1HttpAdapter {
       readonly payloadBytesDelivered?: unknown;
     };
     const status = candidate.status;
-    const payload = candidate.payloadBytesDelivered;
     let result: NetworkV1CompletionPollResult;
+    let selectedCompletion: NetworkV1Completion | undefined;
     if (status === NetworkV1CompletionPollStatus.Item) {
-      result = objectFreeze({
-        status,
-        completion: snapshotCompletion(candidate.completion),
-        payloadBytesDelivered: integer(
-          payload,
-          0,
-          maxPayloadBytes,
-          "completionPoll.payloadBytesDelivered",
-        ),
-      });
+      selectedCompletion = snapshotCompletion(candidate.completion);
+      try {
+        const payload = candidate.payloadBytesDelivered;
+        result = objectFreeze({
+          status,
+          completion: selectedCompletion,
+          payloadBytesDelivered: integer(
+            payload,
+            0,
+            maxPayloadBytes,
+            "completionPoll.payloadBytesDelivered",
+          ),
+        });
+        assertNetworkV1CompletionPollResult(pollRequest, result);
+      } catch (error) {
+        try {
+          this.#cleanupSelectedLease(selectedCompletion);
+        } catch (releaseError) {
+          throw releaseError;
+        }
+        throw error;
+      }
+      return result;
     } else if (status === NetworkV1CompletionPollStatus.Drained ||
       status === NetworkV1CompletionPollStatus.BudgetExhausted) {
+      const payload = candidate.payloadBytesDelivered;
       if (payload !== 0) throw abiFault("non-item completion poll consumed payload bytes");
       result = objectFreeze({ status, payloadBytesDelivered: 0 });
     } else {
@@ -1068,7 +1108,13 @@ class NetworkV1HttpAdapter {
           identity: this.#identity(slot, slot.requestBody),
           error: localErrorMetadata(NetworkV1ErrorCode.InvalidState, "http.fetch.upload"),
         });
-        const refused = this.#dispatch(command);
+        let refused: NetworkV1ErrorMetadata | undefined;
+        try {
+          refused = this.#dispatch(command);
+        } catch (error) {
+          this.#poison(error);
+          return;
+        }
         if (refused) this.#failSlot(slot, publicError(refused));
         return;
       }
@@ -1081,7 +1127,13 @@ class NetworkV1HttpAdapter {
         }),
       });
     }
-    const refused = this.#dispatch(command);
+    let refused: NetworkV1ErrorMetadata | undefined;
+    try {
+      refused = this.#dispatch(command);
+    } catch (error) {
+      this.#poison(error);
+      return;
+    }
     if (refused) this.#failSlot(slot, publicError(refused));
   }
 
@@ -1128,6 +1180,10 @@ class NetworkV1HttpAdapter {
     slot.phase = "response";
     slot.responseBody = identity.body;
     const hasBody = !networkV1HandleIsAbsent(identity.body);
+    const responseBodyState: ResponseBodyState | undefined = hasBody
+      ? { phase: "open" }
+      : undefined;
+    slot.responseBodyState = responseBodyState;
     const event: HttpResponseHeadersEvent = objectFreeze({
       eventCode: NetworkV1EventCode.HttpResponseHeaders,
       operationId: slot.highOperationId,
@@ -1136,7 +1192,9 @@ class NetworkV1HttpAdapter {
       headers: metadata.headers,
       url: metadata.url,
       redirected: metadata.redirected,
-      ...(hasBody ? { body: this.#responseBodyStream(slot) } : {}),
+      ...(responseBodyState === undefined
+        ? {}
+        : { body: this.#responseBodyStream(slot, responseBodyState) }),
       bufferedBodyBytes: metadata.bufferedBodyBytes,
     });
     const resolve = slot.responseResolve;
@@ -1149,13 +1207,17 @@ class NetworkV1HttpAdapter {
 
   #onRequestError(slot: OperationSlot, metadata: NetworkV1ErrorMetadata): void {
     const event = highErrorEvent(metadata, slot.highOperationId);
+    const error = publicError(metadata);
     this.#stopUpload(slot, event);
     if (slot.phase === "headers") slot.responseReject?.(event);
-    else slot.pendingRead?.reject(publicError(metadata));
+    else {
+      this.#failResponseBody(slot, error);
+      slot.pendingRead?.reject(error);
+    }
     this.#retire(slot);
   }
 
-  #responseBodyStream(slot: OperationSlot): BodyStream {
+  #responseBodyStream(slot: OperationSlot, state: ResponseBodyState): BodyStream {
     const readInto = (destination: Uint8Array): Promise<{ bytes: number; done: boolean }> => {
       let capacity: number;
       try {
@@ -1164,10 +1226,16 @@ class NetworkV1HttpAdapter {
       } catch (error) {
         return PromiseIntrinsic.reject(error);
       }
-      if (slot.phase === "retired") {
+      if (state.phase === "errored") return PromiseIntrinsic.reject(state.error);
+      if (state.phase === "ended") {
         return PromiseIntrinsic.resolve(objectFreeze({ bytes: 0, done: true }));
       }
-      if (slot.phase !== "response" || slot.pendingRead) {
+      try {
+        this.#assertHealthy();
+      } catch (error) {
+        return PromiseIntrinsic.reject(error);
+      }
+      if (slot.phase !== "response" || slot.responseBodyState !== state || slot.pendingRead) {
         return PromiseIntrinsic.reject(new NetworkError("HTTP response body already has a pending read", {
           category: "runtime",
           code: "busy",
@@ -1177,11 +1245,17 @@ class NetworkV1HttpAdapter {
       }
       return new PromiseIntrinsic((resolve, reject) => {
         slot.pendingRead = { destination, capacity, resolve, reject };
-        const refused = this.#dispatch(objectFreeze({
-          opcode: NetworkV1CommandOpcode.BodyPull,
-          identity: this.#identity(slot, slot.responseBody),
-          maxBytes: Math.min(capacity, HTTP_BODY_CHUNK_BYTES),
-        }));
+        let refused: NetworkV1ErrorMetadata | undefined;
+        try {
+          refused = this.#dispatch(objectFreeze({
+            opcode: NetworkV1CommandOpcode.BodyPull,
+            identity: this.#identity(slot, slot.responseBody),
+            maxBytes: Math.min(capacity, HTTP_BODY_CHUNK_BYTES),
+          }));
+        } catch (error) {
+          reject(this.#poison(error));
+          return;
+        }
         if (refused) {
           slot.pendingRead = undefined;
           reject(publicError(refused));
@@ -1189,16 +1263,41 @@ class NetworkV1HttpAdapter {
       });
     };
     const cancel = (_reason?: unknown): Promise<void> => {
-      if (slot.phase !== "response") return PromiseIntrinsic.resolve();
+      if (state.phase === "errored") return PromiseIntrinsic.reject(state.error);
+      if (state.phase === "ended") return PromiseIntrinsic.resolve();
+      try {
+        this.#assertHealthy();
+      } catch (error) {
+        return PromiseIntrinsic.reject(error);
+      }
+      if (slot.phase !== "response" || slot.responseBodyState !== state) {
+        return PromiseIntrinsic.reject(this.#poison(
+          abiFault("response body stream lost its active operation"),
+        ));
+      }
       const pending = slot.pendingRead;
+      let refused: NetworkV1ErrorMetadata | undefined;
+      try {
+        refused = this.#dispatch(objectFreeze({
+          opcode: NetworkV1CommandOpcode.BodyCancel,
+          identity: this.#identity(slot, slot.responseBody),
+        }));
+      } catch (error) {
+        return PromiseIntrinsic.reject(this.#poison(error));
+      }
+      if (refused) {
+        const error = publicError(refused);
+        slot.pendingRead = undefined;
+        pending?.reject(error);
+        this.#failResponseBody(slot, error);
+        this.#retire(slot);
+        return PromiseIntrinsic.reject(error);
+      }
       slot.pendingRead = undefined;
       pending?.resolve(objectFreeze({ bytes: 0, done: true }));
-      const refused = this.#dispatch(objectFreeze({
-        opcode: NetworkV1CommandOpcode.BodyCancel,
-        identity: this.#identity(slot, slot.responseBody),
-      }));
+      state.phase = "ended";
       this.#retire(slot);
-      return refused ? PromiseIntrinsic.reject(publicError(refused)) : PromiseIntrinsic.resolve();
+      return PromiseIntrinsic.resolve();
     };
     const stream: BodyStream = {
       readInto,
@@ -1256,6 +1355,7 @@ class NetworkV1HttpAdapter {
     }
     const pending = slot.pendingRead;
     slot.pendingRead = undefined;
+    if (slot.responseBodyState) slot.responseBodyState.phase = "ended";
     pending?.resolve(objectFreeze({ bytes: 0, done: true }));
     this.#retire(slot);
   }
@@ -1270,7 +1370,9 @@ class NetworkV1HttpAdapter {
     }
     const pending = slot.pendingRead;
     slot.pendingRead = undefined;
-    pending?.reject(publicError(metadata));
+    const error = publicError(metadata);
+    this.#failResponseBody(slot, error);
+    pending?.reject(error);
     this.#retire(slot);
   }
 
@@ -1297,13 +1399,15 @@ class NetworkV1HttpAdapter {
       byteLength: completion.payload.byteLength,
     });
     const takeResult = reflectApply(this.#methods.leaseTake, this.#table, [take]) as unknown;
-    const takenLength = this.#snapshotLeaseTakeResult(takeResult);
-    if (takenLength !== completion.payload.byteLength) {
-      throw abiFault("lease take length disagrees with its completion");
-    }
+    const takeCompleted = this.#leaseTakeCompleted(takeResult);
+    let takenLength = 0;
     let offset = 0;
     let failure: unknown;
     try {
+      takenLength = this.#snapshotLeaseTakeResult(takeResult);
+      if (takenLength !== completion.payload.byteLength) {
+        throw abiFault("lease take length disagrees with its completion");
+      }
       while (offset < takenLength) {
         const window = destination.subarray(offset, takenLength);
         const read: NetworkV1BufferLeaseReadIntoCommand = objectFreeze({
@@ -1320,12 +1424,19 @@ class NetworkV1HttpAdapter {
     } catch (error) {
       failure = error;
     }
-    try {
-      this.#releaseTakenLease(completion.identity, completion.payload.lease);
-    } catch (releaseError) {
-      if (failure === undefined) failure = releaseError;
+    if (takeCompleted) {
+      try {
+        this.#releaseTakenLease(completion.identity, completion.payload.lease);
+      } catch (releaseError) {
+        failure = releaseError;
+      }
     }
     if (failure !== undefined) throw failure;
+  }
+
+  #leaseTakeCompleted(value: unknown): boolean {
+    return typeof value === "object" && value !== null &&
+      (value as { readonly status?: unknown }).status === NetworkV1DispatchStatus.Completed;
   }
 
   #snapshotLeaseTakeResult(value: unknown): number {
@@ -1375,15 +1486,36 @@ class NetworkV1HttpAdapter {
       byteLength: completion.payload.byteLength,
     });
     const raw = reflectApply(this.#methods.leaseTake, this.#table, [take]) as unknown;
-    const length = this.#snapshotLeaseTakeResult(raw);
-    if (length !== completion.payload.byteLength) {
-      throw abiFault("stale lease take length is inconsistent");
+    const takeCompleted = this.#leaseTakeCompleted(raw);
+    let failure: unknown;
+    try {
+      const length = this.#snapshotLeaseTakeResult(raw);
+      if (length !== completion.payload.byteLength) {
+        throw abiFault("stale lease take length is inconsistent");
+      }
+    } catch (error) {
+      failure = error;
     }
-    this.#releaseTakenLease(completion.identity, completion.payload.lease);
+    if (takeCompleted) {
+      try {
+        this.#releaseTakenLease(completion.identity, completion.payload.lease);
+      } catch (releaseError) {
+        failure = releaseError;
+      }
+    }
+    if (failure !== undefined) throw failure;
+  }
+
+  #failResponseBody(slot: OperationSlot, error: unknown): void {
+    const state = slot.responseBodyState;
+    if (!state || state.phase !== "open") return;
+    state.phase = "errored";
+    state.error = error;
   }
 
   #failSlot(slot: OperationSlot, error: unknown): void {
     this.#stopUpload(slot, error);
+    this.#failResponseBody(slot, error);
     slot.responseReject?.(error);
     slot.pendingRead?.reject(error);
     this.#retire(slot);
@@ -1393,6 +1525,19 @@ class NetworkV1HttpAdapter {
     for (const slot of this.#slots) {
       if (slot.phase !== "retired") this.#failSlot(slot, error);
     }
+  }
+
+  #assertHealthy(): void {
+    if (this.#poisoned) throw this.#poisonError;
+  }
+
+  #poison(error: unknown): unknown {
+    if (!this.#poisoned) {
+      this.#poisoned = true;
+      this.#poisonError = error;
+      this.#failAll(error);
+    }
+    return this.#poisonError;
   }
 }
 
@@ -1411,7 +1556,7 @@ function prepareRequestMetadata(
   }
   const method = byteString(command.method, 64, "request.method");
   if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(method) ||
-    method === "CONNECT" || method === "TRACE") {
+    method === "CONNECT" || method === "TRACE" || method === "TRACK") {
     throw abiFault("request method is invalid");
   }
   const headers = snapshotHeaders(command.headers, "request.headers");
