@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   finalizeBuildPlan,
   type ResolvedBuildPlanContent,
@@ -327,11 +327,14 @@ describe("network factory artifact", () => {
   test("rejects application imports of every compiler-only internal form", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-private-import-"));
     const privateBindingPath = join(ROOT, "framework/src/net/http-binding.ts");
+    const privateFormalPath = join(ROOT, "framework/src/net/network-v1-binding.ts");
     const privateLimitsPath = join(ROOT, "framework/src/net/network-limits.ts");
     const linkPath = join(directory, "binding-link.ts");
+    const formalLinkPath = join(directory, "formal-link.ts");
     const limitsLinkPath = join(directory, "limits-link.ts");
     try {
       await symlink(privateBindingPath, linkPath);
+      await symlink(privateFormalPath, formalLinkPath);
       await symlink(privateLimitsPath, limitsLinkPath);
       const context = networkContext();
       const javascriptAttack = join(directory, "derived-attack.js");
@@ -344,22 +347,35 @@ describe("network factory artifact", () => {
       ];
       const unicodeEscaped = (name: string): string =>
         name.replace("p", "\\u0070");
+      const privatePaths = [
+        privateBindingPath,
+        privateFormalPath,
+        privateLimitsPath,
+      ];
+      const directFileAttacks = privatePaths.flatMap((path) => {
+        const fileUrl = pathToFileURL(path).href;
+        return [
+          `import ${JSON.stringify(path)};`,
+          `void import(${JSON.stringify(path)});`,
+          `require(${JSON.stringify(path)});`,
+          `import ${JSON.stringify(`${path}?audit=1#x`)};`,
+          `void import(${JSON.stringify(`${path}#audit`)});`,
+          `require(${JSON.stringify(`${path}?audit`)});`,
+          `import ${JSON.stringify(fileUrl)};`,
+          `void import(${JSON.stringify(`${fileUrl}?audit=1#x`)});`,
+          `require(${JSON.stringify(`${fileUrl}#audit`)});`,
+        ];
+      });
       const attacks = [
         `import ${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)};`,
         `import "pocketjs:internal/future-version";`,
         `void import(${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)});`,
         `require(${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)});`,
-        `import ${JSON.stringify(privateBindingPath)};`,
-        `void import(${JSON.stringify(privateBindingPath)});`,
-        `require(${JSON.stringify(privateBindingPath)});`,
+        ...directFileAttacks,
         `import ${JSON.stringify(linkPath)};`,
-        `import "./binding-link.ts";`,
-        `import ${JSON.stringify(privateLimitsPath)};`,
-        `void import(${JSON.stringify(privateLimitsPath)});`,
-        `require(${JSON.stringify(privateLimitsPath)});`,
-        `import "./limits-link.ts";`,
-        `void import("./limits-link.ts");`,
-        `require("./limits-link.ts");`,
+        `import "./binding-link.ts?audit";`,
+        `void import("./formal-link.ts#audit");`,
+        `require("./limits-link.ts?audit=1#x");`,
         `void ${NETWORK_BINDING_RESERVED_IDENTIFIER};`,
         `void arguments[0];`,
         `import "./derived-attack.js";`,
@@ -392,18 +408,26 @@ describe("network factory artifact", () => {
 
   test("rejects private limits installers in non-network artifacts too", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-limits-private-"));
+    const privateBindingPath = join(ROOT, "framework/src/net/http-binding.ts");
+    const privateFormalPath = join(ROOT, "framework/src/net/network-v1-binding.ts");
     const privateLimitsPath = join(ROOT, "framework/src/net/network-limits.ts");
     const linkPath = join(directory, "limits-link.ts");
     try {
       await symlink(privateLimitsPath, linkPath);
-      const attacks = [
-        `import ${JSON.stringify(privateLimitsPath)};`,
-        `void import(${JSON.stringify(privateLimitsPath)});`,
-        `require(${JSON.stringify(privateLimitsPath)});`,
-        `import "./limits-link.ts";`,
-        `void import("./limits-link.ts");`,
-        `require("./limits-link.ts");`,
-      ];
+      const attacks = [privateBindingPath, privateFormalPath, privateLimitsPath]
+        .flatMap((path) => {
+          const fileUrl = pathToFileURL(path).href;
+          return [
+            `import ${JSON.stringify(`${path}?plain`)};`,
+            `void import(${JSON.stringify(`${fileUrl}#plain`)});`,
+            `require(${JSON.stringify(fileUrl)});`,
+          ];
+        });
+      attacks.push(
+        `import "./limits-link.ts?plain";`,
+        `void import("./limits-link.ts#plain");`,
+        `require("./limits-link.ts?plain=1#x");`,
+      );
       for (let index = 0; index < attacks.length; index += 1) {
         const entry = join(directory, `plain-attack-${index}.ts`);
         await Bun.write(entry, attacks[index]!);
