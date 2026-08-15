@@ -106,7 +106,11 @@ The descriptor deliberately reports the following gaps:
 
 Until these blockers have measured target-specific resource envelopes and the
 one millisecond ESP-TLS wait is either admitted or removed, this provider must
-not enter a formal Build Plan and must not advertise `network.http.client.tls`.
+not enter a production or admitted-target Build Plan and must not advertise
+`network.http.client.tls`. **An exact test-only TLS smoke plan may select this
+provider solely to gather pre-admission hardware evidence.** That plan does not
+add a stock target, open the compiler's public network gate, or change the
+descriptor's `advertises_public_capability=false` result.
 
 ## Verification
 
