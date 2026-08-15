@@ -278,6 +278,33 @@ describe("network v1 mount handshake", () => {
     });
   });
 
+  test("uses typed-array intrinsic slots without invoking a hostile iterator", () => {
+    let byteLengthReads = 0;
+    let iteratorCalls = 0;
+    const planHash = new Uint8Array(32);
+    Object.defineProperties(planHash, {
+      byteLength: { get: () => { byteLengthReads += 1; return 1; } },
+      [Symbol.iterator]: {
+        value: () => { iteratorCalls += 1; throw new Error("iterator must not run"); },
+      },
+    });
+    const actual = handshake({ planHash });
+    expect(() => assertNetworkV1Handshake(handshake(), actual)).not.toThrow();
+    expect(byteLengthReads).toBe(0);
+    expect(iteratorCalls).toBe(0);
+  });
+
+  test("bounds handshake feature arrays before copying them", () => {
+    const tooMany = Array.from(
+      { length: NETWORK_V1_FEATURE_IDS.length + 1 },
+      () => NetworkV1FeatureId.HttpClient,
+    );
+    expect(() => assertNetworkV1Handshake(
+      handshake(),
+      handshake({ featureIds: tooMany }),
+    )).toThrow("known feature count");
+  });
+
   test("requires a frozen accessor-free binding table before mount", () => {
     const expected = handshake();
     const actualHandshake = Object.freeze({
@@ -611,6 +638,14 @@ describe("network v1 BufferLease and body flow", () => {
       NetworkV1BorrowedInputKind.CustomCa,
       8,
       3,
+    )).toThrow("does not match normalized metadata");
+    const shadowed = new Uint8Array(4);
+    Object.defineProperty(shadowed, "byteLength", { get: () => 1 });
+    expect(() => assertNetworkV1BorrowedInput(
+      { kind: NetworkV1BorrowedInputKind.BodyChunk, bytes: shadowed },
+      NetworkV1BorrowedInputKind.BodyChunk,
+      4,
+      1,
     )).toThrow("does not match normalized metadata");
   });
 
