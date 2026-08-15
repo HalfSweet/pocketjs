@@ -39,6 +39,7 @@ import {
   canonicalizeHttpUrl,
   type CanonicalHttpUrl,
 } from "./http-url.ts";
+import { decodeUtf8 } from "./utf8.ts";
 import type {
   HttpBindingHeader,
   HttpClientPrivateBinding,
@@ -1333,7 +1334,18 @@ async function consumeText(
   body: BodyController | null,
   operation: string,
 ): Promise<string> {
-  return new TextDecoder().decode(await consumeBytes(body, operation));
+  const decoded = decodeUtf8(
+    await consumeBytes(body, operation),
+    HTTP_BODY_HELPER_BYTES,
+  );
+  if (decoded === null) {
+    throw runtimeError(
+      "resource_limit",
+      operation,
+      `Buffered HTTP body exceeds ${HTTP_BODY_HELPER_BYTES} bytes`,
+    );
+  }
+  return decoded;
 }
 
 async function consumeJson(

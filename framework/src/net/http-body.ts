@@ -1,4 +1,5 @@
 import { NetworkError } from "./index.ts";
+import { encodeUtf8 } from "./utf8.ts";
 
 /**
  * SDK-side ceilings used before a Host-admitted limit table is attached.
@@ -53,7 +54,6 @@ const mathMin = Math.min;
 const mathMax = Math.max;
 const numberIsSafeInteger = Number.isSafeInteger;
 const objectFreeze = Object.freeze;
-const stringCharCodeAt = String.prototype.charCodeAt;
 const asyncIteratorSymbol = Symbol.asyncIterator;
 const typedArrayPrototype = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype) as object;
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(
@@ -97,8 +97,6 @@ const setDelete = SetIntrinsic.prototype.delete;
 const setClear = SetIntrinsic.prototype.clear;
 const setForEach = SetIntrinsic.prototype.forEach;
 const setSize = Object.getOwnPropertyDescriptor(SetIntrinsic.prototype, "size")!.get!;
-const textEncoder = new TextEncoder();
-const textEncoderEncode = TextEncoder.prototype.encode;
 const promiseResolve = PromiseIntrinsic.resolve;
 const promiseThen = PromiseIntrinsic.prototype.then;
 const promiseAllSettled = PromiseIntrinsic.allSettled;
@@ -1339,29 +1337,6 @@ function assertBufferedBodySize(byteLength: number, maximumBytes: number): void 
   }
 }
 
-function assertEncodedStringSize(value: string, maximumBytes: number): void {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index++) {
-    const code = reflectApply(stringCharCodeAt, value, [index]) as number;
-    if (code <= 0x7f) bytes += 1;
-    else if (code <= 0x7ff) bytes += 2;
-    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-      const low = reflectApply(stringCharCodeAt, value, [index + 1]) as number;
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        bytes += 4;
-        index++;
-      } else {
-        bytes += 3;
-      }
-    } else {
-      bytes += 3;
-    }
-    if (bytes > maximumBytes) {
-      assertBufferedBodySize(bytes, maximumBytes);
-    }
-  }
-}
-
 interface BodyStreamMethods {
   readonly readInto: BodyStream["readInto"];
   readonly cancel: BodyStream["cancel"];
@@ -1398,12 +1373,16 @@ export function extractBody(
 ): ExtractedBody {
   const limits = normalizedBodyLimits(requestedLimits);
   if (typeof input === "string") {
-    assertEncodedStringSize(input, limits.bufferedBytes);
+    const bytes = encodeUtf8(input, limits.bufferedBytes);
+    if (bytes === null) {
+      throw bodyError(
+        "resource_limit",
+        "http.body",
+        `Buffered HTTP body exceeds ${limits.bufferedBytes} bytes`,
+      );
+    }
     return {
-      controller: bufferedBodySource(
-        reflectApply(textEncoderEncode, textEncoder, [input]),
-        limits,
-      ),
+      controller: bufferedBodySource(bytes, limits),
       contentType: "text/plain;charset=UTF-8",
     };
   }
