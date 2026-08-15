@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import * as net from "../framework/src/net/index.ts";
 import * as http from "../framework/src/net/http.ts";
@@ -7,7 +11,7 @@ import * as mqtt from "../framework/src/net/mqtt.ts";
 import * as tcp from "../framework/src/net/tcp.ts";
 import * as udp from "../framework/src/net/udp.ts";
 import { npmExports, SUBPATHS } from "../framework/compiler/subpaths.ts";
-import { packagePath, transformFile } from "../framework/compiler/jsx-plugin.ts";
+import { jsxPlugin, packagePath, transformFile } from "../framework/compiler/jsx-plugin.ts";
 
 describe("net package namespace", () => {
   test("the root exports support values without the NET v1 value API", () => {
@@ -179,6 +183,28 @@ describe("network surface demand gate", () => {
     `, { "network.udp": true })).rejects.toThrow("staged surface");
   });
 
+  test("constant dynamic imports and CommonJS require use the same gate", async () => {
+    const sources = [
+      "void import(`@pocketjs/framework/net/http`);",
+      'void import("@pocketjs/framework/net/" + "http");',
+      'const target = "@pocketjs/framework/net/http"; void import(target);',
+      'require("@pocketjs/framework/net/http");',
+      'const target = "@pocketjs/framework/net/" + "http"; require(target);',
+    ];
+    for (const source of sources) {
+      await expect(transform(source)).rejects.toThrow("network.http.client");
+    }
+  });
+
+  test("unresolved dynamic module specifiers fail closed", async () => {
+    await expect(transform("declare const target: string; void import(target);"))
+      .rejects.toThrow("compile-time strings");
+    await expect(transform("declare const target: string; require(target);"))
+      .rejects.toThrow("compile-time strings");
+    await expect(transform('const target = "./local.ts"; void import(target);'))
+      .resolves.toBeDefined();
+  });
+
   test("role admission runs before staged surface readiness", async () => {
     await expect(transform(`
       import { fetch } from "@pocketjs/framework/net/http";
@@ -192,5 +218,42 @@ describe("network surface demand gate", () => {
       "network.http.server": true,
       "network.websocket.server": true,
     })).rejects.toThrow("network.websocket.server.upgrade");
+  });
+
+  test("resolver rejects direct and aliased public protocol source paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-public-path-"));
+    const protocolPaths = ["http", "websocket", "mqtt", "tcp", "udp"].map((name) =>
+      new URL(`../framework/src/net/${name}.ts`, import.meta.url).pathname
+    );
+    try {
+      const link = join(directory, "protocol-link.ts");
+      await symlink(protocolPaths[0]!, link);
+      const attacks = [
+        ...protocolPaths,
+        link,
+        `${link}?audit=1#network`,
+        `${pathToFileURL(link).href}#network`,
+      ];
+      for (const [index, target] of attacks.entries()) {
+        const entry = join(directory, `attack-${index}.ts`);
+        await writeFile(entry, `import * as protocol from ${JSON.stringify(target)}; void protocol;`);
+        let failure: unknown;
+        try {
+          await Bun.build({
+            entrypoints: [entry],
+            format: "iife",
+            target: "browser",
+            plugins: [jsxPlugin("solid", { entry, features: {} })],
+          });
+        } catch (error) {
+          failure = error;
+        }
+        const messages = (failure as { errors?: readonly { message: string }[] } | undefined)
+          ?.errors?.map((error) => error.message).join("\n") ?? "";
+        expect(messages).toContain("canonical @pocketjs/framework/net/");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
