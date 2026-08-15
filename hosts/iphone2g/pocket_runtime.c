@@ -17,6 +17,13 @@
 #define POCKETJS_ANALOG_CENTER 32896
 #define POCKETJS_ACTION_NAME_CAPACITY 64
 
+#if defined(POCKET_RUNTIME_REPORT_BOOT_STAGE)
+extern void pocket_host_boot_stage(int stage);
+#define REPORT_BOOT_STAGE(stage) pocket_host_boot_stage(stage)
+#else
+#define REPORT_BOOT_STAGE(stage) ((void)(stage))
+#endif
+
 typedef enum {
   HostCreateNode,
   HostDestroyNode,
@@ -535,11 +542,14 @@ int pocket_runtime_boot(
 ) {
   clear_error();
   pocket_runtime_shutdown();
+  REPORT_BOOT_STAGE(1);
   reported_action_name[0] = '\0';
   reported_action_value = 0;
   reported_action_sequence = 0;
   ui_init(1);
+  REPORT_BOOT_STAGE(2);
   ui_set_viewport((float)width, (float)height);
+  REPORT_BOOT_STAGE(3);
 
   runtime = JS_NewRuntime();
   if (runtime == 0) {
@@ -547,6 +557,7 @@ int pocket_runtime_boot(
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(4);
   JS_SetMaxStackSize(runtime, 256 * 1024);
   context = JS_NewContext(runtime);
   if (context == 0) {
@@ -554,12 +565,14 @@ int pocket_runtime_boot(
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(5);
   global = JS_GetGlobalObject(context);
   if (!install_host(width, height)) {
     take_exception(context);
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(6);
 
   JSValue pack_value = JS_NewArrayBuffer(
     context,
@@ -581,6 +594,7 @@ int pocket_runtime_boot(
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(7);
 
   JSValue result = JS_Eval(
     context,
@@ -594,6 +608,7 @@ int pocket_runtime_boot(
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(8);
   JS_FreeValue(context, result);
   frame_function = JS_GetPropertyStr(context, global, "frame");
   if (JS_IsException(frame_function) || !JS_IsFunction(context, frame_function)) {
@@ -602,14 +617,23 @@ int pocket_runtime_boot(
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(9);
   if (!drain_jobs()) {
     pocket_runtime_shutdown();
     return 0;
   }
+  REPORT_BOOT_STAGE(10);
   return 1;
 }
 
-int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit) {
+int pocket_runtime_frame_ticks(
+  int touch_down,
+  int touch_x,
+  int touch_y,
+  int touch_hit,
+  unsigned int tick_count
+) {
+  unsigned int tick;
   if (runtime == 0 || context == 0 || runtime_failed) return 0;
   JSValue touch_array = JS_NewArray(context);
   JSValue hit_array = JS_NewArray(context);
@@ -621,9 +645,11 @@ int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit
     return 0;
   }
   if (touch_down) {
-    uint32_t x = (uint32_t)(touch_x < 0 ? 0 : touch_x > 511 ? 511 : touch_x);
-    uint32_t y = (uint32_t)(touch_y < 0 ? 0 : touch_y > 511 ? 511 : touch_y);
-    uint32_t packed = (y << 9) | x;
+    uint32_t x = (uint32_t)(touch_x < 0 ? 0 : touch_x > 1023 ? 1023 : touch_x);
+    uint32_t y = (uint32_t)(touch_y < 0 ? 0 : touch_y > 1023 ? 1023 : touch_y);
+    uint32_t packed = x > 511 || y > 511
+      ? 0x80000000U | (y << 10) | x
+      : (y << 9) | x;
     if (JS_SetPropertyUint32(
           context,
           touch_array,
@@ -662,9 +688,13 @@ int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit
     runtime_failed = 1;
     return 0;
   }
-  ui_tick();
-  ui_tick();
+  for (tick = 0; tick < tick_count; ++tick) ui_tick();
   return 1;
+}
+
+int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit) {
+  /* The original iPhone host presents at 30 Hz and advances two 60 Hz ticks. */
+  return pocket_runtime_frame_ticks(touch_down, touch_x, touch_y, touch_hit, 2);
 }
 
 int pocket_runtime_hit_test(float x, float y) {
