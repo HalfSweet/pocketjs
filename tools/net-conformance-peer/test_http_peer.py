@@ -107,6 +107,97 @@ class PeerTest(unittest.TestCase):
         self.assertEqual(echo.read(), payload)
         connection.close()
 
+    def test_chunked_echo_and_keep_alive(self) -> None:
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=2)
+        payload_chunks = (b"binary:", b"\x00", b"\xff", b"-chunked")
+        connection.request(
+            "POST",
+            "/echo",
+            body=iter(payload_chunks),
+            encode_chunked=True,
+        )
+        echo = connection.getresponse()
+        connection_id = echo.getheader("X-PocketJS-Connection")
+        self.assertEqual(echo.status, 200)
+        self.assertEqual(echo.read(), b"binary:\x00\xff-chunked")
+
+        connection.request("GET", "/health", headers={"Connection": "close"})
+        health = connection.getresponse()
+        self.assertEqual(health.status, 200)
+        self.assertEqual(health.getheader("X-PocketJS-Connection"), connection_id)
+        self.assertIn(b'"status":"ok"', health.read())
+        connection.close()
+
+    def test_invalid_chunked_uploads_are_rejected(self) -> None:
+        cases = {
+            "transfer-encoding-and-content-length": (
+                b"Transfer-Encoding: chunked\r\nContent-Length: 1\r\n",
+                b"0\r\n\r\n",
+                400,
+            ),
+            "duplicate-transfer-encoding": (
+                b"Transfer-Encoding: chunked\r\n"
+                b"Transfer-Encoding: chunked\r\n",
+                b"0\r\n\r\n",
+                400,
+            ),
+            "combined-transfer-coding": (
+                b"Transfer-Encoding: gzip, chunked\r\n",
+                b"0\r\n\r\n",
+                400,
+            ),
+            "http-1.0": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"0\r\n\r\n",
+                400,
+            ),
+            "chunk-extension": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"1;extension=yes\r\na\r\n0\r\n\r\n",
+                400,
+            ),
+            "invalid-chunk-size": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"Z\r\ninvalid\r\n",
+                400,
+            ),
+            "declared-trailer": (
+                b"Transfer-Encoding: chunked\r\nTrailer: X-Test\r\n",
+                b"0\r\n\r\n",
+                400,
+            ),
+            "actual-trailer": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"1\r\na\r\n0\r\nX-Test: value\r\n\r\n",
+                400,
+            ),
+            "body-limit": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"4001\r\n",
+                413,
+            ),
+            "size-line-limit": (
+                b"Transfer-Encoding: chunked\r\n",
+                b"00000000000000000\r\n",
+                400,
+            ),
+        }
+        for name, (headers, body, expected_status) in cases.items():
+            version = "HTTP/1.0" if name == "http-1.0" else "HTTP/1.1"
+            with self.subTest(case=name):
+                wire = self.raw_request(
+                    f"POST /echo {version}\r\n".encode()
+                    + b"Host: peer\r\nConnection: close\r\n"
+                    + headers
+                    + b"\r\n"
+                    + body
+                )
+                status_line = wire.split(b"\r\n", 1)[0]
+                self.assertEqual(
+                    int(status_line.split(b" ", 2)[1]),
+                    expected_status,
+                )
+
     def test_valid_chunked_response_has_trailer(self) -> None:
         wire = self.raw_request(b"GET /chunked HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n")
         self.assertIn(b"Transfer-Encoding: chunked\r\n", wire)
