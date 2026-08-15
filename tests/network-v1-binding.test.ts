@@ -277,6 +277,13 @@ class FakeHost {
   }
 }
 
+function overrideHostTable(
+  host: FakeHost,
+  overrides: Partial<NetworkV1BindingTable>,
+): NetworkV1BindingTable {
+  return Object.freeze({ ...host.table, ...overrides });
+}
+
 describe("formal network v1 mount", () => {
   test("adopts only the non-zero Host runtime generation and registers once", () => {
     const host = new FakeHost();
@@ -342,6 +349,17 @@ describe("formal network v1 mount", () => {
 });
 
 describe("formal HTTP command/completion adapter", () => {
+  test("rejects TRACK before dispatching formal request metadata", () => {
+    const host = new FakeHost();
+    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    expect(() => binding.start(
+      Object.freeze({ ...highStart(1), method: "TRACK" }),
+      null,
+      new AbortController().signal,
+    )).toThrow("request method is invalid");
+    expect(host.commands).toHaveLength(0);
+  });
+
   test("publishes headers first and copies a response lease under BODY credit", async () => {
     const host = new FakeHost();
     const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
@@ -435,6 +453,125 @@ describe("formal HTTP command/completion adapter", () => {
     expect(() => orderedHost.run()).toThrow("strictly monotonic");
     expect(orderedHost.releaseCount).toBe(1);
     await expect(pending).rejects.toBeInstanceOf(Error);
+  });
+
+  test("releases a taken lease after length validation fails and permanently poisons", async () => {
+    const host = new FakeHost();
+    const table = overrideHostTable(host, {
+      leaseTake: ((command: NetworkV1BufferLeaseTakeCommand) => {
+        const result = host.table.leaseTake(command);
+        if (result.status !== NetworkV1DispatchStatus.Completed) return result;
+        return Object.freeze({
+          status: NetworkV1DispatchStatus.Completed,
+          byteLength: result.byteLength + 1,
+        });
+      }) as NetworkV1BindingTable["leaseTake"],
+    });
+    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 31, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const pending = response.body!.readInto(new Uint8Array(4));
+    const rejected = pending.catch((error) => error);
+    host.completions.push(host.chunk(body, [1, 2, 3], 2));
+    expect(() => host.run()).toThrow("lease take length disagrees");
+    expect(host.releaseCount).toBe(1);
+    expect(await rejected).toBeInstanceOf(TypeError);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("lease take length disagrees");
+  });
+
+  test("cleans a dequeued lease after payload accounting validation fails", async () => {
+    const host = new FakeHost();
+    const table = overrideHostTable(host, {
+      nextCompletion: ((request: Parameters<NetworkV1BindingTable["nextCompletion"]>[0]) => {
+        const result = host.table.nextCompletion(request);
+        if (result.status !== NetworkV1CompletionPollStatus.Item ||
+          result.completion.eventCode !== NetworkV1EventCode.BodyChunk) return result;
+        return Object.freeze({
+          ...result,
+          payloadBytesDelivered: 0,
+        });
+      }) as NetworkV1BindingTable["nextCompletion"],
+    });
+    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 32, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const pending = response.body!.readInto(new Uint8Array(4));
+    const rejected = pending.catch((error) => error);
+    host.completions.push(host.chunk(body, [4, 5], 2));
+    expect(() => host.run()).toThrow("payload does not match its lease descriptor");
+    expect(host.releaseCount).toBe(1);
+    expect(await rejected).toBeInstanceOf(Error);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("payload does not match its lease descriptor");
+  });
+
+  test("permanently poisons when exact release of a taken lease fails", async () => {
+    const host = new FakeHost();
+    let releaseAttempts = 0;
+    const table = overrideHostTable(host, {
+      leaseRelease: ((_command: NetworkV1BufferLeaseReleaseCommand) => {
+        releaseAttempts++;
+        return Object.freeze({
+          status: NetworkV1DispatchStatus.Refused,
+          error: failure(NetworkV1ErrorCode.InvalidState),
+        });
+      }) as NetworkV1BindingTable["leaseRelease"],
+    });
+    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 33, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const pending = response.body!.readInto(new Uint8Array(4));
+    const rejected = pending.catch((error) => error);
+    host.completions.push(host.chunk(body, [7], 2));
+    expect(() => host.run()).toThrow("invalid_state");
+    expect(releaseAttempts).toBe(1);
+    expect(await rejected).toMatchObject({ code: "invalid_state" });
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("invalid_state");
+  });
+
+  test("persists a terminal response error when no read is pending", async () => {
+    const host = new FakeHost();
+    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 34, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    host.completions.push(Object.freeze({
+      eventCode: NetworkV1EventCode.BodyError,
+      identity: completionIdentity(host.startCommand, body, 2),
+      error: failure(NetworkV1ErrorCode.SystemError),
+    }));
+    host.run();
+    await expect(response.body!.readInto(new Uint8Array(4))).rejects.toMatchObject({
+      code: "system_error",
+    });
+    await expect(response.body!.cancel()).rejects.toMatchObject({
+      code: "system_error",
+    });
+    await expect(response.body![Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: "system_error",
+    });
   });
 
   test("maps abort to one exact cancel command and a stable numeric error", async () => {
