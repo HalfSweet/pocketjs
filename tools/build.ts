@@ -24,6 +24,8 @@
 //   --outdir=<path>              write <app>.js/.pak here instead of dist/
 //                                (external repos build their apps against a
 //                                vendored PocketJS and keep outputs local)
+//   --network-factory            emit a one-shot private-binding factory;
+//                                requires a verified plan with network inputs
 
 import { existsSync, statSync } from "node:fs";
 import { resolve as resolvePath, join, dirname } from "node:path";
@@ -61,6 +63,11 @@ import {
   placeholderImage,
   type PakBlob,
 } from "../framework/compiler/pak.ts";
+import {
+  finalizeBundleArtifact,
+  networkFactoryDefines,
+  selectBundleArtifactMode,
+} from "./network-bundle-factory.ts";
 
 const ROOT = resolvePath(fileURLToPath(new URL("..", import.meta.url))); // pocketjs/
 let DIST = join(ROOT, "dist/");
@@ -88,6 +95,7 @@ let useConfig = true;
 let planPath: string | undefined;
 let densityFlag: number | undefined;
 let projectRoot = process.cwd();
+let networkFactoryRequested = false;
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
@@ -99,6 +107,7 @@ for (const a of args) {
   else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
   else if (a.startsWith("--outdir=")) DIST = resolvePath(a.slice("--outdir=".length)) + "/";
   else if (a.startsWith("--density=")) densityFlag = Number(a.slice("--density=".length));
+  else if (a === "--network-factory") networkFactoryRequested = true;
   else if (!a.startsWith("-")) appArg = a;
 }
 
@@ -115,8 +124,13 @@ if (planPath) {
   if (!configFlagged) configPath = resolvePath(projectRoot, "pocket.config.ts");
 }
 
+const bundleArtifactMode = selectBundleArtifactMode(
+  buildPlan,
+  networkFactoryRequested,
+);
+
 if (!appArg) {
-  console.error("usage: bun tools/build.ts <app.tsx | app name> [--plan=<resolved-plan.json>] [--framework=solid|vue-vapor|octane] [--extra-chars=...] [--density=N]");
+  console.error("usage: bun tools/build.ts <app.tsx | app name> [--plan=<resolved-plan.json>] [--network-factory] [--framework=solid|vue-vapor|octane] [--extra-chars=...] [--density=N]");
   process.exit(1);
 }
 
@@ -469,6 +483,7 @@ const result = await Bun.build({
     __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? 0),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),
     __POCKET_PIXEL_RATIO__: String(rasterDensity),
+    ...networkFactoryDefines(bundleArtifactMode),
     ...(framework === "vue-vapor"
       ? { document: "globalThis.__pocketDocument" }
       : {}),
@@ -487,7 +502,18 @@ if (!result.success) {
   process.exit(1);
 }
 const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
-console.log(`  pass 2: ${DIST}${outName}.js (${bundle ? (await bundle.arrayBuffer()).byteLength : 0} bytes)`);
+let bundleBytes = 0;
+if (bundle) {
+  const bundledSource = await bundle.text();
+  const artifactSource = finalizeBundleArtifact(bundledSource, bundleArtifactMode);
+  if (artifactSource !== bundledSource) {
+    await Bun.write(bundle.path, artifactSource);
+  }
+  bundleBytes = new TextEncoder().encode(artifactSource).byteLength;
+}
+console.log(
+  `  pass 2: ${DIST}${outName}.js (${bundleBytes} bytes, artifact=${bundleArtifactMode})`,
+);
 console.log("PocketJS build: done");
 
 // ---------------------------------------------------------------------------
