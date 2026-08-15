@@ -998,7 +998,7 @@ static void enqueue_terminal_event(pocketjs_net_esp_http_client_t *client,
       ++client->stats.failed_requests;
     }
     client->stats.worker_stack_low_water_bytes =
-        uxTaskGetStackHighWaterMark(NULL);
+        (size_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
     xSemaphoreGive(client->mutex);
   }
 
