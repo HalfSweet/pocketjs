@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,19 +8,24 @@ import {
   type ResolvedBuildPlanContent,
 } from "../framework/src/manifest/plan.ts";
 import {
+  createNetworkFactoryBuildContext,
   finalizeBundleArtifact,
-  NETWORK_BINDING_DEFINE,
-  NETWORK_BINDING_FACTORY_PARAMETER,
-  networkFactoryDefines,
   selectBundleArtifactMode,
   wrapNetworkBundleFactory,
 } from "../tools/network-bundle-factory.ts";
+import {
+  LEGACY_NETWORK_FACTORY_PARAMETER,
+  NETWORK_BINDING_RESERVED_IDENTIFIER,
+  NETWORK_PRIVATE_SPECIFIER,
+  type NetworkPrivateBuildContext,
+} from "../framework/compiler/network-private.ts";
+import { jsxPlugin, transformFile } from "../framework/compiler/jsx-plugin.ts";
 
 const MARKER = "__pocketNetworkFactoryTestMarker";
 const ROOT = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const GLOBAL_BINDING_NAMES = [
-  NETWORK_BINDING_DEFINE,
-  NETWORK_BINDING_FACTORY_PARAMETER,
+  NETWORK_BINDING_RESERVED_IDENTIFIER,
+  LEGACY_NETWORK_FACTORY_PARAMETER,
 ] as const;
 
 type TestGlobal = typeof globalThis & Record<string, unknown>;
@@ -78,6 +83,26 @@ function content(withNetwork: boolean): ResolvedBuildPlanContent {
   };
 }
 
+function networkContext(): NetworkPrivateBuildContext {
+  return createNetworkFactoryBuildContext(finalizeBuildPlan(content(true)));
+}
+
+async function bundleNetworkEntry(
+  entry: string,
+  context: NetworkPrivateBuildContext,
+): Promise<ReturnType<typeof Bun.build> extends Promise<infer Result> ? Result : never> {
+  return await Bun.build({
+    entrypoints: [context.bootstrapSpecifier],
+    format: "iife",
+    target: "browser",
+    plugins: [jsxPlugin("solid", { entry, networkPrivate: context })],
+  });
+}
+
+function buildMessages(result: Awaited<ReturnType<typeof Bun.build>>): string {
+  return result.logs.map((log) => log.message).join("\n");
+}
+
 afterEach(() => {
   delete globals()[MARKER];
   for (const name of GLOBAL_BINDING_NAMES) delete globals()[name];
@@ -110,11 +135,20 @@ describe("network factory admission", () => {
     }, true)).toThrow("invalid ResolvedBuildPlan checksum");
   });
 
-  test("adds the private lexical define only to network factories", () => {
-    expect(networkFactoryDefines("iife")).toEqual({});
-    expect(networkFactoryDefines("network-factory")).toEqual({
-      [NETWORK_BINDING_DEFINE]: NETWORK_BINDING_FACTORY_PARAMETER,
+  test("derives per-artifact private names without a fixed define or parameter", () => {
+    const first = createNetworkFactoryBuildContext(finalizeBuildPlan(content(true)));
+    const secondPlan = finalizeBuildPlan({
+      ...content(true),
+      app: { ...content(true).app, id: "dev.pocketjs.network-factory-other" },
     });
+    const second = createNetworkFactoryBuildContext(secondPlan);
+
+    expect(first.takeIdentifier).not.toBe(second.takeIdentifier);
+    expect(first.bindingIdentifier).not.toBe(second.bindingIdentifier);
+    expect(first.pendingIdentifier).not.toBe(second.pendingIdentifier);
+    expect(first.argumentsIdentifier).not.toBe(second.argumentsIdentifier);
+    expect(first.takeIdentifier).not.toContain(NETWORK_BINDING_RESERVED_IDENTIFIER);
+    expect(first.takeIdentifier).not.toContain(LEGACY_NETWORK_FACTORY_PARAMETER);
   });
 });
 
@@ -124,56 +158,209 @@ describe("network factory artifact", () => {
     expect(finalizeBundleArtifact(source, "iife")).toBe(source);
   });
 
-  test("defers Bun's IIFE and exposes the binding only as a lexical value", async () => {
+  test("captures before app initialization and retires the original argument", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-factory-"));
     try {
       const entry = join(directory, "entry.ts");
-      const bindingModule = join(directory, "binding.ts");
-      await Bun.write(bindingModule, `
-        declare const ${NETWORK_BINDING_DEFINE}: unknown;
-        export const capturedBinding = ${NETWORK_BINDING_DEFINE};
-      `);
+      const context = networkContext();
       await Bun.write(entry, `
-        import { capturedBinding } from "./binding.ts";
-        const ${NETWORK_BINDING_FACTORY_PARAMETER} = "application shadow";
+        const direct = (source: string): unknown => {
+          try { return eval(source); } catch { return "unbound"; }
+        };
         (globalThis as Record<string, unknown>).${MARKER} = {
-          binding: capturedBinding,
-          applicationValue: ${NETWORK_BINDING_FACTORY_PARAMETER},
+          reserved: direct(${JSON.stringify(`typeof ${NETWORK_BINDING_RESERVED_IDENTIFIER}`)}),
+          legacyParameter: direct(${JSON.stringify(`typeof ${LEGACY_NETWORK_FACTORY_PARAMETER}`)}),
+          privateTake: direct(${JSON.stringify(`typeof ${context.takeIdentifier}`)}),
+          privateSlot: direct(${JSON.stringify(`typeof ${context.bindingIdentifier}`)}),
+          functionSlot: Function(${JSON.stringify(`return typeof ${context.bindingIdentifier}`)})(),
+          globalEvalSlot: globalThis.eval(${JSON.stringify(`typeof ${context.bindingIdentifier}`)}),
+          factoryArgument: direct("arguments[0]"),
           sourceGlobal: Object.prototype.hasOwnProperty.call(
             globalThis,
-            ${JSON.stringify(NETWORK_BINDING_DEFINE)},
+            ${JSON.stringify(NETWORK_BINDING_RESERVED_IDENTIFIER)},
           ),
           parameterGlobal: Object.prototype.hasOwnProperty.call(
             globalThis,
-            ${JSON.stringify(NETWORK_BINDING_FACTORY_PARAMETER)},
+            ${JSON.stringify(LEGACY_NETWORK_FACTORY_PARAMETER)},
           ),
         };
+        queueMicrotask(() => {
+          (globalThis as Record<string, any>).${MARKER}.microtaskCheckpoint =
+            direct(${JSON.stringify(`typeof ${context.takeIdentifier}`)});
+        });
       `);
-      const result = await Bun.build({
-        entrypoints: [entry],
-        format: "iife",
-        target: "browser",
-        define: networkFactoryDefines("network-factory"),
-      });
+      const result = await bundleNetworkEntry(entry, context);
       expect(result.success).toBe(true);
       const source = await result.outputs[0]!.text();
-      const factory = evaluateArtifact(wrapNetworkBundleFactory(source));
+      const factory = evaluateArtifact(wrapNetworkBundleFactory(source, context));
 
       expect(typeof factory).toBe("function");
-      expect((factory as Function).length).toBe(1);
+      expect((factory as Function).length).toBe(0);
       expect(globals()[MARKER]).toBeUndefined();
 
-      const binding = Object.freeze({ abiMajor: 1, abiMinor: 0 });
+      const binding = Object.freeze({
+        abiMajor: 1,
+        abiMinor: 0,
+        featureSet: Object.freeze(["network.http.client"]),
+        start: () => ({}),
+      });
       expect((factory as (binding: object) => unknown)(binding)).toBeUndefined();
-      expect(globals()[MARKER]).toEqual({
-        binding,
-        applicationValue: "application shadow",
+      expect(globals()[MARKER]).toMatchObject({
+        reserved: "undefined",
+        legacyParameter: "undefined",
+        privateTake: "undefined",
+        privateSlot: "undefined",
+        functionSlot: "undefined",
+        globalEvalSlot: "undefined",
         sourceGlobal: false,
         parameterGlobal: false,
       });
+      expect((globals()[MARKER] as Record<string, unknown>).factoryArgument).not.toBe(binding);
+      await Promise.resolve();
+      expect((globals()[MARKER] as Record<string, unknown>).microtaskCheckpoint).toBe("undefined");
       for (const name of GLOBAL_BINDING_NAMES) {
         expect(Object.prototype.hasOwnProperty.call(globalThis, name)).toBe(false);
       }
+      for (const name of [
+        context.takeIdentifier,
+        context.bindingIdentifier,
+        context.pendingIdentifier,
+        context.argumentsIdentifier,
+      ]) {
+        expect(Object.prototype.hasOwnProperty.call(globalThis, name)).toBe(false);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects application imports of every compiler-only internal form", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-private-import-"));
+    const privateBindingPath = join(ROOT, "framework/src/net/http-binding.ts");
+    const linkPath = join(directory, "binding-link.ts");
+    try {
+      await symlink(privateBindingPath, linkPath);
+      const context = networkContext();
+      const javascriptAttack = join(directory, "derived-attack.js");
+      await Bun.write(javascriptAttack, `void ${context.bindingIdentifier};`);
+      const derivedIdentifiers = [
+        context.takeIdentifier,
+        context.bindingIdentifier,
+        context.pendingIdentifier,
+        context.argumentsIdentifier,
+      ];
+      const unicodeEscaped = (name: string): string =>
+        name.replace("p", "\\u0070");
+      const attacks = [
+        `import ${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)};`,
+        `import "pocketjs:internal/future-version";`,
+        `void import(${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)});`,
+        `require(${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)});`,
+        `import ${JSON.stringify(privateBindingPath)};`,
+        `void import(${JSON.stringify(privateBindingPath)});`,
+        `require(${JSON.stringify(privateBindingPath)});`,
+        `import ${JSON.stringify(linkPath)};`,
+        `import "./binding-link.ts";`,
+        `void ${NETWORK_BINDING_RESERVED_IDENTIFIER};`,
+        `void arguments[0];`,
+        `import "./derived-attack.js";`,
+        ...derivedIdentifiers.map((name) => `void ${name};`),
+        ...derivedIdentifiers.map(
+          (name) => `const { value: ${name} } = { value: 1 };`,
+        ),
+        ...derivedIdentifiers.map((name) => `void ${unicodeEscaped(name)};`),
+      ];
+      for (let index = 0; index < attacks.length; index++) {
+        const entry = join(directory, `attack-${index}.ts`);
+        await Bun.write(entry, attacks[index]!);
+        let message = "";
+        try {
+          const result = await bundleNetworkEntry(entry, context);
+          expect(result.success, `${attacks[index]} unexpectedly built`).toBe(false);
+          message = buildMessages(result);
+        } catch (error) {
+          const errors = (error as { errors?: readonly { message?: string }[] }).errors;
+          message = errors
+            ? errors.map((item) => item.message ?? String(item)).join("\n")
+            : error instanceof Error ? error.message : String(error);
+        }
+        expect(message).toContain("private network binding");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not trust an application merely because its path is under framework source", async () => {
+    const context = networkContext();
+    const existingFrameworkPath = join(ROOT, "framework/src/net/http.ts");
+    await expect(transformFile(
+      existingFrameworkPath,
+      `void ${context.bindingIdentifier};`,
+      "solid",
+      { networkPrivate: context },
+    )).rejects.toThrow("private network binding identifier");
+  });
+
+  test("rejects a frozen accessor table without invoking its getter", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-hostile-binding-"));
+    try {
+      const entry = join(directory, "entry.ts");
+      const context = networkContext();
+      await Bun.write(entry, `globalThis.${MARKER} = "application-ran";`);
+      const result = await bundleNetworkEntry(entry, context);
+      expect(result.success).toBe(true);
+      const factory = evaluateArtifact(wrapNetworkBundleFactory(
+        await result.outputs[0]!.text(),
+        context,
+      )) as (binding: object) => unknown;
+
+      let getterCalls = 0;
+      const hostile = Object.freeze(Object.defineProperty({}, "abiMajor", {
+        enumerable: true,
+        get: () => {
+          getterCalls++;
+          return 1;
+        },
+      }));
+      expect(() => factory(hostile)).toThrow("must use data properties");
+      expect(getterCalls).toBe(0);
+      expect(globals()[MARKER]).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("links the framework capture through the compiler-only module", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-framework-capture-"));
+    try {
+      const entry = join(directory, "entry.ts");
+      const context = networkContext();
+      await Bun.write(entry, `
+        import { fetch } from ${JSON.stringify(join(ROOT, "framework/src/net/http.ts"))};
+        void fetch("http://127.0.0.1/").catch(() => {});
+        (globalThis as Record<string, unknown>).${MARKER} =
+          (globalThis as Record<string, unknown>).__bindingStartCheckpoint;
+      `);
+      const result = await bundleNetworkEntry(entry, context);
+      expect(result.success).toBe(true);
+      const bundled = await result.outputs[0]!.text();
+      expect(bundled).not.toMatch(/\bimport\s+[^;]*pocketjs:internal\//);
+
+      const factory = evaluateArtifact(wrapNetworkBundleFactory(bundled, context));
+      let binding!: Readonly<Record<string, unknown>>;
+      binding = Object.freeze({
+        abiMajor: 1,
+        abiMinor: 0,
+        featureSet: Object.freeze(["network.http.client"]),
+        start(this: unknown) {
+          globals().__bindingStartCheckpoint = this === binding ? "framework-captured" : "wrong-this";
+          throw new Error("expected test stop");
+        },
+      });
+      expect((factory as (value: object) => unknown)(binding)).toBeUndefined();
+      expect(globals()[MARKER]).toBe("framework-captured");
+      delete globals().__bindingStartCheckpoint;
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -191,8 +378,6 @@ describe("network factory artifact", () => {
         import { Text, View } from "@pocketjs/framework/components";
         import { onFrame } from "@pocketjs/framework/lifecycle";
         import { mount } from "@pocketjs/framework/solid";
-        import ${JSON.stringify(join(ROOT, "framework/src/net/http-binding.ts"))};
-
         const checkpoint = (globalThis as Record<string, any>).${MARKER};
         checkpoint.initializers++;
         mount(() => {
@@ -301,8 +486,12 @@ describe("network factory artifact", () => {
   });
 
   test("consumes the factory on an invalid first call without running the IIFE", () => {
+    const context = networkContext();
+    const captureSource = `${context.takeIdentifier}();\n`;
     const factory = evaluateArtifact(wrapNetworkBundleFactory(
+      captureSource +
       `globalThis.${MARKER} = true;`,
+      context,
     )) as (...args: unknown[]) => void;
 
     expect(() => factory({})).toThrow("requires a frozen binding table");
@@ -312,24 +501,30 @@ describe("network factory artifact", () => {
   });
 
   test("requires exactly one argument and does not retry a throwing initializer", () => {
+    const context = networkContext();
     const missing = evaluateArtifact(wrapNetworkBundleFactory(
-      `globalThis.${MARKER} = "missing-ran";`,
+      `${context.takeIdentifier}(); globalThis.${MARKER} = "missing-ran";`,
+      context,
     )) as (...args: unknown[]) => void;
     expect(() => missing()).toThrow("requires exactly one binding argument");
     expect(globals()[MARKER]).toBeUndefined();
 
+    const extraContext = networkContext();
     const extra = evaluateArtifact(wrapNetworkBundleFactory(
-      `globalThis.${MARKER} = "extra-ran";`,
+      `${extraContext.takeIdentifier}(); globalThis.${MARKER} = "extra-ran";`,
+      extraContext,
     )) as (...args: unknown[]) => void;
     expect(() => extra(Object.freeze({}), Object.freeze({}))).toThrow(
       "requires exactly one binding argument",
     );
     expect(globals()[MARKER]).toBeUndefined();
 
+    const throwingContext = networkContext();
     const throwing = evaluateArtifact(wrapNetworkBundleFactory(`
+      ${throwingContext.takeIdentifier}();
       globalThis.${MARKER} = ((globalThis.${MARKER} ?? 0) + 1);
       throw new Error("initializer failed");
-    `)) as (...args: unknown[]) => void;
+    `, throwingContext)) as (...args: unknown[]) => void;
     expect(() => throwing(Object.freeze({}))).toThrow("initializer failed");
     expect(globals()[MARKER]).toBe(1);
     expect(() => throwing(Object.freeze({}))).toThrow("already invoked");
