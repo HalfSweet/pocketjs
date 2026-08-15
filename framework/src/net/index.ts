@@ -151,86 +151,12 @@ export class URL {
   }
 }
 
-export interface AbortEvent {
-  readonly type: "abort";
-  readonly target: AbortSignal;
-  readonly currentTarget: AbortSignal;
-}
-
-export type AbortListener = (event: AbortEvent) => void;
-
-const ABORT_SIGNAL_TOKEN = Symbol("pocketjs.net.AbortSignal");
-
-interface AbortState {
-  aborted: boolean;
-  reason: unknown;
-  readonly listeners: Set<AbortListener>;
-}
-
-const abortStates = new WeakMap<AbortSignal, AbortState>();
-
-function abortState(signal: AbortSignal): AbortState {
-  const state = abortStates.get(signal);
-  if (!state) throw new TypeError("Illegal invocation");
-  return state;
-}
-
-function abortSignal(signal: AbortSignal, reason: unknown): void {
-  const state = abortState(signal);
-  if (state.aborted) return;
-  state.aborted = true;
-  state.reason = reason;
-  const event = Object.freeze({
-    type: "abort" as const,
-    target: signal,
-    currentTarget: signal,
-  });
-  for (const listener of [...state.listeners]) listener(event);
-  state.listeners.clear();
-}
-
-/** Abort signal supplied by PocketJS rather than an ambient browser global. */
-export class AbortSignal {
-  constructor(token?: symbol) {
-    if (token !== ABORT_SIGNAL_TOKEN) {
-      throw new TypeError("Illegal constructor");
-    }
-    abortStates.set(this, { aborted: false, reason: undefined, listeners: new Set() });
-  }
-
-  get aborted(): boolean {
-    return abortState(this).aborted;
-  }
-
-  get reason(): unknown {
-    return abortState(this).reason;
-  }
-
-  addEventListener(type: "abort", listener: AbortListener): void {
-    if (type === "abort") abortState(this).listeners.add(listener);
-  }
-
-  removeEventListener(type: "abort", listener: AbortListener): void {
-    if (type === "abort") abortState(this).listeners.delete(listener);
-  }
-
-  throwIfAborted(): void {
-    const state = abortState(this);
-    if (state.aborted) throw state.reason;
-  }
-}
-
-export class AbortController {
-  readonly signal = new AbortSignal(ABORT_SIGNAL_TOKEN);
-
-  abort(reason?: unknown): void {
-    abortSignal(this.signal, reason ?? new NetworkError("The operation was aborted", {
-      category: "runtime",
-      code: "aborted",
-      operation: "abort",
-    }));
-  }
-}
+export {
+  AbortController,
+  AbortSignal,
+  type AbortEvent,
+  type AbortListener,
+} from "./abort.ts";
 
 /**
  * Returns the build-admitted limits once a Network Guest Binding is present.

@@ -1,15 +1,48 @@
 import type {
-  AbortSignal,
   NetworkData,
   NetworkLimitOverrides,
   TlsOptions,
-  URL,
 } from "./index.ts";
 import {
-  unsupportedNetworkOperation,
-  unsupportedNetworkPromise,
-} from "./internal.ts";
+  AbortController,
+  AbortSignal,
+  NetworkError,
+  URL,
+} from "./index.ts";
+import { unsupportedNetworkPromise } from "./internal.ts";
 import type { WebSocketUpgrade } from "./websocket.ts";
+import {
+  abortSignalAborted,
+  addAbortAlgorithm,
+  createDependentAbortSignal,
+} from "./abort.ts";
+import {
+  BodyController,
+  bodyFromBinding,
+  extractBody,
+  HTTP_BODY_HELPER_BYTES,
+  ownedUint8ArrayBuffer,
+  snapshotUint8Array,
+} from "./http-body.ts";
+import type { BodyStream as HttpBodyStream } from "./http-body.ts";
+import {
+  getHttpClientBinding,
+  NetworkV1CommandOpcode,
+  NetworkV1EventCode,
+} from "./http-binding.ts";
+import {
+  canonicalizeHttpUrl,
+  type CanonicalHttpUrl,
+} from "./http-url.ts";
+import type {
+  HttpBindingHeader,
+  HttpClientPrivateBinding,
+  HttpClientBindingOperation,
+  HttpRequestErrorEvent,
+  HttpRequestStartCommand,
+  HttpResponseHeadersEvent,
+  OperationCancelCommand,
+} from "./http-binding.ts";
 
 export {
   AbortController,
@@ -30,18 +63,18 @@ export type {
   NetworkRole,
   TlsOptions,
 } from "./index.ts";
+export type { BodyStream } from "./http-body.ts";
 
 export type HeadersInit =
   | Headers
   | Record<string, string>
   | Iterable<readonly [string, string]>;
 
-export interface BodyStream extends AsyncIterable<Uint8Array> {
-  readInto(destination: Uint8Array): Promise<{ bytes: number; done: boolean }>;
-  cancel(reason?: unknown): Promise<void>;
-}
-
-export type BodyInit = NetworkData | BodyStream | AsyncIterable<Uint8Array> | null;
+export type BodyInit =
+  | NetworkData
+  | HttpBodyStream
+  | AsyncIterable<Uint8Array>
+  | null;
 export type RequestRedirect = "follow" | "manual" | "error";
 
 export interface HttpTimeouts {
@@ -70,56 +103,391 @@ export interface ResponseInit {
   readonly headers?: HeadersInit;
 }
 
-/**
- * Fetch objects are declared now so applications can type-check against the
- * target catalog. Their conformance implementation lands with HTTP admission.
- */
+type HeadersGuard = "none" | "request" | "response" | "immutable";
+
+interface HeaderEntry {
+  readonly name: string;
+  readonly value: string;
+}
+
+interface HeadersState {
+  guard: HeadersGuard;
+  readonly list: HeaderEntry[];
+}
+
+const headerStates = new WeakMap<Headers, HeadersState>();
+const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const HTTP_HEADER_COUNT = 128;
+const HTTP_HEADER_BYTES = 64 * 1024;
+const FORBIDDEN_REQUEST_NAMES = new Set([
+  "accept-charset",
+  "accept-encoding",
+  "access-control-request-headers",
+  "access-control-request-method",
+  "connection",
+  "content-length",
+  "cookie",
+  "cookie2",
+  "date",
+  "dnt",
+  "expect",
+  "host",
+  "keep-alive",
+  "origin",
+  "referer",
+  "set-cookie",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "via",
+]);
+const FORBIDDEN_RESPONSE_NAMES = new Set(["set-cookie", "set-cookie2"]);
+
+function headersState(headers: Headers): HeadersState {
+  const state = headerStates.get(headers);
+  if (!state) throw new TypeError("Illegal invocation");
+  return state;
+}
+
+function byteString(value: unknown, label: string): string {
+  const string = String(value);
+  for (let index = 0; index < string.length; index++) {
+    if (string.charCodeAt(index) > 0xff) {
+      throw new TypeError(`${label} contains a character outside ByteString`);
+    }
+  }
+  return string;
+}
+
+function normalizeHeaderName(value: unknown): string {
+  const name = byteString(value, "HTTP header name");
+  if (!HTTP_TOKEN.test(name)) throw new TypeError(`Invalid HTTP header name: ${name}`);
+  return name.toLowerCase();
+}
+
+function normalizeHeaderValue(value: unknown): string {
+  const raw = byteString(value, "HTTP header value");
+  const normalized = raw.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+  if (/[\0\r\n]/.test(normalized)) throw new TypeError("Invalid HTTP header value");
+  return normalized;
+}
+
+/** Fetch's header-value get/decode/split algorithm for method override guards. */
+function splitHeaderValue(value: string): string[] {
+  const values: string[] = [];
+  let position = 0;
+  let temporary = "";
+  for (;;) {
+    while (position < value.length && value[position] !== '"' && value[position] !== ",") {
+      temporary += value[position++]!;
+    }
+    if (position < value.length && value[position] === '"') {
+      temporary += value[position++]!;
+      for (;;) {
+        while (position < value.length && value[position] !== '"' && value[position] !== "\\") {
+          temporary += value[position++]!;
+        }
+        if (position >= value.length) break;
+        const quoteOrBackslash = value[position++]!;
+        temporary += quoteOrBackslash;
+        if (quoteOrBackslash === "\\" && position < value.length) {
+          temporary += value[position++]!;
+          continue;
+        }
+        break;
+      }
+      if (position < value.length) continue;
+    }
+    values.push(temporary.replace(/^[\t ]+|[\t ]+$/g, ""));
+    temporary = "";
+    if (position >= value.length) return values;
+    position++;
+  }
+}
+
+function guardRejects(guard: HeadersGuard, name: string, value = ""): boolean {
+  if (guard === "request") {
+    if (FORBIDDEN_REQUEST_NAMES.has(name) ||
+      name.startsWith("proxy-") ||
+      name.startsWith("sec-")) return true;
+    if (
+      name === "x-http-method" ||
+      name === "x-http-method-override" ||
+      name === "x-method-override"
+    ) {
+      return splitHeaderValue(value).some((method) =>
+        ["CONNECT", "TRACE", "TRACK"].includes(method.toUpperCase())
+      );
+    }
+    return false;
+  }
+  return guard === "response" && FORBIDDEN_RESPONSE_NAMES.has(name);
+}
+
+function assertMutable(state: HeadersState): void {
+  if (state.guard === "immutable") throw new TypeError("Headers are immutable");
+}
+
+function assertHeaderBudget(entries: readonly HeaderEntry[]): void {
+  const bytes = entries.reduce(
+    (total, entry) => total + entry.name.length + entry.value.length + 4,
+    0,
+  );
+  if (entries.length > HTTP_HEADER_COUNT || bytes > HTTP_HEADER_BYTES) {
+    throw new NetworkError("HTTP headers exceed the SDK safety ceiling", {
+      category: "runtime",
+      code: "resource_limit",
+      operation: "http.Headers",
+      protocol: "http",
+    });
+  }
+}
+
+function appendHeader(
+  state: HeadersState,
+  nameValue: unknown,
+  valueValue: unknown,
+  bypassGuard = false,
+): void {
+  const name = normalizeHeaderName(nameValue);
+  const value = normalizeHeaderValue(valueValue);
+  assertMutable(state);
+  if (!bypassGuard && guardRejects(state.guard, name, value)) return;
+  assertHeaderBudget([...state.list, { name, value }]);
+  state.list.push({ name, value });
+}
+
+function fillHeaders(
+  state: HeadersState,
+  init: HeadersInit | undefined,
+  bypassGuard = false,
+): void {
+  if (init === undefined) return;
+  if (init instanceof Headers) {
+    for (const entry of headersState(init).list) {
+      appendHeader(state, entry.name, entry.value, bypassGuard);
+    }
+    return;
+  }
+  const iterator = (init as Partial<Iterable<unknown>>)[Symbol.iterator];
+  if (typeof iterator === "function") {
+    const outer = iterator.call(init) as Iterator<unknown>;
+    if (typeof outer !== "object" || outer === null || typeof outer.next !== "function") {
+      throw new TypeError("Headers initializer iterator is invalid");
+    }
+    try {
+      for (;;) {
+        const item = outer.next();
+        if (typeof item !== "object" || item === null) {
+          throw new TypeError("Headers initializer iterator returned an invalid result");
+        }
+        if (item.done) break;
+        const pairValue = item.value;
+        if (typeof pairValue !== "object" || pairValue === null) {
+          throw new TypeError("Each Headers initializer item must be an iterable pair");
+        }
+        const pairMethod = (pairValue as Partial<Iterable<unknown>>)[Symbol.iterator];
+        if (typeof pairMethod !== "function") {
+          throw new TypeError("Each Headers initializer item must be an iterable pair");
+        }
+        const pairIterator = pairMethod.call(pairValue) as Iterator<unknown>;
+        if (
+          typeof pairIterator !== "object" ||
+          pairIterator === null ||
+          typeof pairIterator.next !== "function"
+        ) {
+          throw new TypeError("Each Headers initializer pair iterator is invalid");
+        }
+        const first = pairIterator.next();
+        const second = pairIterator.next();
+        const extra = pairIterator.next();
+        if (first.done || second.done || !extra.done) {
+          if (typeof pairIterator.return === "function") pairIterator.return();
+          throw new TypeError("Each Headers initializer item must contain exactly two values");
+        }
+        appendHeader(state, first.value, second.value, bypassGuard);
+      }
+    } catch (error) {
+      try {
+        if (typeof outer.return === "function") outer.return();
+      } catch {
+        // Iterator close cannot replace the conversion failure.
+      }
+      throw error;
+    }
+    return;
+  }
+  if (typeof init !== "object" || init === null) {
+    throw new TypeError("Headers initializer must be a record or iterable");
+  }
+  for (const name of Object.keys(init)) {
+    appendHeader(state, name, (init as Record<string, unknown>)[name], bypassGuard);
+  }
+}
+
+function sortedCombinedHeaders(state: HeadersState): HeaderEntry[] {
+  const names = [...new Set(state.list.map((entry) => entry.name))].sort();
+  const result: HeaderEntry[] = [];
+  for (const name of names) {
+    const values = state.list
+      .filter((entry) => entry.name === name)
+      .map((entry) => entry.value);
+    if (name === "set-cookie") {
+      for (const value of values) result.push({ name, value });
+    } else {
+      result.push({ name, value: values.join(", ") });
+    }
+  }
+  return result;
+}
+
+type HeaderIteratorKind = "entry" | "key" | "value";
+
+class HeadersIterator<T extends [string, string] | string> implements IterableIterator<T> {
+  #index = 0;
+
+  constructor(
+    private readonly headers: Headers,
+    private readonly kind: HeaderIteratorKind,
+  ) {}
+
+  [Symbol.iterator](): IterableIterator<T> {
+    return this;
+  }
+
+  next(): IteratorResult<T> {
+    const entry = sortedCombinedHeaders(headersState(this.headers))[this.#index++];
+    if (!entry) return { value: undefined, done: true };
+    const value = this.kind === "entry"
+      ? [entry.name, entry.value]
+      : this.kind === "key"
+        ? entry.name
+        : entry.value;
+    return { value: value as T, done: false };
+  }
+}
+
+function createHeaders(
+  init: HeadersInit | undefined,
+  guard: HeadersGuard,
+): Headers {
+  const headers = new Headers();
+  const state = headersState(headers);
+  state.guard = guard === "immutable" ? "none" : guard;
+  fillHeaders(state, init);
+  state.guard = guard;
+  return headers;
+}
+
+function createBindingHeaders(entries: readonly HttpBindingHeader[]): Headers {
+  const headers = new Headers();
+  const state = headersState(headers);
+  for (const entry of entries) appendHeader(state, entry.name, entry.value, true);
+  state.guard = "immutable";
+  return headers;
+}
+
+function cloneHeaders(headers: Headers): Headers {
+  const source = headersState(headers);
+  const clone = new Headers();
+  const target = headersState(clone);
+  target.list.push(...source.list.map((entry) => ({ ...entry })));
+  target.guard = source.guard;
+  return clone;
+}
+
+function bindingHeaders(headers: Headers): readonly HttpBindingHeader[] {
+  return Object.freeze(headersState(headers).list.map((entry) => Object.freeze({
+    name: entry.name,
+    value: entry.value,
+  })));
+}
+
 export class Headers implements Iterable<[string, string]> {
-  constructor(_init?: HeadersInit) {
-    throw unsupportedNetworkOperation("http.Headers", "http");
+  constructor(init: HeadersInit | undefined = undefined) {
+    const state: HeadersState = { guard: "none", list: [] };
+    headerStates.set(this, state);
+    fillHeaders(state, init);
   }
 
-  append(_name: string, _value: string): void {
-    throw unsupportedNetworkOperation("http.Headers.append", "http");
+  append(name: string, value: string): void {
+    appendHeader(headersState(this), name, value);
   }
 
-  delete(_name: string): void {
-    throw unsupportedNetworkOperation("http.Headers.delete", "http");
+  delete(nameValue: string): void {
+    const state = headersState(this);
+    const name = normalizeHeaderName(nameValue);
+    assertMutable(state);
+    if (guardRejects(state.guard, name)) return;
+    for (let index = state.list.length - 1; index >= 0; index--) {
+      if (state.list[index]!.name === name) state.list.splice(index, 1);
+    }
   }
 
-  get(_name: string): string | null {
-    throw unsupportedNetworkOperation("http.Headers.get", "http");
+  get(nameValue: string): string | null {
+    const state = headersState(this);
+    const name = normalizeHeaderName(nameValue);
+    const values = state.list
+      .filter((entry) => entry.name === name)
+      .map((entry) => entry.value);
+    return values.length === 0 ? null : values.join(", ");
   }
 
-  has(_name: string): boolean {
-    throw unsupportedNetworkOperation("http.Headers.has", "http");
+  has(nameValue: string): boolean {
+    const state = headersState(this);
+    const name = normalizeHeaderName(nameValue);
+    return state.list.some((entry) => entry.name === name);
   }
 
-  set(_name: string, _value: string): void {
-    throw unsupportedNetworkOperation("http.Headers.set", "http");
+  set(nameValue: string, valueValue: string): void {
+    const state = headersState(this);
+    const name = normalizeHeaderName(nameValue);
+    const value = normalizeHeaderValue(valueValue);
+    assertMutable(state);
+    if (guardRejects(state.guard, name, value)) return;
+    const next: HeaderEntry[] = [];
+    let inserted = false;
+    for (const entry of state.list) {
+      if (entry.name !== name) next.push(entry);
+      else if (!inserted) {
+        next.push({ name, value });
+        inserted = true;
+      }
+    }
+    if (!inserted) next.push({ name, value });
+    assertHeaderBudget(next);
+    state.list.splice(0, state.list.length, ...next);
   }
 
   entries(): IterableIterator<[string, string]> {
-    throw unsupportedNetworkOperation("http.Headers.entries", "http");
+    headersState(this);
+    return new HeadersIterator<[string, string]>(this, "entry");
   }
 
   keys(): IterableIterator<string> {
-    throw unsupportedNetworkOperation("http.Headers.keys", "http");
+    headersState(this);
+    return new HeadersIterator<string>(this, "key");
   }
 
   values(): IterableIterator<string> {
-    throw unsupportedNetworkOperation("http.Headers.values", "http");
+    headersState(this);
+    return new HeadersIterator<string>(this, "value");
   }
 
   forEach(
-    _callback: (value: string, key: string, headers: Headers) => void,
-    _thisArg?: unknown,
+    callback: (value: string, key: string, headers: Headers) => void,
+    thisArg?: unknown,
   ): void {
-    throw unsupportedNetworkOperation("http.Headers.forEach", "http");
+    headersState(this);
+    if (typeof callback !== "function") throw new TypeError("callback must be a function");
+    for (const [name, value] of this.entries()) callback.call(thisArg, value, name, this);
   }
 
   getSetCookie(): string[] {
-    throw unsupportedNetworkOperation("http.Headers.getSetCookie", "http");
+    return headersState(this).list
+      .filter((entry) => entry.name === "set-cookie")
+      .map((entry) => entry.value);
   }
 
   [Symbol.iterator](): IterableIterator<[string, string]> {
@@ -127,73 +495,652 @@ export class Headers implements Iterable<[string, string]> {
   }
 }
 
-export class Request {
-  declare readonly method: string;
-  declare readonly url: string;
-  declare readonly headers: Headers;
-  declare readonly body: BodyStream | null;
-  declare readonly bodyUsed: boolean;
-  declare readonly signal: AbortSignal;
-  declare readonly redirect: RequestRedirect;
+interface RequestExtensions {
+  readonly timeouts?: Readonly<HttpTimeouts>;
+  readonly maxRedirects: number;
+  readonly tls?: TlsOptions;
+  readonly limits?: NetworkLimitOverrides;
+  readonly ref: boolean;
+}
 
-  constructor(_input: string | URL | Request, _init?: RequestInit) {
-    throw unsupportedNetworkOperation("http.Request", "http");
+interface RequestState extends RequestExtensions {
+  readonly method: string;
+  readonly url: string;
+  readonly headers: Headers;
+  readonly body: BodyController | null;
+  readonly signal: AbortSignal;
+  readonly detachSignal: () => void;
+  readonly redirect: RequestRedirect;
+}
+
+interface ResponseState {
+  readonly status: number;
+  readonly statusText: string;
+  readonly headers: Headers;
+  readonly body: BodyController | null;
+  readonly url: string;
+  readonly redirected: boolean;
+}
+
+const requestStates = new WeakMap<Request, RequestState>();
+const responseStates = new WeakMap<Response, ResponseState>();
+const HTTP_LIMIT_OVERRIDE_COUNT = 32;
+const HTTP_LIMIT_NAME_BYTES = 64;
+const HTTP_TLS_CA_BYTES = 64 * 1024;
+const HTTP_TLS_ALPN_COUNT = 16;
+const HTTP_TLS_ALPN_BYTES = 1024;
+const HTTP_TLS_SERVER_NAME_BYTES = 253;
+const HTTP_TLS_CREDENTIAL_ID_BYTES = 128;
+const arrayIsArray = Array.isArray;
+
+interface RequestInitSnapshot {
+  readonly body: BodyInit | undefined;
+  readonly headers: HeadersInit | undefined;
+  readonly limits: NetworkLimitOverrides | undefined;
+  readonly maxRedirects: number | undefined;
+  readonly method: string | undefined;
+  readonly redirect: RequestRedirect | undefined;
+  readonly ref: boolean | undefined;
+  readonly signal: AbortSignal | undefined;
+  readonly timeouts: HttpTimeouts | undefined;
+  readonly tls: TlsOptions | undefined;
+}
+
+interface ResponseInitSnapshot {
+  readonly headers: HeadersInit | undefined;
+  readonly status: unknown;
+  readonly statusText: unknown;
+}
+
+/** WebIDL dictionaries read every recognized member exactly once, in order. */
+function snapshotRequestInit(init: RequestInit | null | undefined): RequestInitSnapshot {
+  if (init === undefined || init === null) {
+    return {
+      body: undefined,
+      headers: undefined,
+      limits: undefined,
+      maxRedirects: undefined,
+      method: undefined,
+      redirect: undefined,
+      ref: undefined,
+      signal: undefined,
+      timeouts: undefined,
+      tls: undefined,
+    };
+  }
+  const dictionary = Object(init) as RequestInit;
+  return {
+    body: dictionary.body,
+    headers: dictionary.headers,
+    limits: dictionary.limits,
+    maxRedirects: dictionary.maxRedirects,
+    method: dictionary.method,
+    redirect: dictionary.redirect,
+    ref: dictionary.ref,
+    signal: dictionary.signal,
+    timeouts: dictionary.timeouts,
+    tls: dictionary.tls,
+  };
+}
+
+function snapshotResponseInit(init: ResponseInit | null | undefined): ResponseInitSnapshot {
+  if (init === undefined || init === null) {
+    return { headers: undefined, status: undefined, statusText: undefined };
+  }
+  const dictionary = Object(init) as ResponseInit;
+  return {
+    headers: dictionary.headers,
+    status: dictionary.status,
+    statusText: dictionary.statusText,
+  };
+}
+
+function requestState(request: Request): RequestState {
+  const state = requestStates.get(request);
+  if (!state) throw new TypeError("Illegal invocation");
+  return state;
+}
+
+function responseState(response: Response): ResponseState {
+  const state = responseStates.get(response);
+  if (!state) throw new TypeError("Illegal invocation");
+  return state;
+}
+
+function runtimeError(
+  code: "aborted" | "invalid_state" | "resource_limit" | "unsupported" | "system_error",
+  operation: string,
+  message: string,
+): NetworkError {
+  return new NetworkError(message, {
+    category: "runtime",
+    code,
+    operation,
+    protocol: "http",
+  });
+}
+
+function normalizeMethod(value: unknown): string {
+  const method = byteString(value, "HTTP method");
+  if (!HTTP_TOKEN.test(method)) throw new TypeError(`Invalid HTTP method: ${method}`);
+  const upper = method.toUpperCase();
+  if (upper === "CONNECT" || upper === "TRACE") {
+    throw new TypeError(`Forbidden HTTP method: ${upper}`);
+  }
+  return new Set(["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"]).has(upper)
+    ? upper
+    : method;
+}
+
+function normalizeRedirect(value: unknown): RequestRedirect {
+  const mode = String(value);
+  if (mode === "follow" || mode === "manual" || mode === "error") return mode;
+  throw new TypeError(`Invalid HTTP redirect mode: ${mode}`);
+}
+
+function normalizeTimeouts(value: HttpTimeouts | undefined): Readonly<HttpTimeouts> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return Object.freeze({});
+  const dictionary = Object(value) as HttpTimeouts;
+  const snapshot = {
+    connect: dictionary.connect,
+    headers: dictionary.headers,
+    idle: dictionary.idle,
+    total: dictionary.total,
+  };
+  const output: Record<string, number> = {};
+  for (const key of ["connect", "headers", "idle", "total"] as const) {
+    const timeout = snapshot[key];
+    if (timeout === undefined) continue;
+    if (!Number.isSafeInteger(timeout) || timeout <= 0) {
+      throw new TypeError(`HTTP ${key} timeout must be a positive safe integer`);
+    }
+    output[key] = timeout;
+  }
+  return Object.freeze(output);
+}
+
+function normalizeMaxRedirects(value: number | undefined): number {
+  const result = value ?? 5;
+  if (!Number.isSafeInteger(result) || result < 0 || result > 5) {
+    throw new TypeError("HTTP maxRedirects must be an integer from 0 through 5");
+  }
+  return result;
+}
+
+function normalizeLimits(
+  limits: NetworkLimitOverrides | undefined,
+): NetworkLimitOverrides | undefined {
+  if (limits === undefined) return undefined;
+  if (typeof limits !== "object" || limits === null) {
+    throw new TypeError("HTTP limits must be an object");
+  }
+  const output: Record<string, number> = Object.create(null);
+  let count = 0;
+  for (const key of Object.keys(limits)) {
+    count++;
+    if (count > HTTP_LIMIT_OVERRIDE_COUNT) {
+      throw new TypeError(`HTTP limits cannot exceed ${HTTP_LIMIT_OVERRIDE_COUNT} entries`);
+    }
+    if (
+      key.length === 0 ||
+      key.length > HTTP_LIMIT_NAME_BYTES ||
+      !/^[A-Za-z][A-Za-z0-9._-]*$/.test(key)
+    ) {
+      throw new TypeError("HTTP limit name is invalid or exceeds the safety ceiling");
+    }
+    const value = limits[key];
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(`HTTP limit ${key} must be a positive safe integer`);
+    }
+    output[key] = value;
+  }
+  return Object.freeze(output);
+}
+
+function normalizeTls(tls: TlsOptions | undefined): TlsOptions | undefined {
+  if (tls === undefined) return undefined;
+  if (tls === null) return Object.freeze({});
+  const dictionary = Object(tls) as TlsOptions;
+  const snapshot = {
+    alpn: dictionary.alpn,
+    ca: dictionary.ca,
+    clientCertificate: dictionary.clientCertificate,
+    credential: dictionary.credential,
+    maxVersion: dictionary.maxVersion,
+    minVersion: dictionary.minVersion,
+    revocation: dictionary.revocation,
+    serverName: dictionary.serverName,
+    verification: dictionary.verification,
+  };
+  const minVersion = snapshot.minVersion;
+  const maxVersion = snapshot.maxVersion;
+  if (minVersion !== undefined && minVersion !== "1.2" && minVersion !== "1.3") {
+    throw new TypeError("Invalid TLS minimum version");
+  }
+  if (maxVersion !== undefined && maxVersion !== "1.2" && maxVersion !== "1.3") {
+    throw new TypeError("Invalid TLS maximum version");
+  }
+  if (minVersion === "1.3" && maxVersion === "1.2") {
+    throw new TypeError("TLS minimum version exceeds maximum version");
+  }
+  let ca: Uint8Array | undefined;
+  if (snapshot.ca !== undefined) {
+    // Capture the intrinsic typed-array slots once; own accessors and custom
+    // iterators cannot under-report the trust material's real size.
+    try {
+      ca = snapshotUint8Array(snapshot.ca, HTTP_TLS_CA_BYTES, "TLS custom CA");
+    } catch (error) {
+      if (error instanceof NetworkError && error.code === "resource_limit") {
+        throw new TypeError(`TLS custom CA exceeds ${HTTP_TLS_CA_BYTES} bytes`);
+      }
+      throw error;
+    }
+  }
+  if (
+    snapshot.clientCertificate !== undefined &&
+    snapshot.clientCertificate !== "none" &&
+    snapshot.clientCertificate !== "optional" &&
+    snapshot.clientCertificate !== "required"
+  ) {
+    throw new TypeError("Invalid TLS client certificate policy");
+  }
+  if (
+    snapshot.verification !== undefined &&
+    snapshot.verification !== "full" &&
+    snapshot.verification !== "development-insecure"
+  ) {
+    throw new TypeError("Invalid TLS verification policy");
+  }
+  if (
+    snapshot.revocation !== undefined &&
+    snapshot.revocation !== "host-default" &&
+    snapshot.revocation !== "required"
+  ) {
+    throw new TypeError("Invalid TLS revocation policy");
+  }
+  let alpn: string[] | undefined;
+  if (snapshot.alpn !== undefined) {
+    alpn = [];
+    let totalBytes = 0;
+    for (const token of snapshot.alpn) {
+      if (alpn.length >= HTTP_TLS_ALPN_COUNT) {
+        throw new TypeError(`TLS ALPN cannot exceed ${HTTP_TLS_ALPN_COUNT} tokens`);
+      }
+      const value = byteString(token, "TLS ALPN token");
+      if (value.length === 0 || value.length > 255 || /[\0]/.test(value)) {
+        throw new TypeError("Invalid TLS ALPN token");
+      }
+      totalBytes += value.length;
+      if (totalBytes > HTTP_TLS_ALPN_BYTES) {
+        throw new TypeError(`TLS ALPN exceeds ${HTTP_TLS_ALPN_BYTES} bytes`);
+      }
+      alpn.push(value);
+    }
+  }
+  if (alpn && new Set(alpn).size !== alpn.length) {
+    throw new TypeError("TLS ALPN tokens must be unique");
+  }
+  const serverName = snapshot.serverName === undefined
+    ? undefined
+    : byteString(snapshot.serverName, "TLS serverName");
+  if (
+    serverName !== undefined &&
+    (serverName.length === 0 || serverName.length > HTTP_TLS_SERVER_NAME_BYTES)
+  ) throw new TypeError("TLS serverName is empty or exceeds the safety ceiling");
+  const credential = snapshot.credential === undefined
+    ? undefined
+    : byteString(snapshot.credential, "TLS credential id");
+  if (
+    credential !== undefined &&
+    (credential.length === 0 ||
+      credential.length > HTTP_TLS_CREDENTIAL_ID_BYTES ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(credential))
+  ) throw new TypeError("TLS credential id is empty or exceeds the safety ceiling");
+  return Object.freeze({
+    ...(serverName === undefined ? {} : { serverName }),
+    ...(minVersion === undefined ? {} : { minVersion }),
+    ...(maxVersion === undefined ? {} : { maxVersion }),
+    ...(alpn === undefined ? {} : { alpn: Object.freeze(alpn) }),
+    ...(ca === undefined ? {} : { ca }),
+    ...(credential === undefined ? {} : { credential }),
+    ...(snapshot.clientCertificate === undefined
+      ? {}
+      : { clientCertificate: snapshot.clientCertificate }),
+    ...(snapshot.verification === undefined
+      ? {}
+      : { verification: snapshot.verification }),
+    ...(snapshot.revocation === undefined ? {} : { revocation: snapshot.revocation }),
+  });
+}
+
+function requestExtensions(
+  init: RequestInitSnapshot,
+  inherited?: RequestState,
+): RequestExtensions {
+  return {
+    timeouts: init.timeouts === undefined
+      ? inherited?.timeouts
+      : normalizeTimeouts(init.timeouts),
+    maxRedirects: init.maxRedirects === undefined
+      ? inherited?.maxRedirects ?? 5
+      : normalizeMaxRedirects(init.maxRedirects),
+    tls: init.tls === undefined ? inherited?.tls : normalizeTls(init.tls),
+    limits: init.limits === undefined ? inherited?.limits : normalizeLimits(init.limits),
+    ref: init.ref === undefined ? inherited?.ref ?? true : Boolean(init.ref),
+  };
+}
+
+type ParsedAbsoluteUrl = CanonicalHttpUrl;
+
+function parseAbsoluteUrl(input: string | URL): CanonicalHttpUrl {
+  const source = input instanceof URL ? input.href : new URL(String(input)).href;
+  if (source.length > 8192) {
+    throw runtimeError(
+      "resource_limit",
+      "http.Request",
+      "HTTP URL exceeds the 8192-byte SDK safety ceiling",
+    );
+  }
+  return canonicalizeHttpUrl(source);
+}
+
+function newRequestFromState(state: RequestState): Request {
+  const request = Object.create(Request.prototype) as Request;
+  requestStates.set(request, state);
+  return request;
+}
+
+export class Request {
+  constructor(
+    input: string | URL | Request,
+    init: RequestInit | null | undefined = undefined,
+  ) {
+    const snapshot = snapshotRequestInit(init);
+    const inherited = input instanceof Request ? requestState(input) : undefined;
+    const method = normalizeMethod(snapshot.method ?? inherited?.method ?? "GET");
+    const parsedInput = inherited === undefined
+      ? parseAbsoluteUrl(input as string | URL)
+      : undefined;
+    const url = inherited?.url ?? `${parsedInput!.href}${parsedInput!.fragment}`;
+    const redirect = normalizeRedirect(snapshot.redirect ?? inherited?.redirect ?? "follow");
+    const sourceSignal = snapshot.signal ?? inherited?.signal;
+    if (sourceSignal !== undefined && !(sourceSignal instanceof AbortSignal)) {
+      throw new TypeError("HTTP Request signal must be a PocketJS AbortSignal");
+    }
+    const headers = snapshot.headers === undefined
+      ? createHeaders(inherited?.headers, "request")
+      : createHeaders(snapshot.headers, "request");
+    const extensions = requestExtensions(snapshot, inherited);
+
+    // Fetch treats a null RequestInit body like no override; it does not erase
+    // an input Request's body.
+    const hasExplicitBody = snapshot.body !== undefined && snapshot.body !== null;
+    const wouldHaveBody = hasExplicitBody || inherited?.body !== null &&
+      inherited?.body !== undefined;
+    if ((method === "GET" || method === "HEAD") && wouldHaveBody) {
+      throw new TypeError(`${method} Request cannot have a body`);
+    }
+    let body: BodyController | null = null;
+    let contentType: string | undefined;
+    if (hasExplicitBody) {
+      const extracted = extractBody(snapshot.body!);
+      body = extracted.controller;
+      contentType = extracted.contentType;
+    } else if (!hasExplicitBody && inherited?.body) {
+      body = inherited.body.transfer();
+    }
+    if (contentType !== undefined && !headers.has("content-type")) {
+      headers.append("content-type", contentType);
+    }
+    const signalDependency = createDependentAbortSignal(sourceSignal);
+    requestStates.set(this, {
+      method,
+      url,
+      headers,
+      body,
+      signal: signalDependency.signal,
+      detachSignal: signalDependency.detach,
+      redirect,
+      ...extensions,
+    });
+  }
+
+  get method(): string {
+    return requestState(this).method;
+  }
+
+  get url(): string {
+    return requestState(this).url;
+  }
+
+  get headers(): Headers {
+    return requestState(this).headers;
+  }
+
+  get body(): HttpBodyStream | null {
+    return requestState(this).body?.stream ?? null;
+  }
+
+  get bodyUsed(): boolean {
+    return requestState(this).body?.bodyUsed ?? false;
+  }
+
+  get signal(): AbortSignal {
+    return requestState(this).signal;
+  }
+
+  get redirect(): RequestRedirect {
+    return requestState(this).redirect;
   }
 
   clone(): Request {
-    throw unsupportedNetworkOperation("http.Request.clone", "http");
+    const state = requestState(this);
+    const signalDependency = createDependentAbortSignal(state.signal);
+    try {
+      const cloneBody = state.body?.tee() ?? null;
+      return newRequestFromState({
+        ...state,
+        headers: cloneHeaders(state.headers),
+        body: cloneBody,
+        signal: signalDependency.signal,
+        detachSignal: signalDependency.detach,
+      });
+    } catch (error) {
+      signalDependency.detach();
+      throw error;
+    }
   }
 
   arrayBuffer(): Promise<ArrayBuffer> {
-    return unsupportedNetworkPromise("http.Request.arrayBuffer", "http");
+    return consumeArrayBuffer(requestState(this).body, "http.Request.arrayBuffer");
   }
 
   text(): Promise<string> {
-    return unsupportedNetworkPromise("http.Request.text", "http");
+    return consumeText(requestState(this).body, "http.Request.text");
   }
 
   json(): Promise<unknown> {
-    return unsupportedNetworkPromise("http.Request.json", "http");
+    return consumeJson(requestState(this).body, "http.Request.json");
   }
 }
 
-export class Response {
-  declare readonly status: number;
-  declare readonly statusText: string;
-  declare readonly ok: boolean;
-  declare readonly headers: Headers;
-  declare readonly body: BodyStream | null;
-  declare readonly bodyUsed: boolean;
-  declare readonly url: string;
-  declare readonly redirected: boolean;
+function toUnsignedShort(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return 0;
+  const integer = Math.trunc(number);
+  return ((integer % 0x1_0000) + 0x1_0000) % 0x1_0000;
+}
 
-  constructor(_body?: BodyInit, _init?: ResponseInit) {
-    throw unsupportedNetworkOperation("http.Response", "http");
+function normalizeStatus(value: unknown): number {
+  const status = value === undefined ? 200 : toUnsignedShort(value);
+  if (status < 200 || status > 599) {
+    throw new RangeError("HTTP Response status must be from 200 through 599");
+  }
+  return status;
+}
+
+function normalizeStatusText(value: unknown): string {
+  if (value === undefined) return "";
+  const text = byteString(value, "HTTP statusText");
+  if (/[\0\r\n]/.test(text)) throw new TypeError("Invalid HTTP statusText");
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if ((code < 0x20 && code !== 0x09) || code === 0x7f) {
+      throw new TypeError("Invalid HTTP statusText");
+    }
+  }
+  return text;
+}
+
+function newResponseFromState(state: ResponseState): Response {
+  const response = Object.create(Response.prototype) as Response;
+  responseStates.set(response, state);
+  return response;
+}
+
+export class Response {
+  constructor(body: BodyInit = null, init: ResponseInit | null = {}) {
+    const snapshot = snapshotResponseInit(init);
+    const status = normalizeStatus(snapshot.status);
+    const statusText = normalizeStatusText(snapshot.statusText);
+    const headers = createHeaders(snapshot.headers, "response");
+    let controller: BodyController | null = null;
+    if (body !== null) {
+      if (status === 204 || status === 205 || status === 304) {
+        throw new TypeError(`HTTP status ${status} cannot have a body`);
+      }
+      const extracted = extractBody(body);
+      controller = extracted.controller;
+      if (extracted.contentType !== undefined && !headers.has("content-type")) {
+        headers.append("content-type", extracted.contentType);
+      }
+    }
+    responseStates.set(this, {
+      status,
+      statusText,
+      headers,
+      body: controller,
+      url: "",
+      redirected: false,
+    });
+  }
+
+  get status(): number {
+    return responseState(this).status;
+  }
+
+  get statusText(): string {
+    return responseState(this).statusText;
+  }
+
+  get ok(): boolean {
+    const status = responseState(this).status;
+    return status >= 200 && status <= 299;
+  }
+
+  get headers(): Headers {
+    return responseState(this).headers;
+  }
+
+  get body(): HttpBodyStream | null {
+    return responseState(this).body?.stream ?? null;
+  }
+
+  get bodyUsed(): boolean {
+    return responseState(this).body?.bodyUsed ?? false;
+  }
+
+  get url(): string {
+    return responseState(this).url;
+  }
+
+  get redirected(): boolean {
+    return responseState(this).redirected;
   }
 
   clone(): Response {
-    throw unsupportedNetworkOperation("http.Response.clone", "http");
+    const state = responseState(this);
+    const cloneBody = state.body?.tee() ?? null;
+    return newResponseFromState({
+      ...state,
+      headers: cloneHeaders(state.headers),
+      body: cloneBody,
+    });
   }
 
   arrayBuffer(): Promise<ArrayBuffer> {
-    return unsupportedNetworkPromise("http.Response.arrayBuffer", "http");
+    return consumeArrayBuffer(responseState(this).body, "http.Response.arrayBuffer");
   }
 
   text(): Promise<string> {
-    return unsupportedNetworkPromise("http.Response.text", "http");
+    return consumeText(responseState(this).body, "http.Response.text");
   }
 
   json(): Promise<unknown> {
-    return unsupportedNetworkPromise("http.Response.json", "http");
+    return consumeJson(responseState(this).body, "http.Response.json");
   }
 
-  static json(_data: unknown, _init?: ResponseInit): Response {
-    throw unsupportedNetworkOperation("http.Response.json", "http");
+  static json(data: unknown, init: ResponseInit | null = {}): Response {
+    const serialized = JSON.stringify(data);
+    if (serialized === undefined) {
+      throw new TypeError("Response.json data is not JSON serializable");
+    }
+    const snapshot = snapshotResponseInit(init);
+    const headers = new Headers(snapshot.headers);
+    if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    return new Response(serialized, {
+      headers,
+      status: snapshot.status as number | undefined,
+      statusText: snapshot.statusText as string | undefined,
+    });
   }
 
-  static redirect(_url: string | URL, _status?: number): Response {
-    throw unsupportedNetworkOperation("http.Response.redirect", "http");
+  static redirect(url: string | URL, status: number = 302): Response {
+    const convertedStatus = toUnsignedShort(status);
+    if (![301, 302, 303, 307, 308].includes(convertedStatus)) {
+      throw new RangeError("Invalid HTTP redirect status");
+    }
+    const parsed = parseAbsoluteUrl(url);
+    return newResponseFromState({
+      status: convertedStatus,
+      statusText: "",
+      headers: createBindingHeaders([
+        { name: "location", value: `${parsed.href}${parsed.fragment}` },
+      ]),
+      body: null,
+      url: "",
+      redirected: false,
+    });
   }
+}
+
+async function consumeBytes(
+  body: BodyController | null,
+  operation: string,
+): Promise<Uint8Array> {
+  return body ? body.aggregate(operation) : new Uint8Array();
+}
+
+async function consumeArrayBuffer(
+  body: BodyController | null,
+  operation: string,
+): Promise<ArrayBuffer> {
+  return ownedUint8ArrayBuffer(await consumeBytes(body, operation));
+}
+
+async function consumeText(
+  body: BodyController | null,
+  operation: string,
+): Promise<string> {
+  return new TextDecoder().decode(await consumeBytes(body, operation));
+}
+
+async function consumeJson(
+  body: BodyController | null,
+  operation: string,
+): Promise<unknown> {
+  return JSON.parse(await consumeText(body, operation));
 }
 
 export interface HttpServerStopOptions {
@@ -223,11 +1170,639 @@ export interface HttpServeOptions {
   readonly error?: (error: unknown) => Response | Promise<Response>;
 }
 
-export function fetch(
-  _input: string | URL | Request,
-  _init?: RequestInit,
+let nextOperationId = 1;
+
+function allocateOperationId(): number {
+  if (nextOperationId > 0xffff_ffff) {
+    throw runtimeError(
+      "resource_limit",
+      "http.fetch",
+      "HTTP operation id space is exhausted for this runtime",
+    );
+  }
+  const result = nextOperationId;
+  nextOperationId++;
+  return result;
+}
+
+function validateFetchUrl(url: string): ParsedAbsoluteUrl {
+  let parsed: ParsedAbsoluteUrl;
+  try {
+    parsed = parseAbsoluteUrl(url);
+  } catch {
+    throw runtimeError(
+      "invalid_state",
+      "http.fetch",
+      "HTTP fetch URL is malformed",
+    );
+  }
+  if (parsed.scheme !== "http" && parsed.scheme !== "https") {
+    throw runtimeError(
+      "unsupported",
+      "http.fetch",
+      "HTTP fetch supports only absolute http: and https: URLs",
+    );
+  }
+  if (`${parsed.href}${parsed.fragment}` !== url) {
+    throw runtimeError(
+      "invalid_state",
+      "http.fetch",
+      "HTTP fetch URL must be canonical",
+    );
+  }
+  return parsed;
+}
+
+function abortError(): NetworkError {
+  return runtimeError("aborted", "http.fetch", "HTTP request was aborted");
+}
+
+function unsupportedOption(message: string): never {
+  throw runtimeError("unsupported", "http.fetch", message);
+}
+
+function requireFeature(
+  binding: HttpClientPrivateBinding,
+  feature: string,
+  option: string,
+): void {
+  if (!binding.featureSet.includes(feature)) {
+    unsupportedOption(`${option} requires ${feature}`);
+  }
+}
+
+function normalizeHostnameForComparison(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, "");
+}
+
+function preflightBindingFeatures(
+  binding: HttpClientPrivateBinding,
+  state: RequestState,
+  parsed: ParsedAbsoluteUrl,
+): void {
+  requireFeature(binding, "network.http.client", "HTTP fetch");
+  if (parsed.scheme === "http") {
+    if (state.tls !== undefined) unsupportedOption("TLS options are invalid for plaintext HTTP");
+    return;
+  }
+
+  requireFeature(binding, "network.http.client.tls", "HTTPS fetch");
+  const tls = state.tls;
+  if (!tls) return;
+  if (tls.ca !== undefined) {
+    requireFeature(
+      binding,
+      "network.http.client.tls.custom-ca",
+      "TLS custom CA",
+    );
+  }
+  if (tls.credential !== undefined) {
+    requireFeature(
+      binding,
+      "network.http.client.tls.client-auth",
+      "TLS client credential",
+    );
+  }
+  if (tls.clientCertificate !== undefined) {
+    unsupportedOption("TLS clientCertificate is a server-only option");
+  }
+  if (tls.alpn !== undefined) {
+    requireFeature(binding, "network.http.client.tls.alpn", "TLS ALPN");
+    if (
+      !binding.alpnProtocols ||
+      tls.alpn.some((token) => !binding.alpnProtocols!.includes(token))
+    ) {
+      unsupportedOption("TLS ALPN token is not supported by the admitted provider");
+    }
+  }
+  if (tls.minVersion === "1.3") {
+    requireFeature(binding, "network.http.client.tls.v1-3", "TLS 1.3 minimum");
+  }
+  if (tls.revocation === "required") {
+    requireFeature(
+      binding,
+      "network.http.client.tls.revocation",
+      "required TLS revocation",
+    );
+  }
+  if (tls.verification === "development-insecure") {
+    unsupportedOption(
+      "development-insecure TLS verification requires Host development policy",
+    );
+  }
+  if (
+    tls.serverName !== undefined &&
+    normalizeHostnameForComparison(tls.serverName) !==
+      normalizeHostnameForComparison(parsed.hostname)
+  ) {
+    unsupportedOption("TLS serverName must equal the authorized URL hostname");
+  }
+}
+
+const NETWORK_ERROR_CATEGORIES = new Set([
+  "runtime",
+  "resolver",
+  "transport",
+  "tls",
+  "protocol",
+]);
+const HTTP_ERROR_CODES_BY_CATEGORY = Object.freeze({
+  runtime: new Set([
+    "aborted",
+    "timed_out",
+    "closed",
+    "invalid_state",
+    "busy",
+    "resource_limit",
+    "unsupported",
+    "permission_denied",
+    "system_error",
+  ]),
+  resolver: new Set(["dns_not_found", "dns_temporary_failure", "dns_refused"]),
+  transport: new Set([
+    "connection_refused",
+    "connection_reset",
+    "network_unreachable",
+    "address_in_use",
+    "broken_pipe",
+  ]),
+  tls: new Set([
+    "tls_certificate_invalid",
+    "tls_hostname_mismatch",
+    "tls_handshake_failed",
+    "tls_version_unsupported",
+    "tls_alert",
+  ]),
+  protocol: new Set(["http_protocol_error", "message_too_large"]),
+});
+
+function isHttpCategoryCode(category: unknown, code: unknown): category is
+  import("./index.ts").NetworkErrorCategory {
+  return typeof category === "string" &&
+    typeof code === "string" &&
+    NETWORK_ERROR_CATEGORIES.has(category) &&
+    HTTP_ERROR_CODES_BY_CATEGORY[
+      category as keyof typeof HTTP_ERROR_CODES_BY_CATEGORY
+    ].has(code);
+}
+
+function bindingProtocolError(message: string): NetworkError {
+  return new NetworkError(message, {
+    category: "protocol",
+    code: "http_protocol_error",
+    operation: "http.fetch",
+    protocol: "http",
+  });
+}
+
+function safeCauseCode(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value);
+}
+
+function normalizeBindingAddress(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || value.length > 253) {
+    throw new TypeError("Invalid binding error address");
+  }
+  const authority = value.includes(":") && !value.startsWith("[")
+    ? `[${value}]`
+    : value;
+  const parsed = canonicalizeHttpUrl(`http://${authority}/`);
+  return parsed.hostname;
+}
+
+function safeReasonCode(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
+}
+
+function publicBindingMessage(code: string): string {
+  return `HTTP request failed with ${code}`;
+}
+
+function normalizeBindingError(error: unknown, operationId?: number): NetworkError {
+  if (error instanceof NetworkError) {
+    const snapshot = {
+      address: error.address,
+      category: error.category,
+      causeCode: error.causeCode,
+      code: error.code,
+      operation: error.operation,
+      port: error.port,
+      protocol: error.protocol,
+      reasonCode: error.reasonCode,
+      temporary: error.temporary,
+    };
+    let address: string | undefined;
+    try {
+      address = normalizeBindingAddress(snapshot.address);
+    } catch {
+      return bindingProtocolError("Invalid NetworkError from private binding");
+    }
+    if (!(isHttpCategoryCode(snapshot.category, snapshot.code) &&
+        typeof snapshot.operation === "string" &&
+        snapshot.operation.length <= 64 &&
+        typeof snapshot.temporary === "boolean" &&
+        (snapshot.protocol === undefined || snapshot.protocol === "http") &&
+        (snapshot.port === undefined ||
+          (Number.isInteger(snapshot.port) && snapshot.port >= 1 && snapshot.port <= 65_535)) &&
+        !(snapshot.port !== undefined && address === undefined) &&
+        (snapshot.causeCode === undefined || safeCauseCode(snapshot.causeCode)) &&
+        (snapshot.reasonCode === undefined || safeReasonCode(snapshot.reasonCode)))) {
+      return bindingProtocolError("Invalid NetworkError from private binding");
+    }
+    return new NetworkError(publicBindingMessage(snapshot.code as string), {
+      category: snapshot.category,
+      code: snapshot.code,
+      operation: "http.fetch",
+      temporary: snapshot.temporary,
+      address,
+      port: snapshot.port,
+      protocol: "http",
+      causeCode: snapshot.causeCode,
+      reasonCode: snapshot.reasonCode,
+    });
+  }
+  if (typeof error === "object" && error !== null) {
+    const candidate = error as Partial<HttpRequestErrorEvent>;
+    const snapshot = {
+      eventCode: candidate.eventCode,
+      operationId: candidate.operationId,
+      category: candidate.category,
+      code: candidate.code,
+      message: candidate.message,
+      temporary: candidate.temporary,
+      causeCode: candidate.causeCode,
+      reasonCode: candidate.reasonCode,
+    };
+    if (snapshot.eventCode !== NetworkV1EventCode.HttpRequestError) {
+      return new NetworkError("PocketJS HTTP binding failed", {
+        category: "runtime",
+        code: "system_error",
+        operation: "http.fetch",
+        protocol: "http",
+      });
+    }
+    if (
+      snapshot.operationId !== operationId ||
+      !isHttpCategoryCode(snapshot.category, snapshot.code) ||
+      typeof snapshot.message !== "string" ||
+      (snapshot.temporary !== undefined && typeof snapshot.temporary !== "boolean") ||
+      (snapshot.causeCode !== undefined && !safeCauseCode(snapshot.causeCode)) ||
+      (snapshot.reasonCode !== undefined && !safeReasonCode(snapshot.reasonCode))
+    ) {
+      return bindingProtocolError("Invalid HTTP error event from private binding");
+    }
+    return new NetworkError(publicBindingMessage(snapshot.code as string), {
+      category: snapshot.category,
+      code: snapshot.code as import("./index.ts").NetworkErrorCode,
+      operation: "http.fetch",
+      temporary: snapshot.temporary,
+      protocol: "http",
+      causeCode: snapshot.causeCode,
+      reasonCode: snapshot.reasonCode,
+    });
+  }
+  return new NetworkError("PocketJS HTTP binding failed", {
+    category: "runtime",
+    code: "system_error",
+    operation: "http.fetch",
+    protocol: "http",
+    causeCode: error instanceof Error ? "binding_exception" : undefined,
+  });
+}
+
+function snapshotResponseEvent(value: unknown): HttpResponseHeadersEvent {
+  if (typeof value !== "object" || value === null) {
+    throw bindingProtocolError("Invalid HTTP response event from private binding");
+  }
+  const event = value as Partial<HttpResponseHeadersEvent>;
+  // Body is read last: if any earlier metadata getter fails, no response body
+  // has been acquired and therefore none can be stranded by cleanup.
+  const eventCode = event.eventCode;
+  const operationId = event.operationId;
+  const status = event.status;
+  const statusText = event.statusText;
+  const headersValue = event.headers;
+  const url = event.url;
+  const redirected = event.redirected;
+  const bufferedBodyBytes = event.bufferedBodyBytes;
+  if (!arrayIsArray.call(Array, headersValue)) {
+    throw bindingProtocolError("Invalid HTTP response headers from private binding");
+  }
+  const headerArray = headersValue as readonly HttpBindingHeader[];
+  const headerCount = headerArray.length;
+  if (!Number.isSafeInteger(headerCount) || headerCount > HTTP_HEADER_COUNT) {
+    throw bindingProtocolError("Invalid HTTP response headers from private binding");
+  }
+  const headers: HttpBindingHeader[] = [];
+  for (let index = 0; index < headerCount; index++) {
+    const entry = headerArray[index];
+    if (typeof entry !== "object" || entry === null) {
+      throw bindingProtocolError("Invalid HTTP response header from private binding");
+    }
+    const name = entry.name;
+    const headerValue = entry.value;
+    if (typeof name !== "string" || typeof headerValue !== "string") {
+      throw bindingProtocolError("HTTP binding headers must contain strings");
+    }
+    headers.push(Object.freeze({ name, value: headerValue }));
+  }
+  const body = event.body;
+  return Object.freeze({
+    eventCode: eventCode as NetworkV1EventCode.HttpResponseHeaders,
+    operationId: operationId as number,
+    status: status as number,
+    statusText: statusText as string,
+    headers: Object.freeze(headers),
+    url: url as string,
+    redirected: redirected as boolean,
+    ...(body === undefined ? {} : { body }),
+    ...(bufferedBodyBytes === undefined ? {} : { bufferedBodyBytes }),
+  });
+}
+
+function validateResponseEvent(
+  event: HttpResponseHeadersEvent,
+  operationId: number,
+  requestMethod: string,
+): void {
+  if (
+    event.eventCode !== NetworkV1EventCode.HttpResponseHeaders ||
+    event.operationId !== operationId ||
+    !Number.isInteger(event.status) ||
+    event.status < 200 ||
+    event.status > 599 ||
+    typeof event.statusText !== "string" ||
+    !Array.isArray(event.headers) ||
+    typeof event.url !== "string" ||
+    typeof event.redirected !== "boolean"
+  ) {
+    throw new NetworkError("Invalid HTTP response event from private binding", {
+      category: "protocol",
+      code: "http_protocol_error",
+      operation: "http.fetch",
+      protocol: "http",
+    });
+  }
+  if (
+    event.body !== undefined &&
+    event.body !== null &&
+    (requestMethod === "HEAD" ||
+      event.status === 204 ||
+      event.status === 205 ||
+      event.status === 304)
+  ) {
+    throw bindingProtocolError(
+      "HTTP response event carries a body forbidden by its method or status",
+    );
+  }
+  try {
+    normalizeStatusText(event.statusText);
+    const responseUrl = validateFetchUrl(event.url);
+    if (responseUrl.hasFragment) throw new TypeError("Response URL contains a fragment");
+  } catch {
+    throw bindingProtocolError("Invalid HTTP response metadata from private binding");
+  }
+  if (
+    event.bufferedBodyBytes !== undefined &&
+    (!Number.isSafeInteger(event.bufferedBodyBytes) || event.bufferedBodyBytes <= 0)
+  ) {
+    throw new NetworkError("Invalid HTTP body limit from private binding", {
+      category: "protocol",
+      code: "http_protocol_error",
+      operation: "http.fetch",
+      protocol: "http",
+    });
+  }
+}
+
+function responseFromBinding(event: HttpResponseHeadersEvent): Response {
+  let headers: Headers;
+  let body: BodyController | null = null;
+  try {
+    headers = createBindingHeaders(event.headers);
+    if (event.body !== undefined && event.body !== null) {
+      body = bodyFromBinding(
+        event.body,
+        Math.min(event.bufferedBodyBytes ?? HTTP_BODY_HELPER_BYTES, HTTP_BODY_HELPER_BYTES),
+      );
+    }
+  } catch {
+    throw new NetworkError("Invalid HTTP metadata from private binding", {
+      category: "protocol",
+      code: "http_protocol_error",
+      operation: "http.fetch",
+      protocol: "http",
+    });
+  }
+  return newResponseFromState({
+    status: event.status,
+    statusText: event.statusText,
+    headers,
+    body,
+    url: event.url,
+    redirected: event.redirected,
+  });
+}
+
+function makeRequestCommand(state: RequestState, operationId: number): HttpRequestStartCommand {
+  const wireUrl = parseAbsoluteUrl(state.url).href;
+  return Object.freeze({
+    opcode: NetworkV1CommandOpcode.HttpRequestStart,
+    operationId,
+    url: wireUrl,
+    method: state.method,
+    headers: bindingHeaders(state.headers),
+    hasBody: state.body !== null,
+    redirect: state.redirect,
+    ...(state.timeouts === undefined ? {} : { timeouts: state.timeouts }),
+    maxRedirects: state.maxRedirects,
+    ...(state.tls === undefined ? {} : { tls: state.tls }),
+    ...(state.limits === undefined ? {} : { limits: state.limits }),
+    ref: state.ref,
+  });
+}
+
+function cancelCommand(operationId: number): OperationCancelCommand {
+  return Object.freeze({
+    opcode: NetworkV1CommandOpcode.OperationCancel,
+    operationId,
+  });
+}
+
+const promiseThen = Promise.prototype.then;
+
+function snapshotBindingOperation(value: unknown): HttpClientBindingOperation {
+  if (typeof value !== "object" || value === null) {
+    throw runtimeError(
+      "system_error",
+      "http.fetch",
+      "PocketJS HTTP binding returned an invalid operation",
+    );
+  }
+  const candidate = value as Partial<HttpClientBindingOperation>;
+  const cancel = candidate.cancel;
+  const response = candidate.response;
+  if (typeof cancel !== "function" || response === undefined) {
+    throw runtimeError(
+      "system_error",
+      "http.fetch",
+      "PocketJS HTTP binding returned an invalid operation",
+    );
+  }
+  let normalizedResponse: Promise<HttpResponseHeadersEvent>;
+  try {
+    normalizedResponse = promiseThen.call(
+      response,
+      (event) => event,
+      (error) => { throw error; },
+    ) as Promise<HttpResponseHeadersEvent>;
+  } catch {
+    throw runtimeError(
+      "system_error",
+      "http.fetch",
+      "PocketJS HTTP binding returned a non-Promise response",
+    );
+  }
+  return Object.freeze({
+    response: normalizedResponse,
+    cancel: (command: OperationCancelCommand) => cancel.call(value, command),
+  });
+}
+
+function bestEffortCancelProducer(
+  producer: ReturnType<BodyController["createProducer"]> | null,
+  reason: unknown,
+): void {
+  if (!producer) return;
+  try {
+    void Promise.resolve(producer.cancel(reason)).catch(() => {});
+  } catch {
+    // Producer cleanup failures are diagnostic-only.
+  }
+}
+
+function bestEffortCancelBindingBody(
+  event: HttpResponseHeadersEvent | undefined,
+  reason: unknown,
+): void {
+  try {
+    const body = event?.body;
+    if (!body) return;
+    const cancel = (body as Partial<HttpBodyStream>).cancel;
+    if (typeof cancel !== "function") return;
+    void Promise.resolve(cancel.call(body, reason)).catch(() => {});
+  } catch {
+    // Binding cleanup failures are diagnostic-only.
+  }
+}
+
+export async function fetch(
+  input: string | URL | Request,
+  init?: RequestInit,
 ): Promise<Response> {
-  return unsupportedNetworkPromise("http.fetch", "http");
+  const binding = getHttpClientBinding();
+  if (!binding) return unsupportedNetworkPromise("http.fetch", "http");
+
+  const request = new Request(input, init);
+  const state = requestState(request);
+  try {
+    const parsedUrl = validateFetchUrl(state.url);
+    preflightBindingFeatures(binding, state, parsedUrl);
+    if (abortSignalAborted(state.signal)) throw abortError();
+  } catch (error) {
+    state.detachSignal();
+    if (state.body) void state.body.cancel(error).catch(() => {});
+    throw error;
+  }
+
+  let operationId: number;
+  let producer: ReturnType<BodyController["createProducer"]> | null;
+  try {
+    operationId = allocateOperationId();
+    producer = state.body?.createProducer() ?? null;
+  } catch (error) {
+    state.detachSignal();
+    if (state.body) void state.body.cancel(error).catch(() => {});
+    throw error;
+  }
+  let operation: HttpClientBindingOperation;
+  try {
+    operation = snapshotBindingOperation(binding.start(
+      makeRequestCommand(state, operationId),
+      producer,
+      state.signal,
+    ));
+  } catch (error) {
+    const normalized = normalizeBindingError(error, operationId);
+    state.detachSignal();
+    bestEffortCancelProducer(producer, normalized);
+    throw normalized;
+  }
+
+  let rejectAbort!: (error: NetworkError) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  let responseBody: BodyController | null = null;
+  let cleaned = false;
+  let cancelDispatched = false;
+  let detachAbortAlgorithm = () => {};
+  const dispatchCancel = () => {
+    if (cancelDispatched) return;
+    cancelDispatched = true;
+    try {
+      operation.cancel(cancelCommand(operationId));
+    } catch {
+      // Cancellation diagnostics cannot replace the stable public result.
+    }
+  };
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    detachAbortAlgorithm();
+    state.detachSignal();
+  };
+  const onAbort = () => {
+    const error = abortError();
+    dispatchCancel();
+    if (responseBody) void responseBody.cancelGraph(error).catch(() => {});
+    rejectAbort(error);
+  };
+  detachAbortAlgorithm = addAbortAlgorithm(state.signal, onAbort);
+
+  let receivedEvent: HttpResponseHeadersEvent | undefined;
+  try {
+    const event = snapshotResponseEvent(await Promise.race([operation.response, aborted]));
+    receivedEvent = event;
+    if (abortSignalAborted(state.signal)) throw abortError();
+    validateResponseEvent(event, operationId, state.method);
+    const response = responseFromBinding(event);
+    responseBody = responseState(response).body;
+    if (abortSignalAborted(state.signal)) throw abortError();
+    // A response-headers event claims the request-upload direction terminal.
+    // The binding must already have stopped pull credit; this additionally
+    // retires a Guest producer if a test seam or faulty Host left it live.
+    bestEffortCancelProducer(producer, new NetworkError(
+      "HTTP request upload ended when response headers arrived",
+      {
+        category: "runtime",
+        code: "closed",
+        operation: "http.fetch.upload",
+        protocol: "http",
+      },
+    ));
+    if (responseBody) responseBody.onTerminal(cleanup);
+    else cleanup();
+    return response;
+  } catch (error) {
+    cleanup();
+    const normalized = normalizeBindingError(error, operationId);
+    dispatchCancel();
+    bestEffortCancelProducer(producer, normalized);
+    bestEffortCancelBindingBody(receivedEvent, normalized);
+    throw normalized;
+  }
 }
 
 export function serve(_options: HttpServeOptions): Promise<HttpServer> {
