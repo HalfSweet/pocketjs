@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 SERVER_NAME = "pocketjs-independent-mac-peer/1"
 DEFAULT_BODY_LIMIT = 16 * 1024
 DEFAULT_HEADER_LIMIT = 16 * 1024
+MAX_CHUNK_SIZE_LINE_BYTES = 18
 MAX_ATTEMPT_TOKENS = 1024
 VALID_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 STATUS_REASONS = {
@@ -343,16 +344,40 @@ class PeerHandler(socketserver.BaseRequestHandler):
         transfer_encodings = [
             value for name, value in headers if name.lower() == "transfer-encoding"
         ]
+        trailer_declarations = [
+            value for name, value in headers if name.lower() == "trailer"
+        ]
+        if len(transfer_encodings) > 1:
+            raise RequestError(400, "duplicate Transfer-Encoding")
+        if transfer_encodings and content_lengths:
+            raise RequestError(400, "Transfer-Encoding conflicts with Content-Length")
         if transfer_encodings:
-            raise RequestError(400, "chunked request bodies are not supported by this peer")
+            if version != "HTTP/1.1" or transfer_encodings[0].lower() != "chunked":
+                raise RequestError(400, "unsupported request transfer coding")
+            if trailer_declarations:
+                raise RequestError(400, "chunked request trailers are not supported")
+            body, buffered = self._read_chunked_request_body(buffered)
+            parsed = urlsplit(target)
+            return (
+                Request(
+                    method=method,
+                    target=target,
+                    path=parsed.path,
+                    query=parse_qs(parsed.query, keep_blank_values=True),
+                    version=version,
+                    headers=tuple(headers),
+                    body=body,
+                ),
+                buffered,
+            )
         if len(content_lengths) > 1:
             raise RequestError(400, "duplicate Content-Length")
-        try:
-            body_length = int(content_lengths[0]) if content_lengths else 0
-        except ValueError as error:
-            raise RequestError(400, "invalid Content-Length") from error
-        if body_length < 0:
+        if content_lengths and (
+            not content_lengths[0]
+            or any(character < "0" or character > "9" for character in content_lengths[0])
+        ):
             raise RequestError(400, "invalid Content-Length")
+        body_length = int(content_lengths[0]) if content_lengths else 0
         if body_length > self.server.body_limit:
             raise RequestError(413, "request body exceeds configured limit")
 
@@ -375,6 +400,61 @@ class PeerHandler(socketserver.BaseRequestHandler):
             ),
             buffered,
         )
+
+    def _read_chunked_request_body(self, buffered: bytes) -> tuple[bytes, bytes]:
+        body = bytearray()
+        while True:
+            size_line, buffered = self._read_bounded_line(
+                buffered,
+                MAX_CHUNK_SIZE_LINE_BYTES,
+                "chunk size line exceeds configured limit",
+            )
+            if not size_line or any(
+                byte not in b"0123456789abcdefABCDEF" for byte in size_line
+            ):
+                raise RequestError(400, "invalid chunk size")
+            chunk_size = int(size_line, 16)
+            if chunk_size > self.server.body_limit - len(body):
+                raise RequestError(413, "request body exceeds configured limit")
+            if chunk_size == 0:
+                while len(buffered) < 2:
+                    chunk = self.request.recv(2 - len(buffered))
+                    if not chunk:
+                        raise RequestError(400, "connection closed in chunk trailer")
+                    buffered += chunk
+                if not buffered.startswith(b"\r\n"):
+                    raise RequestError(400, "chunked request trailers are not supported")
+                return bytes(body), buffered[2:]
+
+            required = chunk_size + 2
+            while len(buffered) < required:
+                chunk = self.request.recv(min(4096, required - len(buffered)))
+                if not chunk:
+                    raise RequestError(400, "connection closed in chunk data")
+                buffered += chunk
+            if buffered[chunk_size:required] != b"\r\n":
+                raise RequestError(400, "chunk data is missing CRLF")
+            body.extend(buffered[:chunk_size])
+            buffered = buffered[required:]
+
+    def _read_bounded_line(
+        self,
+        buffered: bytes,
+        maximum_bytes: int,
+        limit_message: str,
+    ) -> tuple[bytes, bytes]:
+        marker = b"\r\n"
+        while marker not in buffered:
+            if len(buffered) >= maximum_bytes:
+                raise RequestError(400, limit_message)
+            chunk = self.request.recv(min(4096, maximum_bytes - len(buffered)))
+            if not chunk:
+                raise RequestError(400, "connection closed in chunk size")
+            buffered += chunk
+        line, remainder = buffered.split(marker, 1)
+        if len(line) + len(marker) > maximum_bytes:
+            raise RequestError(400, limit_message)
+        return line, remainder
 
     def _route(self, request: Request, keep_alive: bool) -> bool:
         if request.path == "/health":
