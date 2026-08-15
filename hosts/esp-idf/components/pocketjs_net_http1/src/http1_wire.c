@@ -774,6 +774,7 @@ static bool parse_content_length(const uint8_t *data, size_t length,
 static bool trailer_name_forbidden(const uint8_t *name, size_t length) {
   static const char *const forbidden[] = {
       "content-length",       "transfer-encoding", "host",
+      "content-encoding",
       "connection",           "trailer",           "upgrade",
       "authorization",        "proxy-authorization",
       "proxy-authenticate",   "www-authenticate",  "authentication-info",
