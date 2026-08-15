@@ -1,0 +1,101 @@
+# PocketJS ESP-IDF transport candidate
+
+This component is a private, experimental substrate for the reference protocol
+cores. **It does not register or advertise a PocketJS public capability.** It
+is pinned to ESP-IDF v6.0.2 commit
+`7101770dc6db2667b3c477cc31365dd1acd6db4e` and supports the `esp32s3` and
+`esp32p4` build targets.
+
+## Ownership and scheduling
+
+The API separates `resolve` from `connect`. A resolve completion contains a
+bounded, de-duplicated IPv4 candidate array. The protocol Core is responsible
+for applying endpoint permission to every candidate before starting a connect
+with one numeric address. TLS connect additionally receives the original DNS
+hostname, which ESP-TLS uses as `common_name`; Mbed TLS therefore performs both
+certificate identity verification and SNI with the original hostname.
+
+Create, start, pump, completion, lease, and destroy calls belong to one Host
+owner task. `cancel` and `begin_shutdown` are thread-safe and wake the owner
+after releasing the transport lock. Before destroy, the Host must prohibit new
+cross-task calls and join all in-flight callers. The lwIP DNS callback only
+copies bounded numeric results, updates native state, and calls the Host wake
+hook. **No worker, lwIP callback, or ESP-TLS call enters QuickJS.**
+
+Every accepted operation reserves one terminal credit. Success, error, abort,
+and monotonic timeout compete for one operation lifecycle transition. Dequeue
+moves that credit to `delivering`; the Core returns it explicitly only after
+Guest delivery. Operation tokens are strictly increasing 64-bit values and
+never wrap. Connection and read-lease generations also never wrap, so a stale
+handle cannot become valid through slot reuse.
+
+Cancel or timeout of connect, read, or write closes that connection. In
+particular, a partially completed write cannot leave a reusable stream with an
+unreported prefix, and a cancelled read cannot reuse an HTTP/1 connection at an
+unknown response boundary. Resolve cancellation retains only its quarantined
+DNS context; cancelling close leaves the connection open for an explicit retry.
+
+DNS submission uses one pre-acquired lwIP static callback message per DNS
+context and `dns_gethostbyname_addrtype(..., LWIP_DNS_ADDRTYPE_IPV4)`. The
+component does not call synchronous `getaddrinfo` for a hostname. Cancellation
+marks the operation immediately; a pending raw DNS context remains quarantined
+and cannot be reused until its late callback performs cleanup. The lwIP callback
+does not carry an immutable request-generation ticket, so the descriptor does
+not claim generation-based DNS cleanup. `.local` and non-canonical hostnames are
+rejected before native I/O.
+
+The BSP must initialize its concrete network interface, ESP-NETIF, and lwIP
+before creating this transport. This component never configures Wi-Fi or owns
+interface lifecycle.
+
+## TLS profile
+
+TLS is exact TLS 1.2 with hostname verification and SNI. The product Host
+selects either the compiled ESP certificate bundle or one copied, bounded,
+validated CA PEM. Guest input cannot select trust. The Host must publish a
+trusted wall-clock state; every handshake step fails closed with
+`tls_certificate_invalid` while that state is absent. Insecure certificate
+verification, weak certificate verification, renegotiation, DES/3DES, early
+data, and plaintext fallback are disabled or rejected at compile time.
+
+## Admission blockers
+
+The descriptor deliberately reports the following gaps:
+
+- **ESP-IDF v6.0.2 `esp_tls_conn_new_async` performs an internal `select`.** A
+  zero timeout waits forever, so its first TCP step uses a one millisecond
+  timeout and reports `nonblocking_tls_steps=false`. IDF reuses a consumed
+  `fd_set` after timeout; this adapter instead polls the retained socket with a
+  zero timeout and re-enters ESP-TLS only after TCP readiness. Socket allocation,
+  crypto work, and scheduler contention still have no proven per-step wall-time
+  bound.
+- **ESP-TLS invokes its private `getaddrinfo` path for the already-numeric IPv4
+  candidate.** This cannot issue hostname DNS, but its native allocation is not
+  caller-owned or byte-bounded.
+- **lwIP DNS tables, socket/netconn objects, TCP buffers, callback MEMP entries,
+  and ESP-TLS/Mbed TLS handshake objects are native allocations whose byte peak
+  is not proven by the fixed PocketJS pools.** The descriptor reports each as
+  unbounded.
+- **Validation of the one Host-pinned CA uses Mbed TLS X.509 parsing.** Its
+  transient native allocation is not caller-owned or byte-bounded even though
+  the input snapshot is fixed at 4096 bytes.
+- **The lwIP resolver retains at most `DNS_MAX_HOST_IP` records.** A larger DNS
+  RRset may be truncated, so the descriptor does not claim a complete candidate
+  set even though every returned candidate is preserved up to the fixed limit.
+- **lwIP raw DNS has no request cancellation primitive.** A cancelled query can
+  retain one fixed DNS context until success, failure, or lwIP timeout.
+- **The Host owns cross-task API lifetime.** It must disable and join
+  `cancel`/`begin_shutdown` callers before destroy; internal pool quiescence
+  cannot prove that an external caller does not still hold the pointer.
+
+Until these blockers have measured target-specific resource envelopes and the
+one millisecond ESP-TLS wait is either admitted or removed, this provider must
+not enter a formal Build Plan and must not advertise `network.http.client.tls`.
+
+## Verification
+
+The host-state test covers token monotonicity, no-wrap generations, shutdown
+admission, terminal credit conservation, cancel/deadline terminal arbitration,
+and round-robin progress without ESP-IDF. The nested ESP-IDF build-smoke app
+asserts the public descriptor and stable numeric/name mapping. Its
+`sdkconfig.defaults` fixes the candidate count and TLS policy.
