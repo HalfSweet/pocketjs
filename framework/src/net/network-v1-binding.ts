@@ -950,18 +950,18 @@ class NetworkV1HttpAdapter {
     if (command.opcode !== NetworkV1CommandOpcode.HttpRequestStart) {
       throw abiFault("high-level start used the wrong opcode");
     }
-    const slot = this.#allocate(command.operationId);
     let prepared: ReturnType<typeof prepareRequestMetadata>;
+    if (!this.binding) throw abiFault("HTTP client start is not admitted");
+    prepared = prepareRequestMetadata(
+      command,
+      this.binding.featureSet,
+      this.#httpClientLimits.values,
+    );
+    if (prepared.metadata.hasBody !== (requestBody !== null)) {
+      throw abiFault("request body presence disagrees with metadata");
+    }
+    const slot = this.#allocate(command.operationId);
     try {
-      if (!this.binding) throw abiFault("HTTP client start is not admitted");
-      prepared = prepareRequestMetadata(
-        command,
-        this.binding.featureSet,
-        this.#httpClientLimits.values,
-      );
-      if (prepared.metadata.hasBody !== (requestBody !== null)) {
-        throw abiFault("request body presence disagrees with metadata");
-      }
       if (requestBody !== null) {
         slot.requestBody = objectFreeze({ id: slot.slotId, generation: slot.generation });
         slot.producer = requestBody;
@@ -1390,7 +1390,9 @@ class NetworkV1HttpAdapter {
     slot.responseReject = undefined;
     if (!resolve) throw abiFault("response promise is missing");
     resolve(event);
-    if (!hasBody) this.#retire(slot);
+    // The native operation is not reusable until its terminal BODY_END arrives.
+    // This is also true for HEAD and null-body status responses: headers may be
+    // published before the dedicated transport has finished closing.
   }
 
   #onRequestError(slot: OperationSlot, metadata: NetworkV1ErrorMetadata): void {
@@ -1478,13 +1480,13 @@ class NetworkV1HttpAdapter {
         slot.pendingRead = undefined;
         pending?.reject(error);
         this.#failResponseBody(slot, error);
-        this.#retire(slot);
-        return PromiseIntrinsic.reject(error);
+        return PromiseIntrinsic.reject(this.#poison(error));
       }
       slot.pendingRead = undefined;
       pending?.resolve(objectFreeze({ bytes: 0, done: true }));
       state.phase = "ended";
-      this.#retire(slot);
+      // Keep the formal slot live until native BODY_END/BODY_ERROR confirms
+      // that abort/close cleanup has released the dedicated transport.
       return PromiseIntrinsic.resolve();
     };
     const stream: BodyStream = {
@@ -1524,6 +1526,10 @@ class NetworkV1HttpAdapter {
       this.#cleanupSelectedLease(completion);
       throw abiFault("response BODY_CHUNK identifies the wrong body");
     }
+    if (slot.responseBodyState?.phase === "ended") {
+      this.#cleanupSelectedLease(completion);
+      return;
+    }
     const pending = slot.pendingRead;
     if (!pending || completion.payload.byteLength >
       mathMin(pending.capacity, HTTP_BODY_CHUNK_BYTES)) {
@@ -1558,6 +1564,10 @@ class NetworkV1HttpAdapter {
   ): void {
     if (slot.phase !== "response" || !networkV1SameHandle(identity.body, slot.responseBody)) {
       throw abiFault("response BODY_ERROR identifies the wrong body");
+    }
+    if (slot.responseBodyState?.phase === "ended") {
+      this.#retire(slot);
+      return;
     }
     const pending = slot.pendingRead;
     slot.pendingRead = undefined;
