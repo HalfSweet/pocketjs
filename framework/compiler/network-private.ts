@@ -29,4 +29,9 @@ export interface NetworkPrivateBuildContext {
    * artifact. Normal build-context creation never sets this field.
    */
   readonly testOnlyStagedHttpClientFetch?: true;
+  /**
+   * Compiler-internal permit for the exact ESP formal TLS hardware-smoke
+   * artifact. Normal build-context creation never sets this field.
+   */
+  readonly testOnlyStagedHttpsClientFetch?: true;
 }

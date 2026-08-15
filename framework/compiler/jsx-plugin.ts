@@ -715,6 +715,7 @@ async function hashKey(
   features: BuildFeatures | undefined,
   privateNetworkEnabled: boolean,
   testOnlyStagedHttpClientFetch: boolean,
+  testOnlyStagedHttpsClientFetch: boolean,
 ): Promise<string> {
   const h = new Bun.CryptoHasher("sha256");
   h.update(
@@ -750,7 +751,9 @@ async function hashKey(
       "\0" +
       (testOnlyStagedHttpClientFetch
         ? "test-only-staged-http-client-fetch"
-        : "staged-network-closed") +
+        : testOnlyStagedHttpsClientFetch
+          ? "test-only-staged-https-client-fetch"
+          : "staged-network-closed") +
       "\0" +
       path +
       "\0",
@@ -844,6 +847,7 @@ export async function transformFile(
     options.features,
     options.networkPrivate !== undefined,
     options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
+    options.networkPrivate?.testOnlyStagedHttpsClientFetch === true,
   );
   const cacheFile = CACHE_DIR + key + ".json";
   const cached = (await Bun.file(cacheFile).json().catch(() => null)) as CacheEntry | null;
@@ -866,7 +870,8 @@ export async function transformFile(
         makePrivateNetworkIdentifierGate(path, options.networkPrivate),
         makeNetworkDemandGate(
           options.features,
-          options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
+          options.networkPrivate?.testOnlyStagedHttpClientFetch === true ||
+            options.networkPrivate?.testOnlyStagedHttpsClientFetch === true,
         ),
         ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
         makeCollector(collected, framework),
@@ -897,7 +902,8 @@ export async function transformFile(
     makePrivateNetworkIdentifierGate(path, options.networkPrivate),
     makeNetworkDemandGate(
       options.features,
-      options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
+      options.networkPrivate?.testOnlyStagedHttpClientFetch === true ||
+        options.networkPrivate?.testOnlyStagedHttpsClientFetch === true,
     ),
     ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
     makeCollector(collected, framework),

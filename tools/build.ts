@@ -97,6 +97,7 @@ let densityFlag: number | undefined;
 let projectRoot = process.cwd();
 let networkFactoryRequested = false;
 let testOnlyStagedHttpClientFetchRequested = false;
+let testOnlyStagedHttpsClientFetchRequested = false;
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
@@ -111,6 +112,9 @@ for (const a of args) {
   else if (a === "--network-factory") networkFactoryRequested = true;
   else if (a === "--test-only-staged-http-client-fetch") {
     testOnlyStagedHttpClientFetchRequested = true;
+  }
+  else if (a === "--test-only-staged-https-client-fetch") {
+    testOnlyStagedHttpsClientFetchRequested = true;
   }
   else if (!a.startsWith("-")) appArg = a;
 }
@@ -183,6 +187,12 @@ function resolveEntry(arg: string): string {
 }
 
 const requestedEntry = resolveEntry(appArg);
+if (
+  testOnlyStagedHttpClientFetchRequested &&
+  testOnlyStagedHttpsClientFetchRequested
+) {
+  throw new Error("PocketJS build: test-only staged network permits are mutually exclusive");
+}
 if (testOnlyStagedHttpClientFetchRequested) {
   const expectedEntry = join(
     ROOT,
@@ -227,6 +237,64 @@ if (testOnlyStagedHttpClientFetchRequested) {
   });
   console.warn(
     "PocketJS build: TEST ONLY staged HTTP client fetch permit; " +
+      "public capability admission remains closed",
+  );
+}
+if (testOnlyStagedHttpsClientFetchRequested) {
+  const expectedEntry = join(
+    ROOT,
+    "hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/app.ts",
+  );
+  const features = buildPlan?.features ?? {};
+  const enabledFeatures = Object.entries(features)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .sort();
+  const providers = buildPlan?.network?.providers;
+  const backendRoles = Object.keys(providers?.backendByRole ?? {}).sort();
+  const tlsRoles = Object.keys(providers?.tlsByRole ?? {}).sort();
+  const tlsProvider = providers?.tlsByRole["http.client"];
+  const connect = buildPlan?.network?.policy.connect ?? [];
+  if (
+    !networkFactoryRequested ||
+    bundleArtifactMode !== "network-factory" ||
+    networkPrivate === undefined ||
+    buildPlan?.target.id !== "esp-formal-network-tls-smoke-test" ||
+    buildPlan.target.hostAbi !== 1 ||
+    buildPlan.planHash !==
+      "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654" ||
+    buildPlan.app.id !== "dev.pocketjs.esp-formal-network-tls-smoke" ||
+    buildPlan.app.output !== "esp-formal-network-tls-smoke" ||
+    requestedEntry !== expectedEntry ||
+    enabledFeatures.length !== 2 ||
+    enabledFeatures[0] !== "network.http.client" ||
+    enabledFeatures[1] !== "network.http.client.tls" ||
+    backendRoles.length !== 1 ||
+    backendRoles[0] !== "http.client" ||
+    providers?.backendByRole["http.client"] !==
+      "pocketjs.net.http-client-core.v1.experimental" ||
+    tlsRoles.length !== 1 ||
+    tlsRoles[0] !== "http.client" ||
+    tlsProvider?.source !== "provider" ||
+    tlsProvider.id !== "pocketjs.net.esp-idf.esp-tls.v1.experimental" ||
+    providers?.netDriverId !== "pocketjs.net.esp-idf.transport.v1.experimental" ||
+    connect.length !== 1 ||
+    connect[0]?.protocol !== "https" ||
+    connect[0]?.host !== "pocketjs.test" ||
+    connect[0]?.port.min !== 8443 ||
+    connect[0]?.port.max !== 8443
+  ) {
+    throw new Error(
+      "PocketJS build: --test-only-staged-https-client-fetch is restricted to " +
+        "the exact ESP formal TLS network smoke plan and entry",
+    );
+  }
+  networkPrivate = Object.freeze({
+    ...networkPrivate,
+    testOnlyStagedHttpsClientFetch: true as const,
+  });
+  console.warn(
+    "PocketJS build: TEST ONLY staged HTTPS client fetch permit; " +
       "public capability admission remains closed",
   );
 }

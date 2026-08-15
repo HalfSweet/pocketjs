@@ -73,6 +73,7 @@ const SUITE: readonly Stage[] = [
       "tests/network-v1-binding.test.ts",
       "contracts/spec/network/network-v1.test.ts",
       "hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/artifact.test.ts",
+      "hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/artifact.test.ts",
       "tests/net-web.test.js",
       "tests/vita-package.test.ts",
       "tests/psp-toolchain.test.ts",

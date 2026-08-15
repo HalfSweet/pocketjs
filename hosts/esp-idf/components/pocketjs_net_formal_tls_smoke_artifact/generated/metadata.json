@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "testOnly": true,
+  "target": {
+    "id": "esp-formal-network-tls-smoke-test",
+    "hostAbi": 1
+  },
+  "planHash": "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654",
+  "planHashBytes": [
+    146,
+    64,
+    207,
+    162,
+    156,
+    22,
+    120,
+    180,
+    155,
+    111,
+    237,
+    103,
+    16,
+    74,
+    57,
+    178,
+    173,
+    50,
+    245,
+    222,
+    218,
+    179,
+    114,
+    175,
+    28,
+    42,
+    11,
+    222,
+    61,
+    96,
+    38,
+    84
+  ],
+  "featureIds": [
+    256,
+    257
+  ],
+  "factory": {
+    "sourceBytes": 470989,
+    "storageBytes": 470990,
+    "sha256": "sha256:a7091cf15823bc73f0ad3ed1ceaf00e5ecc5c4f5de49f0abc99043241dec0be1"
+  },
+  "endpoint": {
+    "origin": "https://pocketjs.test:8443",
+    "scheme": "https",
+    "host": "pocketjs.test",
+    "port": 8443,
+    "healthUrl": "https://pocketjs.test:8443/health",
+    "echoUrl": "https://pocketjs.test:8443/echo"
+  },
+  "tls": {
+    "providerId": "pocketjs.net.esp-idf.esp-tls.v1.experimental",
+    "trustSource": "host-pinned-ca",
+    "minVersion": "1.2",
+    "maxVersion": "1.2",
+    "verification": "full",
+    "revocation": "host-default",
+    "caPemBytes": 1176,
+    "caDerSha256": "sha256:318ae57f0fb82d12cf86431571fb6ec3556ecb74f530a5be6f741a482b5447af"
+  },
+  "reportGlobal": "__pocketjsFormalNetworkTlsSmokeReportV1",
+  "stagedSurfaceBuild": {
+    "publicSpecifier": "@pocketjs/framework/net/http",
+    "permit": "test-only-staged-https-client-fetch",
+    "exactAppId": "dev.pocketjs.esp-formal-network-tls-smoke",
+    "exactTargetId": "esp-formal-network-tls-smoke-test",
+    "productionGateChanged": false
+  }
+}
