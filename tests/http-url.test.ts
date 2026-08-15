@@ -151,53 +151,16 @@ describe("bounded HTTP WHATWG URL profile", () => {
   });
 
   test("keeps permission-relevant normalization on captured intrinsics", () => {
-    const normalize = String.prototype.normalize;
-    const codePointAt = String.prototype.codePointAt;
-    const split = String.prototype.split;
-    const startsWith = String.prototype.startsWith;
-    const arrayPush = Array.prototype.push;
-    const arraySplice = Array.prototype.splice;
-    const regexpTest = RegExp.prototype.test;
-    const floor = Math.floor;
-    const freeze = Object.freeze;
-    const StringConstructor = globalThis.String;
-    const Uint8ArrayConstructor = globalThis.Uint8Array;
-    let actual = "";
-    try {
-      String.prototype.normalize = () => { throw new Error("poisoned normalize"); };
-      String.prototype.codePointAt = () => { throw new Error("poisoned codePointAt"); };
-      String.prototype.split = (() => { throw new Error("poisoned split"); }) as never;
-      String.prototype.startsWith = () => { throw new Error("poisoned startsWith"); };
-      Array.prototype.push = () => { throw new Error("poisoned push"); };
-      Array.prototype.splice = () => { throw new Error("poisoned splice"); };
-      RegExp.prototype.test = () => { throw new Error("poisoned test"); };
-      Math.floor = () => { throw new Error("poisoned floor"); };
-      Object.freeze = (() => { throw new Error("poisoned freeze"); }) as never;
-      globalThis.String = class PoisonedString {
-        constructor() {
-          throw new Error("poisoned String");
-        }
-      } as never;
-      globalThis.Uint8Array = class PoisonedUint8Array {
-        constructor() {
-          throw new Error("poisoned Uint8Array");
-        }
-      } as never;
-      actual = new PocketURL("https://faß.example:443/a/../雪").href;
-    } finally {
-      String.prototype.normalize = normalize;
-      String.prototype.codePointAt = codePointAt;
-      String.prototype.split = split;
-      String.prototype.startsWith = startsWith;
-      Array.prototype.push = arrayPush;
-      Array.prototype.splice = arraySplice;
-      RegExp.prototype.test = regexpTest;
-      Math.floor = floor;
-      Object.freeze = freeze;
-      globalThis.String = StringConstructor;
-      globalThis.Uint8Array = Uint8ArrayConstructor;
-    }
-    expect(actual).toBe("https://xn--fa-hia.example/%E9%9B%AA");
+    const result = Bun.spawnSync([
+      "bun",
+      "tests/fixtures/http-url-hostile-intrinsics.ts",
+    ], {
+      cwd: new URL("..", import.meta.url).pathname,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString()).toBe("");
   });
 });
 
