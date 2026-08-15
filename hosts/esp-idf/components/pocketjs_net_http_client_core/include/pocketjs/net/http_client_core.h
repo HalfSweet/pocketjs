@@ -23,6 +23,7 @@ extern "C" {
 #define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_HEADERS 60U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADERS 64U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES 4096U
+#define POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES 2048U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_WRITE_BYTES 4096U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES 2048U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_DNS_CANDIDATES 4U
@@ -187,13 +188,24 @@ typedef struct {
   pocketjs_net_http_client_slice_t value;
 } pocketjs_net_http_client_header_t;
 
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE = 0,
+  POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED,
+  POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING,
+} pocketjs_net_http_client_request_body_kind_t;
+
 typedef struct {
   pocketjs_net_http_client_operation_token_t operation_token;
   pocketjs_net_http_client_slice_t url;
   pocketjs_net_http_client_slice_t method;
   const pocketjs_net_http_client_header_t *headers;
   size_t header_count;
+  pocketjs_net_http_client_request_body_kind_t body_kind;
+  /* Used only by FIXED. The Core snapshots these bytes before native I/O. */
   pocketjs_net_http_client_slice_t body;
+  /* Used only by STREAMING. Unknown-length streams use strict chunked coding. */
+  bool streaming_content_length_known;
+  uint64_t streaming_content_length;
 } pocketjs_net_http_client_request_t;
 
 typedef enum {
@@ -239,11 +251,14 @@ typedef struct {
   bool connection_owned;
   bool completion_retire_pending;
   bool event_outstanding;
+  bool request_body_credit_outstanding;
   size_t transport_read_leases_owned;
   uint32_t poison_flags;
   int32_t first_poison_cause_code;
   uint64_t lifecycle_generation;
   pocketjs_net_http_client_operation_token_t operation_token;
+  uint64_t request_body_generation;
+  uint64_t request_body_pull_generation;
 } pocketjs_net_http_client_core_status_t;
 
 typedef enum {
@@ -256,7 +271,12 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL,
   POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT,
   POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
 } pocketjs_net_http_client_error_t;
+
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_CAUSE_LENGTH_UNDERFLOW = 1,
+} pocketjs_net_http_client_request_body_cause_t;
 
 typedef struct {
   uint32_t slot;
@@ -268,6 +288,7 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_EVENT_BODY,
   POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE,
   POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR,
+  POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL,
 } pocketjs_net_http_client_event_type_t;
 
 typedef struct {
@@ -287,6 +308,15 @@ typedef struct {
       pocketjs_net_http_client_body_lease_t lease;
       size_t byte_count;
     } body;
+    struct {
+      /*
+       * Retiring this event does not consume its credit. A later producer
+       * command must echo both generations and the operation token.
+       */
+      uint64_t body_generation;
+      uint64_t pull_generation;
+      size_t maximum_bytes;
+    } request_body_pull;
     struct {
       pocketjs_net_http_client_error_t code;
       int32_t cause_code;
@@ -315,8 +345,16 @@ typedef struct {
   bool cleanup_faults_separate_from_terminal;
   bool poison_is_machine_readable;
   bool explicit_shutdown_lifecycle;
+  bool fixed_request_body;
+  bool streaming_request_body;
+  bool chunked_request_body;
+  bool known_length_streaming_request_body;
+  bool streaming_request_body_buffered_in_full;
   size_t instance_bytes;
+  /* Compatibility name for the fixed snapshot ceiling. */
   size_t max_request_body_bytes;
+  size_t max_fixed_request_body_bytes;
+  size_t max_request_body_chunk_bytes;
   size_t body_lease_bytes;
 } pocketjs_net_http_client_core_descriptor_t;
 
@@ -353,6 +391,28 @@ bool pocketjs_net_http_client_core_grant_body_credit(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,
     size_t maximum_bytes);
+
+/*
+ * Owner-only request producer commands. They are accepted only after the
+ * matching REQUEST_BODY_PULL event has been taken and retired. Each matching
+ * command consumes exactly one credit; rejected commands consume nothing.
+ */
+bool pocketjs_net_http_client_core_submit_request_body_chunk(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation,
+    const uint8_t *bytes, size_t length);
+
+bool pocketjs_net_http_client_core_submit_request_body_end(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation);
+
+bool pocketjs_net_http_client_core_submit_request_body_error(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation,
+    int32_t cause_code);
 
 bool pocketjs_net_http_client_core_take_event(
     pocketjs_net_http_client_core_t *core,

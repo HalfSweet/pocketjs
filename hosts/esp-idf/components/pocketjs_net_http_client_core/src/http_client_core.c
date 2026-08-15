@@ -16,6 +16,9 @@ typedef enum {
   CORE_CONNECTING,
   CORE_WRITING_HEAD,
   CORE_WRITING_BODY,
+  CORE_WAITING_REQUEST_BODY,
+  CORE_WRITING_REQUEST_BODY_CHUNK,
+  CORE_WRITING_REQUEST_BODY_END,
   CORE_READING,
   CORE_CLOSING,
   CORE_WAITING_TERMINAL_RETIRE,
@@ -46,6 +49,8 @@ struct pocketjs_net_http_client_core {
   uint64_t last_transport_token;
   uint64_t event_sequence;
   uint64_t body_lease_generation;
+  uint64_t last_request_body_generation;
+  uint64_t last_request_body_pull_generation;
   uint64_t lifecycle_generation;
   uint64_t now_us;
   uint64_t connect_deadline_us;
@@ -82,6 +87,16 @@ struct pocketjs_net_http_client_core {
   size_t request_header_count;
   uint8_t request_body[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES];
   size_t request_body_length;
+  pocketjs_net_http_client_request_body_kind_t request_body_kind;
+  bool request_body_length_known;
+  uint64_t request_body_expected_length;
+  uint64_t request_body_submitted_length;
+  uint64_t request_body_generation;
+  uint64_t request_body_pull_generation;
+  size_t request_body_pull_maximum;
+  size_t request_body_pending_payload_length;
+  bool request_body_pull_active;
+  bool request_body_pull_event_retired;
   pocketjs_net_http1_request_encoder_t encoder;
   bool encoder_done;
   uint8_t write_bytes[POCKETJS_NET_HTTP_CLIENT_CORE_WRITE_BYTES];
@@ -135,6 +150,9 @@ struct pocketjs_net_http_client_core {
 _Static_assert(sizeof(struct pocketjs_net_http_client_core) <=
                    POCKETJS_NET_HTTP_CLIENT_CORE_INSTANCE_BYTES,
                "HTTP Client Core storage constant is too small");
+_Static_assert(POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES + 32U <=
+                   POCKETJS_NET_HTTP_CLIENT_CORE_WRITE_BYTES,
+               "request chunk plus chunked framing must fit write storage");
 
 static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .id = POCKETJS_NET_HTTP_CLIENT_CORE_ID,
@@ -157,9 +175,18 @@ static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .cleanup_faults_separate_from_terminal = true,
     .poison_is_machine_readable = true,
     .explicit_shutdown_lifecycle = true,
+    .fixed_request_body = true,
+    .streaming_request_body = true,
+    .chunked_request_body = true,
+    .known_length_streaming_request_body = true,
+    .streaming_request_body_buffered_in_full = false,
     .instance_bytes = POCKETJS_NET_HTTP_CLIENT_CORE_INSTANCE_BYTES,
     .max_request_body_bytes =
         POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES,
+    .max_fixed_request_body_bytes =
+        POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES,
+    .max_request_body_chunk_bytes =
+        POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES,
     .body_lease_bytes = POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES,
 };
 
@@ -198,6 +225,7 @@ static bool core_is_quiescent_internal(
          !core->transport_active && !core->connection_valid &&
          !core->transport_read_lease_valid && !core->orphan_read_lease_valid &&
          !core->completion_retire_pending && !core->body_lease_active &&
+         !core->request_body_pull_active &&
          !core->permission_callback_active;
 }
 
@@ -544,7 +572,40 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
                  const pocketjs_net_http_client_request_t *request) {
   if (request == NULL || request->operation_token == 0U ||
       (request->header_count != 0U && request->headers == NULL) ||
+      request->body_kind > POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING ||
       (request->body.length != 0U && request->body.data == NULL)) {
+    return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
+  }
+  switch (request->body_kind) {
+  case POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE:
+    if (request->body.length != 0U ||
+        request->streaming_content_length_known ||
+        request->streaming_content_length != 0U) {
+      return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
+    }
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED:
+    if (request->streaming_content_length_known ||
+        request->streaming_content_length != 0U) {
+      return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
+    }
+    if (request->body.length >
+        POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES) {
+      return POCKETJS_NET_HTTP_CLIENT_START_LIMIT_EXCEEDED;
+    }
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING:
+    if (request->body.length != 0U ||
+        (!request->streaming_content_length_known &&
+         request->streaming_content_length != 0U)) {
+      return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
+    }
+    if (core->last_request_body_generation == UINT64_MAX ||
+        core->last_request_body_pull_generation == UINT64_MAX) {
+      return POCKETJS_NET_HTTP_CLIENT_START_TOKEN_EXHAUSTED;
+    }
+    break;
+  default:
     return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
   }
   if (core->last_operation_token == UINT64_MAX) {
@@ -562,13 +623,11 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
   if (!valid_method(request->method.data, request->method.length)) {
     return POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST;
   }
-  if (request->body.length >
-          POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES ||
-      request->header_count >
+  if (request->header_count >
           POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_HEADERS) {
     return POCKETJS_NET_HTTP_CLIENT_START_LIMIT_EXCEEDED;
   }
-  if (request->body.length != 0U &&
+  if (request->body_kind != POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE &&
       (ascii_equal_case(request->method.data, request->method.length, "GET") ||
        ascii_equal_case(request->method.data, request->method.length,
                         "HEAD"))) {
@@ -628,10 +687,39 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
           .value = {.data = encoding_value,
                     .length = sizeof(encoding_value) - 1U},
       };
-  if (request->body.length != 0U) {
+  if (request->body_kind == POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED &&
+      request->body.length != 0U) {
     memcpy(core->request_body, request->body.data, request->body.length);
   }
-  core->request_body_length = request->body.length;
+  core->request_body_kind = request->body_kind;
+  core->request_body_length =
+      request->body_kind == POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED
+          ? request->body.length
+          : 0U;
+  core->request_body_length_known =
+      request->body_kind == POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING &&
+      request->streaming_content_length_known;
+  core->request_body_expected_length =
+      core->request_body_length_known ? request->streaming_content_length : 0U;
+  core->request_body_submitted_length = 0U;
+  core->request_body_pending_payload_length = 0U;
+  core->request_body_pull_active = false;
+  core->request_body_pull_event_retired = false;
+
+  pocketjs_net_http1_request_body_kind_t wire_body_kind =
+      POCKETJS_NET_HTTP1_REQUEST_BODY_NONE;
+  uint64_t wire_content_length = 0U;
+  if (core->request_body_kind ==
+      POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED) {
+    wire_body_kind = POCKETJS_NET_HTTP1_REQUEST_BODY_FIXED;
+    wire_content_length = core->request_body_length;
+  } else if (core->request_body_kind ==
+             POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING) {
+    wire_body_kind = core->request_body_length_known
+                         ? POCKETJS_NET_HTTP1_REQUEST_BODY_FIXED
+                         : POCKETJS_NET_HTTP1_REQUEST_BODY_CHUNKED;
+    wire_content_length = core->request_body_expected_length;
+  }
 
   pocketjs_net_http1_request_t wire_request = {
       .method = {.data = core->method, .length = core->method_length},
@@ -640,10 +728,8 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
                .length = strlen(core->host_field)},
       .headers = core->request_headers,
       .header_count = core->request_header_count,
-      .body_kind = core->request_body_length == 0U
-                       ? POCKETJS_NET_HTTP1_REQUEST_BODY_NONE
-                       : POCKETJS_NET_HTTP1_REQUEST_BODY_FIXED,
-      .content_length = core->request_body_length,
+      .body_kind = wire_body_kind,
+      .content_length = wire_content_length,
   };
   pocketjs_net_http1_wire_error_t wire_error =
       pocketjs_net_http1_request_encoder_init(
@@ -659,7 +745,10 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
 static bool publish_event(pocketjs_net_http_client_core_t *core,
                           pocketjs_net_http_client_event_type_t type) {
   uint64_t sequence = 0U;
+  bool terminal = type == POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE ||
+                  type == POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR;
   if (core->event_state != EVENT_EMPTY ||
+      (!terminal && core->event_sequence >= UINT64_MAX - 1U) ||
       !next_event_sequence(core, &sequence)) {
     return false;
   }
@@ -855,6 +944,63 @@ static void select_success(pocketjs_net_http_client_core_t *core) {
   core->terminal_success = true;
 }
 
+static void revoke_request_body_credit(
+    pocketjs_net_http_client_core_t *core) {
+  core->request_body_pull_active = false;
+  core->request_body_pull_event_retired = false;
+  core->request_body_pull_maximum = 0U;
+  if (core->event_state != EVENT_EMPTY &&
+      core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
+    core->event_state = EVENT_EMPTY;
+    memset(&core->event, 0, sizeof(core->event));
+  }
+}
+
+static bool publish_request_body_pull(
+    pocketjs_net_http_client_core_t *core) {
+  if (core->state != CORE_WAITING_REQUEST_BODY || core->terminal_selected ||
+      core->event_state != EVENT_EMPTY || core->request_body_pull_active) {
+    return false;
+  }
+  size_t maximum = POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES;
+  if (core->request_body_length_known) {
+    if (core->request_body_submitted_length >=
+        core->request_body_expected_length) {
+      select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
+                     POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_CAUSE_LENGTH_UNDERFLOW);
+      return false;
+    }
+    uint64_t remaining = core->request_body_expected_length -
+                         core->request_body_submitted_length;
+    if (remaining < maximum) {
+      maximum = (size_t)remaining;
+    }
+  }
+  if (maximum == 0U ||
+      core->last_request_body_pull_generation == UINT64_MAX) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
+    return false;
+  }
+  ++core->last_request_body_pull_generation;
+  core->request_body_pull_generation =
+      core->last_request_body_pull_generation;
+  core->request_body_pull_maximum = maximum;
+  core->request_body_pull_active = true;
+  core->request_body_pull_event_retired = false;
+  if (!publish_event(core,
+                     POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL)) {
+    revoke_request_body_credit(core);
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
+    return false;
+  }
+  core->event.detail.request_body_pull.body_generation =
+      core->request_body_generation;
+  core->event.detail.request_body_pull.pull_generation =
+      core->request_body_pull_generation;
+  core->event.detail.request_body_pull.maximum_bytes = maximum;
+  return true;
+}
+
 static bool invoke_permission(
     pocketjs_net_http_client_core_t *core,
     const pocketjs_net_http_client_endpoint_t *endpoint,
@@ -996,7 +1142,11 @@ static bool start_close(pocketjs_net_http_client_core_t *core) {
 }
 
 static void progress_terminal(pocketjs_net_http_client_core_t *core) {
-  if (!core->terminal_selected || core->event_state != EVENT_EMPTY) {
+  if (!core->terminal_selected) {
+    return;
+  }
+  revoke_request_body_credit(core);
+  if (core->event_state != EVENT_EMPTY) {
     return;
   }
   (void)release_transport_read_lease(core);
@@ -1079,7 +1229,7 @@ start_write(pocketjs_net_http_client_core_t *core, const uint8_t *bytes,
   pocketjs_net_http_client_transport_result_t result =
       core->config.transport_ops->start_write(
           core->config.transport_context, token, core->connection, bytes,
-          length, core->headers_deadline_us);
+          length, core->total_deadline_us);
   if (result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
     core->write_length = length;
     core->transport_active = true;
@@ -1181,6 +1331,14 @@ static bool start_read(pocketjs_net_http_client_core_t *core) {
   core->transport_operation_token = token;
   core->state = CORE_READING;
   return true;
+}
+
+static bool begin_response_read(pocketjs_net_http_client_core_t *core) {
+  core->headers_deadline_us = earlier_deadline(
+      deadline_after(core->now_us, core->config.headers_timeout_us),
+      core->total_deadline_us);
+  core->state = CORE_READING;
+  return start_read(core);
 }
 
 static void publish_body_if_any(pocketjs_net_http_client_core_t *core) {
@@ -1436,21 +1594,43 @@ static void handle_transport_completion(
     if (core->state == CORE_WRITING_HEAD) {
       if (!core->encoder_done) {
         (void)emit_next_request_head(core);
-      } else if (core->request_body_length != 0U) {
+      } else if (core->request_body_kind ==
+                     POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED &&
+                 core->request_body_length != 0U) {
         pocketjs_net_http_client_transport_result_t result =
             start_write(core, core->request_body, core->request_body_length,
                         CORE_WRITING_BODY);
         if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
-          select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+          select_failure(core,
+                         result ==
+                                 POCKETJS_NET_HTTP_CLIENT_TRANSPORT_RESOURCE_LIMIT
+                             ? POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT
+                             : POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
                          (int32_t)result);
         }
+      } else if (core->request_body_kind ==
+                     POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING &&
+                 (!core->request_body_length_known ||
+                  core->request_body_expected_length != 0U)) {
+        core->state = CORE_WAITING_REQUEST_BODY;
+        (void)publish_request_body_pull(core);
       } else {
-        core->state = CORE_READING;
-        (void)start_read(core);
+        (void)begin_response_read(core);
       }
     } else if (core->state == CORE_WRITING_BODY) {
-      core->state = CORE_READING;
-      (void)start_read(core);
+      (void)begin_response_read(core);
+    } else if (core->state == CORE_WRITING_REQUEST_BODY_CHUNK) {
+      core->request_body_pending_payload_length = 0U;
+      if (core->request_body_length_known &&
+          core->request_body_submitted_length ==
+              core->request_body_expected_length) {
+        (void)begin_response_read(core);
+      } else {
+        core->state = CORE_WAITING_REQUEST_BODY;
+        (void)publish_request_body_pull(core);
+      }
+    } else if (core->state == CORE_WRITING_REQUEST_BODY_END) {
+      (void)begin_response_read(core);
     } else {
       select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT, 0);
     }
@@ -1575,7 +1755,8 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_start(
   if (core->state != CORE_IDLE || core->event_state != EVENT_EMPTY) {
     return POCKETJS_NET_HTTP_CLIENT_START_BUSY;
   }
-  if (core->lifecycle_generation == UINT64_MAX) {
+  if (core->lifecycle_generation == UINT64_MAX ||
+      core->event_sequence == UINT64_MAX) {
     return POCKETJS_NET_HTTP_CLIENT_START_TOKEN_EXHAUSTED;
   }
 
@@ -1584,6 +1765,14 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_start(
   if (result != POCKETJS_NET_HTTP_CLIENT_START_OK) {
     return result;
   }
+  if (core->request_body_kind ==
+      POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING) {
+    ++core->last_request_body_generation;
+    core->request_body_generation = core->last_request_body_generation;
+  } else {
+    core->request_body_generation = 0U;
+  }
+  core->request_body_pull_generation = 0U;
   core->last_operation_token = request->operation_token;
   core->operation_token = request->operation_token;
   ++core->lifecycle_generation;
@@ -1821,6 +2010,150 @@ bool pocketjs_net_http_client_core_grant_body_credit(
   return true;
 }
 
+static bool request_body_credit_matches(
+    const pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation) {
+  return core->request_body_kind ==
+             POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING &&
+         core->state == CORE_WAITING_REQUEST_BODY &&
+         !core->terminal_selected && core->event_state == EVENT_EMPTY &&
+         core->request_body_pull_active &&
+         core->request_body_pull_event_retired &&
+         operation_token == core->operation_token &&
+         body_generation != 0U &&
+         body_generation == core->request_body_generation &&
+         pull_generation != 0U &&
+         pull_generation == core->request_body_pull_generation;
+}
+
+static void consume_request_body_credit(
+    pocketjs_net_http_client_core_t *core) {
+  core->request_body_pull_active = false;
+  core->request_body_pull_event_retired = false;
+  core->request_body_pull_maximum = 0U;
+}
+
+static size_t encode_chunked_request_body(
+    pocketjs_net_http_client_core_t *core, size_t payload_length) {
+  static const uint8_t hex[] = "0123456789abcdef";
+  uint8_t reversed[sizeof(size_t) * 2U];
+  size_t reversed_length = 0U;
+  size_t value = payload_length;
+  do {
+    reversed[reversed_length++] = hex[value & 0xfU];
+    value >>= 4U;
+  } while (value != 0U);
+  size_t offset = 0U;
+  while (reversed_length != 0U) {
+    core->write_bytes[offset++] = reversed[--reversed_length];
+  }
+  core->write_bytes[offset++] = '\r';
+  core->write_bytes[offset++] = '\n';
+  memmove(core->write_bytes + offset, core->request_body, payload_length);
+  offset += payload_length;
+  core->write_bytes[offset++] = '\r';
+  core->write_bytes[offset++] = '\n';
+  return offset;
+}
+
+bool pocketjs_net_http_client_core_submit_request_body_chunk(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation,
+    const uint8_t *bytes, size_t length) {
+  if (!core_public_entry_allowed(core) || bytes == NULL || length == 0U ||
+      length > POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES ||
+      !request_body_credit_matches(core, operation_token, body_generation,
+                                   pull_generation) ||
+      length > core->request_body_pull_maximum) {
+    return false;
+  }
+  if (core->request_body_length_known &&
+      (core->request_body_submitted_length >
+           core->request_body_expected_length ||
+       (uint64_t)length > core->request_body_expected_length -
+                              core->request_body_submitted_length)) {
+    return false;
+  }
+  memmove(core->request_body, bytes, length);
+  consume_request_body_credit(core);
+  if ((uint64_t)length >
+      UINT64_MAX - core->request_body_submitted_length) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
+    progress_terminal(core);
+    return true;
+  }
+  core->request_body_submitted_length += (uint64_t)length;
+  core->request_body_pending_payload_length = length;
+  const uint8_t *wire_bytes = core->request_body;
+  size_t wire_length = length;
+  if (!core->request_body_length_known) {
+    wire_length = encode_chunked_request_body(core, length);
+    wire_bytes = core->write_bytes;
+  }
+  pocketjs_net_http_client_transport_result_t result = start_write(
+      core, wire_bytes, wire_length, CORE_WRITING_REQUEST_BODY_CHUNK);
+  if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+    select_failure(core,
+                   result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_RESOURCE_LIMIT
+                       ? POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT
+                       : POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                   (int32_t)result);
+    progress_terminal(core);
+  }
+  return true;
+}
+
+bool pocketjs_net_http_client_core_submit_request_body_end(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation) {
+  if (!core_public_entry_allowed(core) ||
+      !request_body_credit_matches(core, operation_token, body_generation,
+                                   pull_generation)) {
+    return false;
+  }
+  consume_request_body_credit(core);
+  if (core->request_body_length_known) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
+                   POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_CAUSE_LENGTH_UNDERFLOW);
+    progress_terminal(core);
+    return true;
+  }
+  static const uint8_t terminal_chunk[] = "0\r\n\r\n";
+  memcpy(core->write_bytes, terminal_chunk, sizeof(terminal_chunk) - 1U);
+  pocketjs_net_http_client_transport_result_t result = start_write(
+      core, core->write_bytes, sizeof(terminal_chunk) - 1U,
+      CORE_WRITING_REQUEST_BODY_END);
+  if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+    select_failure(core,
+                   result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_RESOURCE_LIMIT
+                       ? POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT
+                       : POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                   (int32_t)result);
+    progress_terminal(core);
+  }
+  return true;
+}
+
+bool pocketjs_net_http_client_core_submit_request_body_error(
+    pocketjs_net_http_client_core_t *core,
+    pocketjs_net_http_client_operation_token_t operation_token,
+    uint64_t body_generation, uint64_t pull_generation,
+    int32_t cause_code) {
+  if (!core_public_entry_allowed(core) ||
+      !request_body_credit_matches(core, operation_token, body_generation,
+                                   pull_generation)) {
+    return false;
+  }
+  consume_request_body_credit(core);
+  select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
+                 cause_code);
+  progress_terminal(core);
+  return true;
+}
+
 bool pocketjs_net_http_client_core_take_event(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_event_t *out_event) {
@@ -1836,6 +2169,17 @@ bool pocketjs_net_http_client_core_take_event(
 static void reset_after_terminal(pocketjs_net_http_client_core_t *core) {
   core->state = CORE_IDLE;
   core->operation_token = 0U;
+  core->request_body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE;
+  core->request_body_length = 0U;
+  core->request_body_length_known = false;
+  core->request_body_expected_length = 0U;
+  core->request_body_submitted_length = 0U;
+  core->request_body_generation = 0U;
+  core->request_body_pull_generation = 0U;
+  core->request_body_pull_maximum = 0U;
+  core->request_body_pending_payload_length = 0U;
+  core->request_body_pull_active = false;
+  core->request_body_pull_event_retired = false;
   core->body_credit = 0U;
   core->body_byte_count = 0U;
   core->body_lease_active = false;
@@ -1857,7 +2201,14 @@ bool pocketjs_net_http_client_core_retire_event(
       core->event_state != EVENT_DELIVERING ||
       sequence != core->event.sequence ||
       (core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_BODY &&
-       !core->body_lease_released)) {
+       !core->body_lease_released) ||
+      (core->event.type ==
+           POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL &&
+       (!core->request_body_pull_active ||
+        core->event.detail.request_body_pull.body_generation !=
+            core->request_body_generation ||
+        core->event.detail.request_body_pull.pull_generation !=
+            core->request_body_pull_generation))) {
     return false;
   }
   pocketjs_net_http_client_event_type_t type = core->event.type;
@@ -1869,6 +2220,10 @@ bool pocketjs_net_http_client_core_retire_event(
     core->body_lease_released = false;
     core->body_byte_count = 0U;
     core->body_credit = 0U;
+  } else if (type ==
+             POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
+    core->request_body_pull_event_retired = true;
+    return true;
   } else {
     reset_after_terminal(core);
     return true;
@@ -1931,12 +2286,16 @@ bool pocketjs_net_http_client_core_get_status(
       .connection_owned = core->connection_valid,
       .completion_retire_pending = core->completion_retire_pending,
       .event_outstanding = core->event_state != EVENT_EMPTY,
+      .request_body_credit_outstanding = core->request_body_pull_active,
       .transport_read_leases_owned =
           owned_transport_read_lease_count(core),
       .poison_flags = core->poison_flags,
       .first_poison_cause_code = core->first_poison_cause_code,
       .lifecycle_generation = core->lifecycle_generation,
       .operation_token = core->operation_token,
+      .request_body_generation = core->request_body_generation,
+      .request_body_pull_generation =
+          core->request_body_pull_generation,
   };
   return true;
 }
