@@ -55,14 +55,19 @@ call made from the callback, and the Core verifies its lifecycle generation,
 operation token, state, and transport-idle state after each callback returns.
 
 Response headers are copied into the fixed response store and emitted before
-body bytes. The Host must retire that event, grant one bounded body-credit
-window, view and release the resulting body lease, and retire the body event
-before more input is consumed. The HTTP/1.1 substrate validates framing,
-chunking, chunk extensions, trailer declarations, and trailer fields. Statuses
-from 200 through 599, including 4xx and 5xx, are protocol success. Content
-coding other than `identity` is rejected because this Core does no decoding.
-When one read completion contains bytes and EOF, **EOF is applied only after
-every byte in that transport lease has been consumed under body credit**.
+body bytes. **`response_header_bytes_limit` bounds the final response fields as
+`name + value + ": " + CRLF`; zero selects the 8192-byte compile-time maximum,
+and initialization rejects a larger value.** Crossing the selected limit is a
+`resource_limit` terminal selected by the parser callback before any response
+headers event is published. The Host must retire that event, grant one bounded
+body-credit window, view and release the resulting body lease, and retire the
+body event before more input is consumed. The HTTP/1.1 substrate validates
+framing, chunking, chunk extensions, trailer declarations, and trailer fields.
+Statuses from 200 through 599, including 4xx and 5xx, are protocol success.
+Content coding other than `identity` is rejected because this Core does no
+decoding. When one read completion contains bytes and EOF, **EOF is applied
+only after every byte in that transport lease has been consumed under body
+credit**.
 
 Connect, response-header, idle-read, and total deadlines use Host-supplied
 monotonic microseconds. Abort and all deadline paths select one terminal result.
@@ -129,7 +134,8 @@ Plan and must not advertise `network.http.client` or
 `test_host/core_test.c` uses a deterministic fake transport to cover permission
 ordering, headers-first delivery, bounded body credit and leases, 4xx success,
 strict trailer failure, close-before-error ordering, pre-I/O HTTPS rejection,
-abort, total timeout, and exact-one terminal delivery. Hostile cases cover all
+abort, total timeout, selected response-header configuration and parse
+boundaries, and exact-one terminal delivery. Hostile cases cover all
 public API calls attempted from a permission callback, bytes-plus-EOF reads,
 stale completions while idle, malformed read cleanup, lease and completion
 retirement failures, close admission/error/timeout, terminal immutability,
