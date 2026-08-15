@@ -879,7 +879,6 @@ static bool
 response_on_headers_complete(void *context, unsigned status_code,
                              pocketjs_net_http1_response_body_kind_t body_kind,
                              uint64_t content_length, bool informational) {
-  (void)content_length;
   pocketjs_net_http_client_core_t *core = context;
   if (informational) {
     return true;
@@ -2024,11 +2023,34 @@ bool pocketjs_net_http_client_core_grant_body_credit(
     pocketjs_net_http_client_operation_token_t operation_token,
     size_t maximum_bytes) {
   if (!core_public_entry_allowed(core) ||
-      operation_token != core->operation_token ||
-      !core->headers_delivered || core->terminal_selected ||
-      core->event_state != EVENT_EMPTY || core->body_lease_active ||
-      core->body_credit != 0U || maximum_bytes == 0U ||
+      operation_token != core->operation_token || !core->headers_delivered ||
+      core->body_lease_active || core->body_credit != 0U ||
+      maximum_bytes == 0U ||
       maximum_bytes > POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES) {
+    return false;
+  }
+
+  if (core->terminal_selected) {
+    const bool response_exposes_body =
+        !ascii_equal_case(core->method, core->method_length, "HEAD") &&
+        core->response_status != 204U && core->response_status != 205U &&
+        core->response_status != 304U;
+    if (!core->terminal_success || !core->parser_complete ||
+        !response_exposes_body) {
+      return false;
+    }
+    /*
+     * The last non-empty body lease is not itself an EOF marker. Accept one
+     * final downstream pull while the successful terminal is closing or
+     * queued so the binding can wait for BODY_END without mistaking normal
+     * end-of-stream for an invalid state. The credit also rejects duplicates
+     * until terminal retirement resets the operation.
+     */
+    core->body_credit = maximum_bytes;
+    return true;
+  }
+
+  if (core->event_state != EVENT_EMPTY) {
     return false;
   }
   core->body_credit = maximum_bytes;

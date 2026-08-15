@@ -392,7 +392,12 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
                                         size_t max_native_steps,
                                         size_t max_transport_completions);
 
-/* Grants one bounded downstream window. It is consumed before another read. */
+/*
+ * Grants one bounded downstream window. It is consumed before another read.
+ * After the final non-empty lease, one additional credit may be accepted while
+ * a successful terminal is closing or queued; that pull is completed by the
+ * terminal event and makes end-of-stream explicit to the binding.
+ */
 bool pocketjs_net_http_client_core_grant_body_credit(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,

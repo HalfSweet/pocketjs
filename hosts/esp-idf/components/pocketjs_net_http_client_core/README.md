@@ -67,7 +67,10 @@ Statuses from 200 through 599, including 4xx and 5xx, are protocol success.
 Content coding other than `identity` is rejected because this Core does no
 decoding. When one read completion contains bytes and EOF, **EOF is applied
 only after every byte in that transport lease has been consumed under body
-credit**.
+credit**. Because a non-empty body lease is not itself an EOF marker, the Core
+accepts one final downstream credit after the parser has completed and while
+the successful terminal is closing or queued. That pull receives no bytes and
+is completed by the terminal event; a duplicate final credit is rejected.
 
 Connect, response-header, idle-read, and total deadlines use Host-supplied
 monotonic microseconds. Abort and all deadline paths select one terminal result.
