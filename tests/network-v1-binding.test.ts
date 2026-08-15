@@ -29,6 +29,7 @@ import {
   type NetworkV1CompletionIdentity,
   type NetworkV1Handle,
   type NetworkV1LimitsQuery,
+  type NetworkV1LimitEntry,
   type NetworkV1ServiceDispatcher,
 } from "../contracts/spec/network/network-v1.ts";
 import {
@@ -50,6 +51,21 @@ const EXPECTED: NetworkV1CompiledExpectation = Object.freeze({
   featureIds: FEATURE_IDS,
 });
 const ABSENT = Object.freeze({ id: 0, generation: 0 });
+const DEFAULT_HTTP_CLIENT_LIMITS = Object.freeze([
+  Object.freeze({
+    name: "http.maxBodyChunkBytes",
+    default: 2048,
+    hard: 4096,
+    minimum: 512,
+  }),
+]);
+
+function admittedBinding(
+  adapter: ReturnType<typeof createNetworkV1HttpBindingAdapterForTesting>,
+) {
+  if (adapter.binding === undefined) throw new Error("test expected an admitted HTTP binding");
+  return adapter.binding;
+}
 
 function failure(
   code: NetworkV1ErrorCode = NetworkV1ErrorCode.SystemError,
@@ -102,13 +118,20 @@ class FakeHost {
   dispatcher?: NetworkV1ServiceDispatcher;
   registerCount = 0;
   releaseCount = 0;
+  pollCount = 0;
+  readonly limitsQueries: NetworkV1LimitsQuery[] = [];
+  readonly #featureIds: readonly NetworkV1FeatureId[];
+  readonly #limitValues: readonly Readonly<NetworkV1LimitEntry>[];
   #turnId = 0;
   #leaseId = 0;
 
   constructor(
     featureIds: readonly NetworkV1FeatureId[] = FEATURE_IDS,
     planHash: readonly number[] = PLAN_HASH,
+    limitValues: readonly Readonly<NetworkV1LimitEntry>[] = DEFAULT_HTTP_CLIENT_LIMITS,
   ) {
+    this.#featureIds = Object.freeze(Array.from(featureIds));
+    this.#limitValues = limitValues;
     const handshake = Object.freeze({
       abiMajor: NETWORK_V1_ABI_MAJOR,
       abiMinor: NETWORK_V1_ABI_MINOR,
@@ -124,6 +147,7 @@ class FakeHost {
         return Object.freeze({ status: NetworkV1DispatchStatus.Accepted });
       },
       nextCompletion: ({ maxPayloadBytes }: { maxPayloadBytes: number }) => {
+        this.pollCount++;
         const completion = this.completions[0];
         if (!completion) {
           return Object.freeze({
@@ -206,21 +230,15 @@ class FakeHost {
   }
 
   getLimits(query: NetworkV1LimitsQuery) {
+    this.limitsQueries.push(query);
     const http = query.protocol === NETWORK_V1_LIMIT_PROTOCOL_ANY ||
       query.protocol === NetworkV1LimitProtocol.Http;
     const client = query.role === NETWORK_V1_LIMIT_ROLE_ANY ||
       query.role === NetworkV1LimitRole.Client;
-    const featureIds = http && client ? FEATURE_IDS : Object.freeze([]);
+    const featureIds = http && client ? this.#featureIds : Object.freeze([]);
     const values = featureIds.length === 0
       ? Object.freeze([])
-      : Object.freeze([
-          Object.freeze({
-            name: "http.maxBodyChunkBytes",
-            default: 2048,
-            hard: 4096,
-            minimum: 512,
-          }),
-        ]);
+      : this.#limitValues;
     return Object.freeze({
       runtimeGeneration: RUNTIME_GENERATION,
       protocol: query.protocol,
@@ -288,15 +306,16 @@ describe("formal network v1 mount", () => {
   test("adopts only the non-zero Host runtime generation and registers once", () => {
     const host = new FakeHost();
     const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(adapter);
     expect(host.registerCount).toBe(1);
-    adapter.binding.start(
+    binding.start(
       highStart(1),
       null,
       new AbortController().signal,
     );
     expect(host.startCommand.identity.runtimeGeneration).toBe(RUNTIME_GENERATION);
     expect(host.startCommand.identity.commandSequence).toBe(1);
-    expect(adapter.binding.featureSet).toEqual(["network.http.client"]);
+    expect(binding.featureSet).toEqual(["network.http.client"]);
   });
 
   test("rejects plan/feature mismatch before dispatcher registration", () => {
@@ -346,12 +365,110 @@ describe("formal network v1 mount", () => {
     )).toThrow("data property");
     expect(reads).toBe(0);
   });
+
+  test("does not expose or register HTTP when the client feature is absent", () => {
+    const host = new FakeHost(Object.freeze([]));
+    const expected = Object.freeze({
+      planHashBytes: PLAN_HASH,
+      featureIds: Object.freeze([]),
+    });
+    const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, expected);
+    expect(adapter.binding).toBeUndefined();
+    expect(adapter.httpClientLimits).toEqual({ values: [], features: [] });
+    expect(host.registerCount).toBe(0);
+    expect(host.commands).toHaveLength(0);
+    expect(host.limitsQueries).toHaveLength(1);
+  });
+
+  test("mounts only the limits provider for a build without HTTP client", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-v1-no-http-"));
+    const resultPath = join(directory, "result.json");
+    const adapterUrl = new URL(
+      "../framework/src/net/network-v1-binding.ts",
+      import.meta.url,
+    ).href;
+    const bindingUrl = new URL("../framework/src/net/http-binding.ts", import.meta.url).href;
+    const limitsUrl = new URL("../framework/src/net/network-limits.ts", import.meta.url).href;
+    const specUrl = new URL("../contracts/spec/network/network-v1.ts", import.meta.url).href;
+    const source = `
+      const adapter = await import(${JSON.stringify(adapterUrl)});
+      const binding = await import(${JSON.stringify(bindingUrl)});
+      const limits = await import(${JSON.stringify(limitsUrl)});
+      const spec = await import(${JSON.stringify(specUrl)});
+      let dispatchCount = 0;
+      let registerCount = 0;
+      let limitsCount = 0;
+      const handshake = Object.freeze({
+        abiMajor: spec.NETWORK_V1_ABI_MAJOR,
+        abiMinor: spec.NETWORK_V1_ABI_MINOR,
+        runtimeGeneration: ${RUNTIME_GENERATION},
+        planHash: new Uint8Array(32).fill(0x5a),
+        featureIds: Object.freeze([]),
+      });
+      const table = Object.freeze({
+        handshake,
+        getLimits(query) {
+          limitsCount++;
+          return Object.freeze({
+            runtimeGeneration: query.runtimeGeneration,
+            protocol: query.protocol,
+            role: query.role,
+            values: Object.freeze([]),
+            featureIds: Object.freeze([]),
+          });
+        },
+        dispatch() {
+          dispatchCount++;
+          return Object.freeze({ status: spec.NetworkV1DispatchStatus.Accepted });
+        },
+        nextCompletion() { throw new Error("completion polling must be unreachable"); },
+        leaseTake() { throw new Error("lease take must be unreachable"); },
+        leaseReadInto() { throw new Error("lease read must be unreachable"); },
+        leaseRelease() { throw new Error("lease release must be unreachable"); },
+        registerServiceDispatcher() { registerCount++; },
+      });
+      adapter.mountNetworkV1HttpBinding(table, Object.freeze({
+        planHashBytes: Object.freeze(new Array(32).fill(0x5a)),
+        featureIds: Object.freeze([]),
+      }));
+      const snapshot = limits.queryInstalledNetworkLimits("http", "client");
+      await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({
+        hasBinding: binding.getHttpClientBinding() !== undefined,
+        snapshot,
+        dispatchCount,
+        registerCount,
+        limitsCount,
+      }));
+    `;
+    try {
+      const script = join(directory, "mount.ts");
+      await Bun.write(script, source);
+      const child = Bun.spawn([process.execPath, script], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const [exitCode, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      expect(exitCode, stderr).toBe(0);
+      expect(await Bun.file(resultPath).json()).toEqual({
+        hasBinding: false,
+        snapshot: { values: [], features: [] },
+        dispatchCount: 0,
+        registerCount: 0,
+        limitsCount: 1,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("formal HTTP command/completion adapter", () => {
   test("rejects TRACK before dispatching formal request metadata", () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     expect(() => binding.start(
       Object.freeze({ ...highStart(1), method: "TRACK" }),
       null,
@@ -360,9 +477,90 @@ describe("formal HTTP command/completion adapter", () => {
     expect(host.commands).toHaveLength(0);
   });
 
+  test("snapshots every Host response metadata field exactly once", async () => {
+    const host = new FakeHost();
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const reads = new Map<string, number>();
+    const field = <Value>(name: string, value: Value) => ({
+      enumerable: true,
+      get() {
+        reads.set(name, (reads.get(name) ?? 0) + 1);
+        return value;
+      },
+    });
+    const metadata = Object.defineProperties({}, {
+      status: field("status", 200),
+      statusText: field("statusText", "OK"),
+      headers: field("headers", Object.freeze([])),
+      url: field("url", "http://example.test/"),
+      redirected: field("redirected", false),
+      bufferedBodyBytes: field("bufferedBodyBytes", 4096),
+    });
+    host.completions.push({
+      eventCode: NetworkV1EventCode.HttpResponseHeaders,
+      identity: completionIdentity(host.startCommand, ABSENT, 1),
+      metadata,
+    } as NetworkV1Completion);
+    host.run();
+    await expect(operation.response).resolves.toMatchObject({
+      status: 200,
+      redirected: false,
+      url: "http://example.test/",
+    });
+    expect(Object.fromEntries(reads)).toEqual({
+      status: 1,
+      statusText: 1,
+      headers: 1,
+      url: 1,
+      redirected: 1,
+      bufferedBodyBytes: 1,
+    });
+  });
+
+  test("uses only canonical URL hostnames in formal TLS metadata", () => {
+    const tlsFeatureIds = Object.freeze([
+      NetworkV1FeatureId.HttpClient,
+      NetworkV1FeatureId.HttpClientTls,
+    ]);
+    const expected = Object.freeze({
+      planHashBytes: PLAN_HASH,
+      featureIds: tlsFeatureIds,
+    });
+    const host = new FakeHost(tlsFeatureIds);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, expected));
+    binding.start(Object.freeze({
+      ...highStart(1),
+      url: "https://example.test/",
+      tls: Object.freeze({ serverName: "EXAMPLE.TEST." }),
+    }), null, new AbortController().signal);
+    expect(host.startCommand.metadata.tls).toMatchObject({
+      serverName: "example.test",
+    });
+
+    binding.start(Object.freeze({
+      ...highStart(2),
+      url: "https://127.0.0.1/",
+      tls: Object.freeze({ serverName: "127.0.0.1" }),
+    }), null, new AbortController().signal);
+    const starts = host.commands.filter((command): command is Extract<NetworkV1AsyncCommand, {
+      opcode: typeof NetworkV1CommandOpcode.HttpRequestStart;
+    }> => command.opcode === NetworkV1CommandOpcode.HttpRequestStart);
+    expect(starts[1]!.metadata.tls).toMatchObject({ serverName: "" });
+
+    expect(() => binding.start(Object.freeze({
+      ...highStart(3),
+      url: "https://example.test/",
+      tls: Object.freeze({ serverName: "other.test" }),
+    }), null, new AbortController().signal)).toThrow("canonical request hostname");
+    expect(host.commands.filter(
+      (command) => command.opcode === NetworkV1CommandOpcode.HttpRequestStart,
+    )).toHaveLength(2);
+  });
+
   test("publishes headers first and copies a response lease under BODY credit", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const responseBody = Object.freeze({ id: 101, generation: 3 });
     host.completions.push(host.headers(responseBody));
@@ -400,7 +598,7 @@ describe("formal HTTP command/completion adapter", () => {
 
   test("honors event/payload budgets without dequeuing a readiness probe", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const body = Object.freeze({ id: 9, generation: 1 });
     host.completions.push(host.headers(body));
@@ -419,10 +617,67 @@ describe("formal HTTP command/completion adapter", () => {
     expect(await read).toEqual({ bytes: 4, done: false });
   });
 
+  test("detaches every service-turn request field exactly once", () => {
+    const host = new FakeHost();
+    const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const reads = new Map<string, number>();
+    const field = <Value>(name: string, value: Value) => ({
+      enumerable: true,
+      get() {
+        reads.set(name, (reads.get(name) ?? 0) + 1);
+        return value;
+      },
+    });
+    const request = Object.defineProperties({}, {
+      runtimeGeneration: field("runtimeGeneration", RUNTIME_GENERATION),
+      turnId: field("turnId", 1),
+      kind: field("kind", NetworkV1ServiceTurnKind.Network),
+      maxEvents: field("maxEvents", 8),
+      maxPayloadBytes: field("maxPayloadBytes", 65_536),
+    });
+    expect(adapter.dispatcher(request as Parameters<typeof adapter.dispatcher>[0])).toEqual({
+      status: NetworkV1ServiceTurnStatus.Drained,
+      eventsDelivered: 0,
+      payloadBytesDelivered: 0,
+      lastSequence: 0,
+    });
+    expect(Object.fromEntries(reads)).toEqual({
+      runtimeGeneration: 1,
+      turnId: 1,
+      kind: 1,
+      maxEvents: 1,
+      maxPayloadBytes: 1,
+    });
+  });
+
+  test("poisons oversized service-turn budgets before completion polling", () => {
+    for (const oversized of [
+      { maxEvents: 129, maxPayloadBytes: 65_536 },
+      { maxEvents: 8, maxPayloadBytes: 256 * 1024 + 1 },
+    ]) {
+      const host = new FakeHost();
+      const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+      const binding = admittedBinding(adapter);
+      expect(() => adapter.dispatcher(Object.freeze({
+        runtimeGeneration: RUNTIME_GENERATION,
+        turnId: 1,
+        kind: NetworkV1ServiceTurnKind.Network,
+        ...oversized,
+      }))).toThrow("outside");
+      expect(host.pollCount).toBe(0);
+      expect(() => binding.start(
+        highStart(99),
+        null,
+        new AbortController().signal,
+      )).toThrow("outside");
+      expect(host.commands).toHaveLength(0);
+    }
+  });
+
   test("cleans stale and out-of-order selected leases without delivery", async () => {
     const staleHost = new FakeHost();
     const staleAdapter = createNetworkV1HttpBindingAdapterForTesting(staleHost.table, EXPECTED);
-    const staleOperation = staleAdapter.binding.start(
+    const staleOperation = admittedBinding(staleAdapter).start(
       highStart(1),
       null,
       new AbortController().signal,
@@ -438,7 +693,7 @@ describe("formal HTTP command/completion adapter", () => {
 
     const orderedHost = new FakeHost();
     const orderedAdapter = createNetworkV1HttpBindingAdapterForTesting(orderedHost.table, EXPECTED);
-    const orderedOperation = orderedAdapter.binding.start(
+    const orderedOperation = admittedBinding(orderedAdapter).start(
       highStart(2),
       null,
       new AbortController().signal,
@@ -467,7 +722,7 @@ describe("formal HTTP command/completion adapter", () => {
         });
       }) as NetworkV1BindingTable["leaseTake"],
     });
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const body = Object.freeze({ id: 31, generation: 1 });
     host.completions.push(host.headers(body));
@@ -486,6 +741,50 @@ describe("formal HTTP command/completion adapter", () => {
     )).toThrow("lease take length disagrees");
   });
 
+  test("claims lease status once and releases after a taken length getter throws", async () => {
+    const host = new FakeHost();
+    const marker = new Error("lease length getter failed");
+    let statusReads = 0;
+    let lengthReads = 0;
+    const table = overrideHostTable(host, {
+      leaseTake: ((command: NetworkV1BufferLeaseTakeCommand) => {
+        const result = host.table.leaseTake(command);
+        expect(result.status).toBe(NetworkV1DispatchStatus.Completed);
+        return Object.freeze(Object.defineProperties({}, {
+          status: {
+            enumerable: true,
+            get() {
+              statusReads++;
+              return NetworkV1DispatchStatus.Completed;
+            },
+          },
+          byteLength: {
+            enumerable: true,
+            get() {
+              lengthReads++;
+              throw marker;
+            },
+          },
+        })) as ReturnType<NetworkV1BindingTable["leaseTake"]>;
+      }) as NetworkV1BindingTable["leaseTake"],
+    });
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 41, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const pending = response.body!.readInto(new Uint8Array(4));
+    const rejected = pending.catch((error) => error);
+    host.completions.push(host.chunk(body, [1], 2));
+
+    expect(() => host.run()).toThrow(marker);
+    expect(await rejected).toBe(marker);
+    expect(statusReads).toBe(1);
+    expect(lengthReads).toBe(1);
+    expect(host.releaseCount).toBe(1);
+  });
+
   test("cleans a dequeued lease after payload accounting validation fails", async () => {
     const host = new FakeHost();
     const table = overrideHostTable(host, {
@@ -499,7 +798,7 @@ describe("formal HTTP command/completion adapter", () => {
         });
       }) as NetworkV1BindingTable["nextCompletion"],
     });
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const body = Object.freeze({ id: 32, generation: 1 });
     host.completions.push(host.headers(body));
@@ -530,7 +829,7 @@ describe("formal HTTP command/completion adapter", () => {
         });
       }) as NetworkV1BindingTable["leaseRelease"],
     });
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const body = Object.freeze({ id: 33, generation: 1 });
     host.completions.push(host.headers(body));
@@ -551,7 +850,7 @@ describe("formal HTTP command/completion adapter", () => {
 
   test("persists a terminal response error when no read is pending", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     const operation = binding.start(highStart(1), null, new AbortController().signal);
     const body = Object.freeze({ id: 34, generation: 1 });
     host.completions.push(host.headers(body));
@@ -574,9 +873,93 @@ describe("formal HTTP command/completion adapter", () => {
     });
   });
 
+  test("sanitizes BODY_ERROR metadata and never reads a Host message", async () => {
+    const host = new FakeHost();
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 35, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const reads = new Map<string, number>();
+    const field = <Value>(name: string, value: Value) => ({
+      enumerable: true,
+      get() {
+        reads.set(name, (reads.get(name) ?? 0) + 1);
+        return value;
+      },
+    });
+    const error = Object.defineProperties({}, {
+      category: field("category", NetworkV1ErrorCategory.Runtime),
+      code: field("code", NetworkV1ErrorCode.SystemError),
+      operation: field("operation", "native.secret.operation"),
+      temporary: field("temporary", true),
+      address: field("address", "127.0.0.1"),
+      port: field("port", 443),
+      causeCode: field("causeCode", "ESP_ERR_TLS"),
+      reasonCode: field("reasonCode", 42),
+      message: field("message", "secret Host diagnostic"),
+    });
+    host.completions.push({
+      eventCode: NetworkV1EventCode.BodyError,
+      identity: completionIdentity(host.startCommand, body, 2),
+      error,
+    } as NetworkV1Completion);
+    host.run();
+    await expect(response.body!.readInto(new Uint8Array(4))).rejects.toMatchObject({
+      message: "HTTP request failed with system_error",
+      operation: "http.body.readInto",
+      temporary: true,
+      address: "127.0.0.1",
+      port: 443,
+      causeCode: "ESP_ERR_TLS",
+      reasonCode: 42,
+    });
+    expect(Object.fromEntries(reads)).toEqual({
+      category: 1,
+      code: 1,
+      operation: 1,
+      temporary: 1,
+      address: 1,
+      port: 1,
+      causeCode: 1,
+      reasonCode: 1,
+    });
+    expect(reads.get("message")).toBeUndefined();
+  });
+
+  test("poisons non-token causes and non-canonical Host addresses", async () => {
+    for (const metadata of [
+      Object.freeze({ ...failure(), causeCode: "secret diagnostic text" }),
+      Object.freeze({ ...failure(), address: "EXAMPLE.test" }),
+    ]) {
+      const host = new FakeHost();
+      const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
+      const operation = binding.start(highStart(1), null, new AbortController().signal);
+      const body = Object.freeze({ id: 36, generation: 1 });
+      host.completions.push(host.headers(body));
+      host.run();
+      const response = await operation.response;
+      host.completions.push(Object.freeze({
+        eventCode: NetworkV1EventCode.BodyError,
+        identity: completionIdentity(host.startCommand, body, 2),
+        error: metadata,
+      }));
+      expect(() => host.run()).toThrow();
+      await expect(response.body!.readInto(new Uint8Array(4))).rejects.toBeInstanceOf(
+        TypeError,
+      );
+      expect(() => binding.start(
+        highStart(2),
+        null,
+        new AbortController().signal,
+      )).toThrow();
+    }
+  });
+
   test("maps abort to one exact cancel command and a stable numeric error", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     const operation = binding.start(highStart(22), null, new AbortController().signal);
     const cancel = Object.freeze({
       opcode: HighCommandOpcode.OperationCancel,
@@ -600,9 +983,130 @@ describe("formal HTTP command/completion adapter", () => {
     });
   });
 
+  test("poisons and clears a response pull when Host dispatch throws", async () => {
+    const host = new FakeHost();
+    const fault = new Error("response pull dispatch fault");
+    const table = overrideHostTable(host, {
+      dispatch: ((command: NetworkV1AsyncCommand) => {
+        if (command.opcode === NetworkV1CommandOpcode.BodyPull) throw fault;
+        return host.table.dispatch(command);
+      }) as NetworkV1BindingTable["dispatch"],
+    });
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 41, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    await expect(response.body!.readInto(new Uint8Array(4))).rejects.toBe(fault);
+    await expect(response.body!.cancel()).rejects.toBe(fault);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("response pull dispatch fault");
+  });
+
+  test("poisons and clears response read/cancel state when cancel dispatch throws", async () => {
+    const host = new FakeHost();
+    const fault = new Error("response cancel dispatch fault");
+    const table = overrideHostTable(host, {
+      dispatch: ((command: NetworkV1AsyncCommand) => {
+        if (command.opcode === NetworkV1CommandOpcode.BodyCancel) throw fault;
+        return host.table.dispatch(command);
+      }) as NetworkV1BindingTable["dispatch"],
+    });
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 42, generation: 1 });
+    host.completions.push(host.headers(body));
+    host.run();
+    const response = await operation.response;
+    const pending = response.body!.readInto(new Uint8Array(4));
+    const pendingFailure = pending.catch((error) => error);
+    await expect(response.body!.cancel()).rejects.toBe(fault);
+    expect(await pendingFailure).toBe(fault);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("response cancel dispatch fault");
+  });
+
+  test("poisons operation cancel dispatch faults without leaving a pending response", async () => {
+    const host = new FakeHost();
+    const fault = new Error("operation cancel dispatch fault");
+    const table = overrideHostTable(host, {
+      dispatch: ((command: NetworkV1AsyncCommand) => {
+        if (command.opcode === NetworkV1CommandOpcode.OperationCancel) throw fault;
+        return host.table.dispatch(command);
+      }) as NetworkV1BindingTable["dispatch"],
+    });
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
+    const operation = binding.start(highStart(1), null, new AbortController().signal);
+    const responseFailure = operation.response.catch((error) => error);
+    expect(() => operation.cancel(Object.freeze({
+      opcode: HighCommandOpcode.OperationCancel,
+      operationId: 1,
+    }))).toThrow("operation cancel dispatch fault");
+    expect(await responseFailure).toBe(fault);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("operation cancel dispatch fault");
+  });
+
+  test("absorbs async upload callback failures after poisoning dispatch", async () => {
+    const host = new FakeHost();
+    const fault = new Error("upload dispatch fault");
+    const table = overrideHostTable(host, {
+      dispatch: ((command: NetworkV1AsyncCommand) => {
+        if (command.opcode === NetworkV1CommandOpcode.BodyChunk) throw fault;
+        return host.table.dispatch(command);
+      }) as NetworkV1BindingTable["dispatch"],
+    });
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(table, EXPECTED));
+    let pulls = 0;
+    let cancels = 0;
+    const producer: HttpBodyProducer = Object.freeze({
+      pull() {
+        pulls++;
+        return Promise.resolve(Uint8Array.from([1, 2, 3]));
+      },
+      cancel() {
+        cancels++;
+        return Promise.reject(new Error("producer cancel rejection"));
+      },
+    });
+    const operation = binding.start(
+      highStart(1, true),
+      producer,
+      new AbortController().signal,
+    );
+    const responseFailure = operation.response.catch((error) => error);
+    host.completions.push(Object.freeze({
+      eventCode: NetworkV1EventCode.BodyPull,
+      identity: completionIdentity(host.startCommand, host.startCommand.identity.body, 1),
+      maxBytes: 3,
+    }));
+    host.run();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await responseFailure).toBe(fault);
+    expect(pulls).toBe(1);
+    expect(cancels).toBe(1);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("upload dispatch fault");
+  });
+
   test("pulls a Guest request producer once per credit and stops it at headers", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
     let pulls = 0;
     let cancels = 0;
     const producer: HttpBodyProducer = Object.freeze({
@@ -641,11 +1145,12 @@ describe("formal HTTP command/completion adapter", () => {
 
   test("bounds operation slots, advances generation, and never wraps", async () => {
     const host = new FakeHost();
-    const { binding } = createNetworkV1HttpBindingAdapterForTesting(
+    const adapter = createNetworkV1HttpBindingAdapterForTesting(
       host.table,
       EXPECTED,
       { maxOperations: 1 },
     );
+    const binding = admittedBinding(adapter);
     const first = binding.start(highStart(1), null, new AbortController().signal);
     const firstGeneration = host.startCommand.identity.operation.generation;
     expect(() => binding.start(
@@ -673,7 +1178,7 @@ describe("formal HTTP command/completion adapter", () => {
       EXPECTED,
       { maxOperations: 1, initialSlotGeneration: NETWORK_V1_UINT32_MAX },
     );
-    expect(() => exhausted.binding.start(
+    expect(() => admittedBinding(exhausted).start(
       highStart(4),
       null,
       new AbortController().signal,
@@ -682,6 +1187,50 @@ describe("formal HTTP command/completion adapter", () => {
 });
 
 describe("formal limits projection", () => {
+  test("caches one immutable HTTP/client snapshot at mount", () => {
+    const host = new FakeHost();
+    const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    expect(host.limitsQueries).toHaveLength(1);
+    expect(host.limitsQueries[0]).toMatchObject({
+      protocol: NetworkV1LimitProtocol.Http,
+      role: NetworkV1LimitRole.Client,
+    });
+    expect(adapter.limits("http", "client")).toBe(adapter.httpClientLimits);
+    expect(adapter.limits("http", "client")).toBe(adapter.httpClientLimits);
+    expect(host.limitsQueries).toHaveLength(1);
+    expect(Object.isFrozen(adapter.httpClientLimits)).toBe(true);
+    expect(Object.isFrozen(adapter.httpClientLimits.values)).toBe(true);
+    expect(Object.isFrozen(adapter.httpClientLimits.values[0])).toBe(true);
+    expect(Object.isFrozen(adapter.httpClientLimits.features)).toBe(true);
+  });
+
+  test("accepts only admitted exact operation limits within minimum/default", () => {
+    const host = new FakeHost();
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED));
+    binding.start(Object.freeze({
+      ...highStart(1),
+      limits: Object.freeze({ "http.maxBodyChunkBytes": 512 }),
+    }), null, new AbortController().signal);
+    expect(host.startCommand.metadata.limits).toEqual([
+      { name: "http.maxBodyChunkBytes", value: 512 },
+    ]);
+    expect(() => binding.start(Object.freeze({
+      ...highStart(2),
+      limits: Object.freeze({ "http.maxBodyChunkBytes": 511 }),
+    }), null, new AbortController().signal)).toThrow("outside [512, 2048]");
+    expect(() => binding.start(Object.freeze({
+      ...highStart(3),
+      limits: Object.freeze({ "http.maxBodyChunkBytes": 2049 }),
+    }), null, new AbortController().signal)).toThrow("outside [512, 2048]");
+    expect(() => binding.start(Object.freeze({
+      ...highStart(4),
+      limits: Object.freeze({ "http.unknownLimit": 512 }),
+    }), null, new AbortController().signal)).toThrow("not admitted for the HTTP client");
+    expect(host.commands.filter(
+      (command) => command.opcode === NetworkV1CommandOpcode.HttpRequestStart,
+    )).toHaveLength(1);
+  });
+
   test("validates the Host snapshot and keeps unscoped capabilities empty", () => {
     const host = new FakeHost();
     const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
