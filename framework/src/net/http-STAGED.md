@@ -12,10 +12,15 @@ limits snapshot are fixed. The ESP-IDF native binding table, descriptor
 aggregation, and product scheduler integration remain required before
 admission.
 
-**An unconsumed bound response keeps its operation and abort listener until the
-body reaches EOF or `cancel()` completes.** The staged seam has no native lease
-release command or Guest finalizer yet. A Host must not use this seam as proof
-that dropped response objects release native resources.
+**A bound response prefetches at most the admitted tee window: the smaller of
+four admitted chunks, 256 KiB, and `http.bufferedBodyBytes`.** A small response
+therefore reaches `BODY_END`, releases every BufferLease, retires its operation,
+and detaches its abort listener even when application code never reads the
+body. The formal integration test retains nine such responses across an
+eight-slot adapter. A response larger than that window stops receiving credit
+until application code reads or cancels it. There is no Guest finalizer, so
+dropping an arbitrary large response is not proof that its native operation was
+released.
 
 **Resolving a response-headers event is the request-upload terminal claim.**
 The binding must stop further upload credit and cancel an upload producer that
@@ -31,9 +36,9 @@ ceilings. PocketJS additionally rejects userinfo, requires strict DNS labels,
 and removes one DNS root dot because the canonical host is also a permission
 and TLS identity.
 
-**Body helpers, chunks, header storage, and clone tee branches have SDK safety
-ceilings.** An admitted Host must lower these through resolved resource limits;
-these constants are not ESP32 resource measurements.
+**Body helpers, chunks, header storage, clone tee branches, and response
+prefetch use the admitted HTTP/client defaults and the lower SDK hard ceiling.**
+The constants remain SDK ceilings, not ESP32 resource measurements.
 
 **TLS and per-operation dictionary snapshots also have staged SDK ceilings.**
 The current limits are 64 KiB for a CA input, 16 ALPN tokens / 1 KiB total ALPN
