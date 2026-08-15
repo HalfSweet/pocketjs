@@ -17,14 +17,54 @@ must preserve these Kconfig values:
 
 ```text
 CONFIG_ESP_HTTP_CLIENT_EVENT_POST_TIMEOUT=0
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 # CONFIG_ESP_HTTP_CLIENT_ENABLE_BASIC_AUTH is not set
 # CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH is not set
 # CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS is not set
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION is not set
+# CONFIG_MBEDTLS_ALLOW_WEAK_CERTIFICATE_VERIFICATION is not set
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEPRECATED_LIST is not set
+# CONFIG_MBEDTLS_DES_C is not set
+# CONFIG_ESP_TLS_INSECURE is not set
 ```
 
 The build rejects other values. Redirects and authentication retries are also
 disabled in the client configuration. Requests use IPv4, remove the default
 User-Agent field, and send `Connection: close`.
+
+## Experimental HTTPS boundary
+
+**HTTPS uses ESP-TLS with its Mbed TLS backend, forces TLS 1.2, verifies the
+certificate chain and URL hostname, and sends SNI from the URL hostname.** The
+backend never sets `skip_cert_common_name_check`, never enables an insecure
+verification mode, and never retries an HTTPS URL over HTTP. TLS 1.3, client
+certificates, custom ALPN and revocation policy remain unsupported. The build
+also rejects weak certificate verification, deprecated bundle roots, DES/3DES,
+NULL, RC4 and anonymous ciphersuites.
+
+The product Host must set `allow_https`, provide a non-blocking
+`wall_clock_trusted` callback whose state is safely published to the fixed
+worker, and select exactly one trust source:
+
+- `POCKETJS_NET_ESP_HTTP_TLS_TRUST_CERTIFICATE_BUNDLE` uses the ESP-IDF
+  certificate bundle compiled into the product.
+- `POCKETJS_NET_ESP_HTTP_TLS_TRUST_HOST_PINNED_CA_PEM` snapshots at most 4096
+  bytes containing exactly one PEM CA certificate into internal memory. This
+  certificate is the fixed trust store for that Host profile; it is not Guest
+  input and is not an SPKI or leaf-certificate pin.
+
+ESP HTTP Client makes its bundle and `cert_pem` paths mutually exclusive.
+Therefore the Host-pinned profile does not append to the bundle, and the
+descriptor reports `custom_ca_append=false`. The component does not implement
+or advertise `network.http.client.tls.custom-ca`.
+
+An untrusted wall clock produces `tls_certificate_invalid` before native I/O.
+Mbed TLS certificate flags map hostname mismatch separately from other
+certificate failures. Observable native TLS codes also map protocol-version
+failure and peer alerts to `tls_version_unsupported` and `tls_alert`; ESP HTTP
+Client does not expose the alert description, so this candidate cannot attach
+a TLS alert reason code.
 
 Known admission blockers are:
 
@@ -46,6 +86,10 @@ Known admission blockers are:
   HTTP Client's derived chunked flag, which also covers some non-chunked bodies.
 - Request-body streaming is not implemented; request bodies are copied into the
   bounded snapshot.
+- ESP-TLS and Mbed TLS perform handshake allocations outside PocketJS's fixed
+  queues. The descriptor reports `bounded_handshake_memory=false`; cold and
+  repeated handshake peaks must be measured separately on AtomS3R and Tab5
+  before TLS capability admission.
 
 Build the descriptor smoke app for both reviewed targets:
 

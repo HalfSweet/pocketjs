@@ -16,10 +16,21 @@ default event loop, so a nonzero post timeout would add hidden blocking to its
 fixed worker. Keep Basic authentication, Digest authentication and saved
 response headers disabled; redirects and authentication retries are controlled
 by PocketJS rather than ESP HTTP Client. The component rejects an integration
-at compile time when any of these four Kconfig requirements is violated.
+at compile time when a required security or ownership Kconfig value is
+violated.
 Even with a zero timeout, native event-loop payload copies and the response
 parser may allocate outside PocketJS's fixed queues; the candidate therefore
 reports that its response parser is not bounded.
+
+The smoke profile enables ESP-TLS/Mbed TLS, the ESP certificate bundle and TLS
+1.2. It disables ESP-TLS insecure options, weak certificate verification,
+deprecated roots, DES/3DES, TLS 1.3 and TLS 1.2 renegotiation.
+The app checks that the descriptor reports Host bundle and single Host-pinned
+CA profiles while keeping application custom-CA append, client authentication,
+custom ALPN, revocation and insecure verification disabled. It also creates an
+HTTPS client with an untrusted wall clock and verifies that the operation ends
+as `tls_certificate_invalid` before network I/O. Native-error assertions cover
+TLS version, TLS alert, hostname mismatch, unknown CA and connection refusal.
 
 Cancellation is cooperative. Native DNS, connect, TLS, read and write calls are
 not interrupted, and synchronous DNS may not honor `io_timeout_ms`. Therefore
