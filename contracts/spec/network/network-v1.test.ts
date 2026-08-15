@@ -33,6 +33,9 @@ import {
   NETWORK_V1_EVENT_CODES,
   NETWORK_V1_FEATURE_IDS,
   NETWORK_V1_INITIAL_BODY_FLOW,
+  NETWORK_V1_LIMIT_ENTRY_MAX,
+  NETWORK_V1_LIMIT_PROTOCOL_ANY,
+  NETWORK_V1_LIMIT_ROLE_ANY,
   NETWORK_V1_SEQUENCE_MAX,
   NETWORK_V1_UINT32_MAX,
   networkV1ApplyBodySignal,
@@ -42,6 +45,7 @@ import {
   networkV1LeaseTransition,
   networkV1NextGeneration,
   networkV1PlanHashBytes,
+  snapshotNetworkV1Limits,
   NetworkV1BorrowedInputKind,
   NetworkV1CommandOpcode,
   NetworkV1CompletionPollStatus,
@@ -49,11 +53,15 @@ import {
   NetworkV1FeatureId,
   NetworkV1LeaseAction,
   NetworkV1LeaseState,
+  NetworkV1LimitProtocol,
+  NetworkV1LimitRole,
   NetworkV1ServiceTurnKind,
   NetworkV1ServiceTurnStatus,
   type NetworkV1CommandIdentity,
   type NetworkV1CompletionIdentity,
   type NetworkV1Handshake,
+  type NetworkV1LimitEntry,
+  type NetworkV1LimitsQuery,
 } from "./network-v1.ts";
 
 const ZERO_HASH = `sha256:${"00".repeat(32)}`;
@@ -109,6 +117,20 @@ function expectStrictlyIncreasing(values: readonly number[]): void {
   }
 }
 
+function frozenLimits(
+  query: NetworkV1LimitsQuery,
+  values: readonly NetworkV1LimitEntry[],
+  featureIds: readonly NetworkV1FeatureId[],
+) {
+  return Object.freeze({
+    runtimeGeneration: query.runtimeGeneration,
+    protocol: query.protocol,
+    role: query.role,
+    values: Object.freeze(values.map((entry) => Object.freeze({ ...entry }))),
+    featureIds: Object.freeze([...featureIds]),
+  });
+}
+
 describe("network private ABI code generation", () => {
   test("regenerates the committed TypeScript and C header byte-for-byte", async () => {
     validateNetworkV1Definition();
@@ -158,9 +180,22 @@ int main(void) {
   turn.max_payload_bytes = 1;
   if (!pocketjs_network_v1_handle_is_absent(absent)) return 1;
   if (!pocketjs_network_v1_handle_is_live(live)) return 2;
-  if (POCKETJS_NETWORK_V1_ABI_MAJOR != 1) return 3;
+  pocketjs_network_v1_limits_query_t query = {0};
+  pocketjs_network_v1_limit_entry_view_t entry = {0};
+  pocketjs_network_v1_limits_snapshot_view_t limits = {0};
+  query.runtime_generation = 1;
+  query.protocol = POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_HTTP;
+  query.role = POCKETJS_NETWORK_V1_LIMIT_ROLE_CLIENT;
+  entry.name = "http.headerBytes";
+  entry.name_length = 16;
+  limits.runtime_generation = query.runtime_generation;
+  limits.protocol = query.protocol;
+  limits.role = query.role;
+  limits.values = &entry;
+  limits.value_count = 1;
+  if (POCKETJS_NETWORK_V1_ABI_MAJOR != 1 || POCKETJS_NETWORK_V1_ABI_MINOR != 1) return 3;
   if (POCKETJS_NETWORK_V1_COMMAND_BODY_PULL != POCKETJS_NETWORK_V1_EVENT_BODY_PULL) return 4;
-  return turn.kind == 0;
+  return turn.kind == 0 || limits.value_count != 1;
 }
 `);
       const includeDirectory = dirname(NETWORK_V1_HEADER_PATH);
@@ -252,6 +287,7 @@ describe("network v1 mount handshake", () => {
     const method = () => undefined;
     const table = Object.freeze({
       handshake: actualHandshake,
+      getLimits: method,
       dispatch: method,
       nextCompletion: method,
       leaseTake: method,
@@ -296,6 +332,141 @@ describe("network v1 mount handshake", () => {
     expect(() => networkV1PlanHashBytes(`sha256:${"AA".repeat(32)}`)).toThrow(
       "lowercase sha256",
     );
+  });
+});
+
+describe("network v1.1 admitted limits snapshot", () => {
+  const query = Object.freeze({
+    runtimeGeneration: 1,
+    protocol: NetworkV1LimitProtocol.Http,
+    role: NetworkV1LimitRole.Client,
+  });
+  const admittedHandshake = handshake({
+    featureIds: [
+      NetworkV1FeatureId.HttpClient,
+      NetworkV1FeatureId.HttpClientTls,
+      NetworkV1FeatureId.WebSocketServer,
+      NetworkV1FeatureId.Udp,
+    ],
+  });
+  const values = [
+    { name: "http.headerBytes", default: 8192, hard: 16384, minimum: 4096 },
+    { name: "runtime.connections", default: 4, hard: 8, minimum: 2 },
+  ] as const;
+
+  test("returns a detached frozen snapshot with the exact scoped features", () => {
+    const source = frozenLimits(query, values, [
+      NetworkV1FeatureId.HttpClient,
+      NetworkV1FeatureId.HttpClientTls,
+    ]);
+    const snapshot = snapshotNetworkV1Limits(query, source, admittedHandshake);
+    expect(snapshot).toEqual(source);
+    expect(snapshot).not.toBe(source);
+    expect(snapshot.values[0]).not.toBe(source.values[0]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.values)).toBe(true);
+    expect(Object.isFrozen(snapshot.values[0])).toBe(true);
+    expect(Object.isFrozen(snapshot.featureIds)).toBe(true);
+  });
+
+  test("requires a build-wide query to return the complete handshake feature set", () => {
+    const globalQuery = Object.freeze({
+      runtimeGeneration: 1,
+      protocol: NETWORK_V1_LIMIT_PROTOCOL_ANY,
+      role: NETWORK_V1_LIMIT_ROLE_ANY,
+    });
+    const source = frozenLimits(globalQuery, values, admittedHandshake.featureIds);
+    expect(snapshotNetworkV1Limits(globalQuery, source, admittedHandshake).featureIds)
+      .toEqual(admittedHandshake.featureIds);
+    expect(() => snapshotNetworkV1Limits(
+      globalQuery,
+      frozenLimits(globalQuery, values, [NetworkV1FeatureId.HttpClient]),
+      admittedHandshake,
+    )).toThrow("exact scoped feature set");
+  });
+
+  test("rejects wrong scope, stale runtime, and feature escalation", () => {
+    const valid = frozenLimits(query, values, [
+      NetworkV1FeatureId.HttpClient,
+      NetworkV1FeatureId.HttpClientTls,
+    ]);
+    expect(() => snapshotNetworkV1Limits(
+      { ...query, runtimeGeneration: 2 },
+      valid,
+      admittedHandshake,
+    )).toThrow("mounted runtime");
+    expect(() => snapshotNetworkV1Limits(
+      { ...query, protocol: 0xffff as NetworkV1LimitProtocol },
+      valid,
+      admittedHandshake,
+    )).toThrow("protocol is unknown");
+    expect(() => snapshotNetworkV1Limits(
+      query,
+      Object.freeze({ ...valid, role: NetworkV1LimitRole.Server }),
+      admittedHandshake,
+    )).toThrow("does not echo");
+    expect(() => snapshotNetworkV1Limits(
+      query,
+      frozenLimits(query, values, [
+        NetworkV1FeatureId.HttpClient,
+        NetworkV1FeatureId.HttpClientTls,
+        NetworkV1FeatureId.WebSocketServer,
+      ]),
+      admittedHandshake,
+    )).toThrow("exact scoped feature set");
+  });
+
+  test("requires bounded sorted limits with minimum <= default <= hard", () => {
+    const features = [
+      NetworkV1FeatureId.HttpClient,
+      NetworkV1FeatureId.HttpClientTls,
+    ] as const;
+    expect(() => snapshotNetworkV1Limits(
+      query,
+      frozenLimits(query, [...values].reverse(), features),
+      admittedHandshake,
+    )).toThrow("lexicographically sorted");
+    expect(() => snapshotNetworkV1Limits(
+      query,
+      frozenLimits(query, [{
+        name: "http.headerBytes",
+        default: 2,
+        hard: 1,
+        minimum: 1,
+      }], features),
+      admittedHandshake,
+    )).toThrow("minimum <= default <= hard");
+    expect(() => snapshotNetworkV1Limits(
+      query,
+      frozenLimits(query, Array.from({ length: NETWORK_V1_LIMIT_ENTRY_MAX + 1 }, (_, index) => ({
+        name: `runtime.limit${String(index).padStart(2, "0")}`,
+        default: 1,
+        hard: 1,
+        minimum: 1,
+      })), features),
+      admittedHandshake,
+    )).toThrow(`cannot exceed ${NETWORK_V1_LIMIT_ENTRY_MAX}`);
+  });
+
+  test("does not invoke Host accessors while validating limits", () => {
+    let calls = 0;
+    const hostile = Object.freeze(Object.defineProperties({}, {
+      runtimeGeneration: { value: 1, enumerable: true },
+      protocol: { value: query.protocol, enumerable: true },
+      role: { value: query.role, enumerable: true },
+      values: { get: () => { calls += 1; return []; }, enumerable: true },
+      featureIds: {
+        value: Object.freeze([
+          NetworkV1FeatureId.HttpClient,
+          NetworkV1FeatureId.HttpClientTls,
+        ]),
+        enumerable: true,
+      },
+    }));
+    expect(() => snapshotNetworkV1Limits(query, hostile, admittedHandshake)).toThrow(
+      "own frozen data property",
+    );
+    expect(calls).toBe(0);
   });
 });
 
