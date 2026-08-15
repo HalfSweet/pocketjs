@@ -24,4 +24,9 @@ export interface NetworkPrivateBuildContext {
   readonly planHashBytes: readonly number[];
   /** Exact, sorted numeric projection of true network.* plan features. */
   readonly featureIds: readonly number[];
+  /**
+   * Compiler-internal permit for the exact ESP formal hardware-smoke
+   * artifact. Normal build-context creation never sets this field.
+   */
+  readonly testOnlyStagedHttpClientFetch?: true;
 }

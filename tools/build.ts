@@ -96,6 +96,7 @@ let planPath: string | undefined;
 let densityFlag: number | undefined;
 let projectRoot = process.cwd();
 let networkFactoryRequested = false;
+let testOnlyStagedHttpClientFetchRequested = false;
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
@@ -108,6 +109,9 @@ for (const a of args) {
   else if (a.startsWith("--outdir=")) DIST = resolvePath(a.slice("--outdir=".length)) + "/";
   else if (a.startsWith("--density=")) densityFlag = Number(a.slice("--density=".length));
   else if (a === "--network-factory") networkFactoryRequested = true;
+  else if (a === "--test-only-staged-http-client-fetch") {
+    testOnlyStagedHttpClientFetchRequested = true;
+  }
   else if (!a.startsWith("-")) appArg = a;
 }
 
@@ -128,7 +132,7 @@ const bundleArtifactMode = selectBundleArtifactMode(
   buildPlan,
   networkFactoryRequested,
 );
-const networkPrivate = bundleArtifactMode === "network-factory"
+let networkPrivate = bundleArtifactMode === "network-factory"
   ? createNetworkFactoryBuildContext(buildPlan!)
   : undefined;
 
@@ -179,6 +183,53 @@ function resolveEntry(arg: string): string {
 }
 
 const requestedEntry = resolveEntry(appArg);
+if (testOnlyStagedHttpClientFetchRequested) {
+  const expectedEntry = join(
+    ROOT,
+    "hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/app.ts",
+  );
+  const features = buildPlan?.features ?? {};
+  const enabledFeatures = Object.entries(features)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .sort();
+  const providers = buildPlan?.network?.providers;
+  const backendRoles = Object.keys(providers?.backendByRole ?? {}).sort();
+  const tlsRoles = Object.keys(providers?.tlsByRole ?? {}).sort();
+  if (
+    !networkFactoryRequested ||
+    bundleArtifactMode !== "network-factory" ||
+    networkPrivate === undefined ||
+    buildPlan?.target.id !== "esp-formal-network-smoke-test" ||
+    buildPlan.target.hostAbi !== 1 ||
+    buildPlan.planHash !==
+      "sha256:04856acc82e7aa31648b015e62a63a4cadf6f48a3d1d3f46f3987539520b63fd" ||
+    buildPlan.app.id !== "dev.pocketjs.esp-formal-network-smoke" ||
+    buildPlan.app.output !== "esp-formal-network-smoke" ||
+    requestedEntry !== expectedEntry ||
+    enabledFeatures.length !== 1 ||
+    enabledFeatures[0] !== "network.http.client" ||
+    backendRoles.length !== 1 ||
+    backendRoles[0] !== "http.client" ||
+    providers?.backendByRole["http.client"] !==
+      "pocketjs.net.http-client-core.v1.experimental" ||
+    tlsRoles.length !== 0 ||
+    providers?.netDriverId !== "pocketjs.net.esp-idf.transport.v1.experimental"
+  ) {
+    throw new Error(
+      "PocketJS build: --test-only-staged-http-client-fetch is restricted to " +
+        "the exact ESP formal network smoke plan and entry",
+    );
+  }
+  networkPrivate = Object.freeze({
+    ...networkPrivate,
+    testOnlyStagedHttpClientFetch: true as const,
+  });
+  console.warn(
+    "PocketJS build: TEST ONLY staged HTTP client fetch permit; " +
+      "public capability admission remains closed",
+  );
+}
 // An app directory can carry its own pocket.config.ts (theme/keyframes local
 // to the app); it wins over the repo root config unless --config was given.
 if (!configFlagged && useConfig) {

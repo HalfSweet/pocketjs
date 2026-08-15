@@ -296,7 +296,10 @@ const STAGED_NETWORK_VALUES: Readonly<Record<string, ReadonlySet<string>>> = {
   [`${PACKAGE_NAME}/net/udp`]: new Set(["udpSocket"]),
 };
 
-function makeNetworkDemandGate(features: BuildFeatures | undefined): PluginObj {
+function makeNetworkDemandGate(
+  features: BuildFeatures | undefined,
+  testOnlyStagedHttpClientFetch = false,
+): PluginObj {
   const requireCapabilities = (
     path: { buildCodeFrameError(message: string): Error },
     source: string,
@@ -330,7 +333,13 @@ function makeNetworkDemandGate(features: BuildFeatures | undefined): PluginObj {
     const staged = STAGED_NETWORK_VALUES[source];
     if (!staged) return;
     const names = exportNames ?? [...staged];
-    const unavailable = names.filter((name) => staged.has(name));
+    const unavailable = names.filter((name) =>
+      staged.has(name) && !(
+        testOnlyStagedHttpClientFetch &&
+        source === `${PACKAGE_NAME}/net/http` &&
+        name === "fetch"
+      )
+    );
     if (unavailable.length === 0) return;
     throw path.buildCodeFrameError(
       `PocketJS: ${source} ${unavailable.map((name) => `\`${name}\``).join(", ")} ` +
@@ -705,6 +714,7 @@ async function hashKey(
   framework: PocketFramework,
   features: BuildFeatures | undefined,
   privateNetworkEnabled: boolean,
+  testOnlyStagedHttpClientFetch: boolean,
 ): Promise<string> {
   const h = new Bun.CryptoHasher("sha256");
   h.update(
@@ -737,6 +747,10 @@ async function hashKey(
           )) +
       "\0" +
       (privateNetworkEnabled ? "private-network-v1" : "no-private-network") +
+      "\0" +
+      (testOnlyStagedHttpClientFetch
+        ? "test-only-staged-http-client-fetch"
+        : "staged-network-closed") +
       "\0" +
       path +
       "\0",
@@ -829,6 +843,7 @@ export async function transformFile(
     framework,
     options.features,
     options.networkPrivate !== undefined,
+    options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
   );
   const cacheFile = CACHE_DIR + key + ".json";
   const cached = (await Bun.file(cacheFile).json().catch(() => null)) as CacheEntry | null;
@@ -849,7 +864,10 @@ export async function transformFile(
       parserOpts: JSX_PARSER_OPTS,
       plugins: [
         makePrivateNetworkIdentifierGate(path, options.networkPrivate),
-        makeNetworkDemandGate(options.features),
+        makeNetworkDemandGate(
+          options.features,
+          options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
+        ),
         ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
         makeCollector(collected, framework),
       ],
@@ -877,7 +895,10 @@ export async function transformFile(
   const opts = transformOptions(framework);
   const plugins = [
     makePrivateNetworkIdentifierGate(path, options.networkPrivate),
-    makeNetworkDemandGate(options.features),
+    makeNetworkDemandGate(
+      options.features,
+      options.networkPrivate?.testOnlyStagedHttpClientFetch === true,
+    ),
     ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
     makeCollector(collected, framework),
   ];
