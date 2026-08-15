@@ -241,6 +241,7 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_COMPLETION = 1U << 7,
   POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_TIMEOUT = 1U << 8,
   POCKETJS_NET_HTTP_CLIENT_POISON_STALE_COMPLETION = 1U << 9,
+  POCKETJS_NET_HTTP_CLIENT_POISON_HOST_EVENT_RETIRE = 1U << 10,
 } pocketjs_net_http_client_poison_flag_t;
 
 typedef struct {
@@ -457,6 +458,24 @@ bool pocketjs_net_http_client_core_is_quiescent(
  */
 bool pocketjs_net_http_client_core_confirm_transport_shutdown(
     pocketjs_net_http_client_core_t *core);
+
+/**
+ * Marks an exact currently delivering event as a Host ownership failure. This
+ * does not retire or release the event; shutdown must preserve it until normal
+ * retirement succeeds or the poison-only abandon API is admitted.
+ */
+bool pocketjs_net_http_client_core_report_host_event_retire_failure(
+    pocketjs_net_http_client_core_t *core, uint64_t sequence);
+
+/**
+ * Poison-only Host ownership escape hatch. After begin_shutdown and synchronous
+ * destruction plus confirm_transport_shutdown of the dedicated transport, this
+ * abandons the exact delivering event and any Core body lease it owns. Healthy
+ * delivery must use retire_event; pending events must first be taken by the
+ * sole Host consumer.
+ */
+bool pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+    pocketjs_net_http_client_core_t *core, uint64_t sequence);
 
 /** Clears initialized storage only after begin_shutdown and quiescence. */
 bool pocketjs_net_http_client_core_deinit(

@@ -62,6 +62,7 @@ struct pocketjs_net_http_client_core {
 
   bool permission_callback_active;
   bool shutdown_requested;
+  bool transport_shutdown_confirmed;
   bool transport_cancel_requested;
   bool close_cancel_requested;
   uint32_t poison_flags;
@@ -969,7 +970,7 @@ static void revoke_request_body_credit(
   core->request_body_pull_active = false;
   core->request_body_pull_event_retired = false;
   core->request_body_pull_maximum = 0U;
-  if (core->event_state != EVENT_EMPTY &&
+  if (core->event_state == EVENT_PENDING &&
       core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
     core->event_state = EVENT_EMPTY;
     memset(&core->event, 0, sizeof(core->event));
@@ -2222,6 +2223,11 @@ static void reset_after_terminal(pocketjs_net_http_client_core_t *core) {
 
 bool pocketjs_net_http_client_core_retire_event(
     pocketjs_net_http_client_core_t *core, uint64_t sequence) {
+  const bool revoked_request_pull =
+      core_public_entry_allowed(core) &&
+      core->event_state == EVENT_DELIVERING &&
+      core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL &&
+      !core->request_body_pull_active && core->terminal_selected;
   if (!core_public_entry_allowed(core) ||
       core->event_state != EVENT_DELIVERING ||
       sequence != core->event.sequence ||
@@ -2229,6 +2235,7 @@ bool pocketjs_net_http_client_core_retire_event(
        !core->body_lease_released) ||
       (core->event.type ==
            POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL &&
+       !revoked_request_pull &&
        (!core->request_body_pull_active ||
         core->event.detail.request_body_pull.body_generation !=
             core->request_body_generation ||
@@ -2247,6 +2254,10 @@ bool pocketjs_net_http_client_core_retire_event(
     core->body_credit = 0U;
   } else if (type ==
              POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
+    if (revoked_request_pull) {
+      progress_terminal(core);
+      return true;
+    }
     core->request_body_pull_event_retired = true;
     return true;
   } else {
@@ -2363,6 +2374,54 @@ bool pocketjs_net_http_client_core_confirm_transport_shutdown(
   core->orphan_read_lease_valid = false;
   core->completion_retire_pending = false;
   core->completion_retire_token = 0U;
+  core->transport_shutdown_confirmed = true;
+  progress_terminal(core);
+  return true;
+}
+
+bool pocketjs_net_http_client_core_report_host_event_retire_failure(
+    pocketjs_net_http_client_core_t *core, uint64_t sequence) {
+  if (!core_public_entry_allowed(core) ||
+      core->event_state != EVENT_DELIVERING ||
+      core->event.sequence != sequence) {
+    return false;
+  }
+  poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_HOST_EVENT_RETIRE, 0);
+  if (core->operation_token != 0U && !core->terminal_selected) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT, 0);
+  }
+  return true;
+}
+
+bool pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+    pocketjs_net_http_client_core_t *core, uint64_t sequence) {
+  if (!core_public_entry_allowed(core) || !core->shutdown_requested ||
+      core->poison_flags == 0U || !core->transport_shutdown_confirmed ||
+      core->event_state != EVENT_DELIVERING ||
+      core->event.sequence != sequence) {
+    return false;
+  }
+
+  const pocketjs_net_http_client_event_type_t type = core->event.type;
+  core->event_state = EVENT_EMPTY;
+  memset(&core->event, 0, sizeof(core->event));
+  if (type == POCKETJS_NET_HTTP_CLIENT_EVENT_BODY) {
+    core->body_lease_active = false;
+    core->body_lease_released = false;
+    core->body_lease = (pocketjs_net_http_client_body_lease_t){0};
+    core->body_byte_count = 0U;
+    core->body_credit = 0U;
+  } else if (type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
+    revoke_request_body_credit(core);
+  } else if (type == POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE ||
+             type == POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR) {
+    reset_after_terminal(core);
+    return true;
+  }
+
+  /* begin_shutdown selected the aborted terminal before transport teardown.
+   * With native ownership confirmed absent, this can only publish that retained
+   * terminal; it cannot call the destroyed transport. */
   progress_terminal(core);
   return true;
 }
