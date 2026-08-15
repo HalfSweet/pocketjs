@@ -431,8 +431,8 @@ typedef struct {
   uint64_t now;
 } fixture_t;
 
-static void fixture_init_with_response_header_limit(fixture_t *fixture,
-                                                    size_t limit) {
+static void fixture_init_with_options(fixture_t *fixture, size_t limit,
+                                      bool allow_https) {
   memset(fixture, 0, sizeof(*fixture));
   fixture->now = 1000000U;
   fixture->permissions.allow_hostname = true;
@@ -448,6 +448,7 @@ static void fixture_init_with_response_header_limit(fixture_t *fixture,
       .headers_timeout_us = 100000U,
       .idle_timeout_us = 100000U,
       .total_timeout_us = 1000000U,
+      .allow_https = allow_https,
       .response_header_bytes_limit = limit,
   };
   assert(pocketjs_net_http_client_core_init(&fixture->storage, &fixture->config,
@@ -456,6 +457,11 @@ static void fixture_init_with_response_header_limit(fixture_t *fixture,
   fixture->permissions.core = fixture->core;
   fixture->permissions.storage = &fixture->storage;
   fixture->permissions.config = &fixture->config;
+}
+
+static void fixture_init_with_response_header_limit(fixture_t *fixture,
+                                                    size_t limit) {
+  fixture_init_with_options(fixture, limit, false);
 }
 
 static void fixture_init(fixture_t *fixture) {
@@ -783,6 +789,141 @@ static void test_https_and_permissions_fail_before_io(void) {
   assert(error.detail.error.code ==
          POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED);
   retire_event(&fixture, error);
+
+  fixture_t tls;
+  fixture_init_with_options(&tls, 0U, true);
+  static const uint8_t server_name[] = "example.com";
+  static const pocketjs_net_http_client_tls_policy_t tls_policy = {
+      .server_name = {.data = server_name,
+                      .length = sizeof(server_name) - 1U},
+      .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .client_certificate =
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE,
+      .verification = POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL,
+      .revocation = POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT,
+  };
+  request = make_get(1U, "https://example.com/health");
+  request.tls = &tls_policy;
+  assert(pocketjs_net_http_client_core_start(tls.core, &request, tls.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(tls.permissions.hostname_calls == 1U);
+  assert(tls.fake.active_kind == FAKE_RESOLVE);
+  const uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&tls.fake, &address, 1U);
+  pump(&tls);
+  assert(tls.permissions.numeric_calls == 1U);
+  assert(tls.fake.active_kind == FAKE_CONNECT);
+  assert(tls.fake.connect_tls);
+  assert(tls.fake.connect_port == 443U);
+  assert(strcmp(tls.fake.connect_hostname, "example.com") == 0);
+  fake_complete_connect(&tls.fake);
+  pump(&tls);
+  assert(tls.fake.active_kind == FAKE_WRITE);
+  assert(bytes_contain(tls.fake.write_bytes, tls.fake.write_length,
+                       "GET /health HTTP/1.1\r\n"));
+  assert(bytes_contain(tls.fake.write_bytes, tls.fake.write_length,
+                       "Host: example.com\r\n"));
+}
+
+static void assert_tls_policy_rejected(
+    const char *url, const pocketjs_net_http_client_tls_policy_t *policy) {
+  fixture_t fixture;
+  fixture_init_with_options(&fixture, 0U, true);
+  pocketjs_net_http_client_request_t request = make_get(1U, url);
+  request.tls = policy;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_UNSUPPORTED_TLS);
+  assert(fixture.permissions.hostname_calls == 0U);
+  assert(fixture.permissions.numeric_calls == 0U);
+  assert(fixture.fake.active_kind == FAKE_NONE);
+}
+
+static void test_https_base_policy_is_fail_closed(void) {
+  static const uint8_t server_name[] = "example.com";
+  static const uint8_t wrong_name[] = "other.example";
+  pocketjs_net_http_client_tls_policy_t policy = {
+      .server_name = {.data = server_name,
+                      .length = sizeof(server_name) - 1U},
+      .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .client_certificate =
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE,
+      .verification = POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL,
+      .revocation = POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT,
+  };
+  assert_tls_policy_rejected("https://example.com/", NULL);
+  policy.server_name = (pocketjs_net_http_client_slice_t){
+      .data = wrong_name, .length = sizeof(wrong_name) - 1U};
+  assert_tls_policy_rejected("https://example.com/", &policy);
+  policy.server_name =
+      (pocketjs_net_http_client_slice_t){.data = server_name,
+                                        .length = sizeof(server_name) - 1U};
+  policy.maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3;
+  assert_tls_policy_rejected("https://example.com/", &policy);
+  policy.maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2;
+  policy.alpn_count = 1U;
+  assert_tls_policy_rejected("https://example.com/", &policy);
+  policy.alpn_count = 0U;
+  policy.server_name = (pocketjs_net_http_client_slice_t){0};
+  assert_tls_policy_rejected("https://127.0.0.1/", &policy);
+
+  policy.server_name =
+      (pocketjs_net_http_client_slice_t){.data = server_name,
+                                        .length = sizeof(server_name) - 1U};
+  assert_tls_policy_rejected("http://example.com/", &policy);
+}
+
+static void assert_tls_error_mapping(
+    pocketjs_net_http_client_transport_error_t transport_error,
+    pocketjs_net_http_client_error_t core_error) {
+  fixture_t fixture;
+  fixture_init_with_options(&fixture, 0U, true);
+  static const uint8_t server_name[] = "example.com";
+  static const pocketjs_net_http_client_tls_policy_t policy = {
+      .server_name = {.data = server_name,
+                      .length = sizeof(server_name) - 1U},
+      .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .client_certificate =
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE,
+      .verification = POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL,
+      .revocation = POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT,
+  };
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "https://example.com/");
+  request.tls = &policy;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  const uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&fixture.fake, &address, 1U);
+  pump(&fixture);
+  fake_queue_error(&fixture.fake, transport_error, 55);
+  pump(&fixture);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == core_error);
+  assert(error.detail.error.cause_code == 55);
+  retire_event(&fixture, error);
+}
+
+static void test_tls_errors_remain_distinct(void) {
+  assert_tls_error_mapping(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_CERTIFICATE_INVALID,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_CERTIFICATE_INVALID);
+  assert_tls_error_mapping(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HOSTNAME_MISMATCH,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HOSTNAME_MISMATCH);
+  assert_tls_error_mapping(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HANDSHAKE_FAILED,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HANDSHAKE_FAILED);
+  assert_tls_error_mapping(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_VERSION_UNSUPPORTED,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_VERSION_UNSUPPORTED);
+  assert_tls_error_mapping(POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_ALERT,
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_ALERT);
 }
 
 static void test_all_candidates_checked_before_denial(void) {
@@ -2225,6 +2366,8 @@ int main(void) {
   test_response_header_limit_configuration_boundaries();
   test_selected_response_header_limit();
   test_https_and_permissions_fail_before_io();
+  test_https_base_policy_is_fail_closed();
+  test_tls_errors_remain_distinct();
   test_all_candidates_checked_before_denial();
   test_protocol_error_closes_before_terminal();
   test_chunked_body_and_valid_trailer();

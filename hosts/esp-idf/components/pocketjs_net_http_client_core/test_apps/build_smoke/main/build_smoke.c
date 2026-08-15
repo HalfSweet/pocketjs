@@ -25,6 +25,7 @@ void app_main(void) {
   assert(!descriptor->advertises_public_capability);
   assert(descriptor->plaintext_http);
   assert(descriptor->https_fail_closed_before_io);
+  assert(descriptor->https_explicit_opt_in);
   assert(descriptor->owner_pumped);
   assert(descriptor->one_operation);
   assert(descriptor->fixed_core_storage);

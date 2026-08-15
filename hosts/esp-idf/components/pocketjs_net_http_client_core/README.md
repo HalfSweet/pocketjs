@@ -109,10 +109,19 @@ buffered in full or implicitly replayed.
 
 ## HTTPS and admission blockers
 
-The parser recognizes `https://`, but every HTTPS start returns
+HTTPS is an explicit Host-selected experimental path. The default
+`allow_https=false` still returns
 `POCKETJS_NET_HTTP_CLIENT_START_UNSUPPORTED_TLS` before permission callbacks,
-DNS, or socket I/O. This is deliberate: the current ESP transport reports a
-bounded one millisecond internal TLS wait, native DNS/socket/TLS allocations
+DNS, or socket I/O. An opted-in request must also carry the exact base TLS
+policy: TLS 1.2 only, full verification, Host-default revocation, no ALPN,
+credential, client certificate, or custom CA, and a server name equal to the
+Core's canonical DNS hostname. HTTPS IP literals remain pre-I/O unsupported:
+ESP-TLS/Mbed TLS currently couples IP-ID verification to sending that IP as an
+invalid SNI value. The Core passes the canonical DNS name and selected numeric
+candidate separately to the transport. Any policy mismatch fails before I/O.
+
+This path does not change admission status. The current ESP transport reports
+a bounded one millisecond internal TLS wait, native DNS/socket/TLS allocations
 without caller-owned byte bounds, and incomplete DNS candidate sets. Those
 transport blockers also apply to this plaintext candidate's eventual public
 admission where relevant.
@@ -142,7 +151,8 @@ Plan and must not advertise `network.http.client` or
 
 `test_host/core_test.c` uses a deterministic fake transport to cover permission
 ordering, headers-first delivery, bounded body credit and leases, 4xx success,
-strict trailer failure, close-before-error ordering, pre-I/O HTTPS rejection,
+strict trailer failure, close-before-error ordering, default pre-I/O HTTPS
+rejection, exact base-policy validation and explicit TLS connect selection,
 abort, total timeout, selected response-header configuration and parse
 boundaries, and exact-one terminal delivery. Hostile cases cover all
 public API calls attempted from a permission callback, bytes-plus-EOF reads,
@@ -160,5 +170,5 @@ Static Analyzer.
 
 `test_apps/build_smoke` links the Core, wire codec, and real ESP transport under
 the pinned ESP-IDF v6.0.2 tree. It builds for both `esp32s3` and `esp32p4` with
-the transport TLS policy Kconfig, while asserting that the Core itself keeps
-HTTPS fail-closed.
+the transport TLS policy Kconfig, while asserting that HTTPS remains
+fail-closed unless the selected Host opts in.

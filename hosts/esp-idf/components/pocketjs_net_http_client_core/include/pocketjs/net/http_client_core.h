@@ -72,7 +72,11 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_DNS,
   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT,
   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO,
-  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS,
+  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_CERTIFICATE_INVALID,
+  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HOSTNAME_MISMATCH,
+  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HANDSHAKE_FAILED,
+  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_VERSION_UNSUPPORTED,
+  POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_ALERT,
   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_RESOURCE_LIMIT,
   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_INVALID,
 } pocketjs_net_http_client_transport_error_t;
@@ -176,6 +180,8 @@ typedef struct {
   uint64_t headers_timeout_us;
   uint64_t idle_timeout_us;
   uint64_t total_timeout_us;
+  /** HTTPS stays pre-I/O fail-closed unless the selected Host opts in. */
+  bool allow_https;
   /** Final response fields as name + value + ": " + CRLF; zero uses max. */
   size_t response_header_bytes_limit;
 } pocketjs_net_http_client_core_config_t;
@@ -184,6 +190,40 @@ typedef struct {
   const uint8_t *data;
   size_t length;
 } pocketjs_net_http_client_slice_t;
+
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2 = 1,
+  POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3,
+} pocketjs_net_http_client_tls_version_t;
+
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE = 1,
+  POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_OPTIONAL,
+  POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_REQUIRED,
+} pocketjs_net_http_client_tls_client_certificate_t;
+
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL = 1,
+  POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_DEVELOPMENT_INSECURE,
+} pocketjs_net_http_client_tls_verification_t;
+
+typedef enum {
+  POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT = 1,
+  POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_REQUIRED,
+} pocketjs_net_http_client_tls_revocation_t;
+
+typedef struct {
+  /** Required canonical DNS hostname. IP literals stay unsupported. */
+  pocketjs_net_http_client_slice_t server_name;
+  pocketjs_net_http_client_tls_version_t minimum_version;
+  pocketjs_net_http_client_tls_version_t maximum_version;
+  size_t alpn_count;
+  pocketjs_net_http_client_slice_t credential;
+  pocketjs_net_http_client_tls_client_certificate_t client_certificate;
+  pocketjs_net_http_client_tls_verification_t verification;
+  pocketjs_net_http_client_tls_revocation_t revocation;
+  size_t custom_ca_bytes;
+} pocketjs_net_http_client_tls_policy_t;
 
 typedef struct {
   pocketjs_net_http_client_slice_t name;
@@ -208,6 +248,8 @@ typedef struct {
   /* Used only by STREAMING. Unknown-length streams use strict chunked coding. */
   bool streaming_content_length_known;
   uint64_t streaming_content_length;
+  /** Required for HTTPS and forbidden for plaintext HTTP. Snapshotted by start. */
+  const pocketjs_net_http_client_tls_policy_t *tls;
 } pocketjs_net_http_client_request_t;
 
 typedef enum {
@@ -275,6 +317,11 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT,
   POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
   POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_CERTIFICATE_INVALID,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HOSTNAME_MISMATCH,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HANDSHAKE_FAILED,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_VERSION_UNSUPPORTED,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_ALERT,
 } pocketjs_net_http_client_error_t;
 
 typedef enum {
@@ -333,6 +380,7 @@ typedef struct {
   bool advertises_public_capability;
   bool plaintext_http;
   bool https_fail_closed_before_io;
+  bool https_explicit_opt_in;
   bool owner_pumped;
   bool one_operation;
   bool fixed_core_storage;

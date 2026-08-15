@@ -163,6 +163,7 @@ static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .advertises_public_capability = false,
     .plaintext_http = true,
     .https_fail_closed_before_io = true,
+    .https_explicit_opt_in = true,
     .owner_pumped = true,
     .one_operation = true,
     .fixed_core_storage = true,
@@ -535,6 +536,29 @@ static bool parse_url(pocketjs_net_http_client_core_t *core,
   return true;
 }
 
+static bool base_tls_policy_valid(
+    const pocketjs_net_http_client_core_t *core,
+    const pocketjs_net_http_client_tls_policy_t *policy) {
+  if (policy == NULL ||
+      (policy->server_name.length != 0U && policy->server_name.data == NULL) ||
+      (policy->credential.length != 0U && policy->credential.data == NULL) ||
+      policy->minimum_version != POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2 ||
+      policy->maximum_version != POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2 ||
+      policy->alpn_count != 0U || policy->credential.length != 0U ||
+      policy->client_certificate !=
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE ||
+      policy->verification != POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL ||
+      policy->revocation !=
+          POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT ||
+      policy->custom_ca_bytes != 0U || core->numeric_host) {
+    return false;
+  }
+  const size_t hostname_length = strlen(core->hostname);
+  return policy->server_name.length == hostname_length &&
+         memcmp(policy->server_name.data, core->hostname, hostname_length) ==
+             0;
+}
+
 static bool forbidden_request_header(const uint8_t *name, size_t length) {
   static const char *const forbidden[] = {
       "host",
@@ -623,6 +647,11 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
     return POCKETJS_NET_HTTP_CLIENT_START_INVALID_URL;
   }
   if (core->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS) {
+    if (!core->config.allow_https ||
+        !base_tls_policy_valid(core, request->tls)) {
+      return POCKETJS_NET_HTTP_CLIENT_START_UNSUPPORTED_TLS;
+    }
+  } else if (request->tls != NULL) {
     return POCKETJS_NET_HTTP_CLIENT_START_UNSUPPORTED_TLS;
   }
   if (!valid_method(request->method.data, request->method.length)) {
@@ -937,7 +966,16 @@ map_transport_error(pocketjs_net_http_client_transport_error_t error) {
     return POCKETJS_NET_HTTP_CLIENT_ERROR_IO;
   case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_RESOURCE_LIMIT:
     return POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT;
-  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS:
+  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_CERTIFICATE_INVALID:
+    return POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_CERTIFICATE_INVALID;
+  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HOSTNAME_MISMATCH:
+    return POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HOSTNAME_MISMATCH;
+  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_HANDSHAKE_FAILED:
+    return POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HANDSHAKE_FAILED;
+  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_VERSION_UNSUPPORTED:
+    return POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_VERSION_UNSUPPORTED;
+  case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TLS_ALERT:
+    return POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_ALERT;
   case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_INVALID:
   case POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_NONE:
   default:
@@ -1227,7 +1265,8 @@ start_connect(pocketjs_net_http_client_core_t *core, uint32_t ipv4_be) {
   }
   pocketjs_net_http_client_transport_result_t result =
       core->config.transport_ops->start_connect(
-          core->config.transport_context, token, ipv4_be, core->port, false,
+          core->config.transport_context, token, ipv4_be, core->port,
+          core->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS,
           core->hostname, core->connect_deadline_us);
   if (result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
     core->selected_ipv4_be = ipv4_be;
@@ -1586,7 +1625,8 @@ static void handle_transport_completion(
     break;
   case TRANSPORT_OPERATION_CONNECT:
     if (completion->type != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_CONNECTED ||
-        completion->detail.connected.tls ||
+        completion->detail.connected.tls !=
+            (core->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS) ||
         completion->detail.connected.ipv4_be != core->selected_ipv4_be ||
         completion->detail.connected.connection.generation == 0U) {
       select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT, 0);
