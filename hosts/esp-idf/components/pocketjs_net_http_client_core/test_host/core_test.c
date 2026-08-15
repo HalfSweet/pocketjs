@@ -382,25 +382,26 @@ allow_endpoint(void *context,
     static const uint8_t request_body_byte[] = "x";
     assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
         log->core, 1U, 1U, 1U, request_body_byte, 1U));
-    assert(!pocketjs_net_http_client_core_submit_request_body_end(
-        log->core, 1U, 1U, 1U));
+    assert(!pocketjs_net_http_client_core_submit_request_body_end(log->core, 1U,
+                                                                  1U, 1U));
     assert(!pocketjs_net_http_client_core_submit_request_body_error(
         log->core, 1U, 1U, 1U, 1));
     assert(!pocketjs_net_http_client_core_take_event(log->core, &event));
     assert(!pocketjs_net_http_client_core_retire_event(log->core, 1U));
-    assert(!pocketjs_net_http_client_core_body_lease_view(
-        log->core, lease, &body, &body_length));
+    assert(!pocketjs_net_http_client_core_body_lease_view(log->core, lease,
+                                                          &body, &body_length));
     assert(!pocketjs_net_http_client_core_release_body_lease(log->core,
                                                              lease));
     assert(!pocketjs_net_http_client_core_get_status(log->core, &status));
     assert(!pocketjs_net_http_client_core_begin_shutdown(log->core, 1U));
     assert(!pocketjs_net_http_client_core_is_quiescent(log->core));
-    assert(!pocketjs_net_http_client_core_confirm_transport_shutdown(
-        log->core));
+    assert(
+        !pocketjs_net_http_client_core_confirm_transport_shutdown(log->core));
     assert(!pocketjs_net_http_client_core_report_host_event_retire_failure(
         log->core, 1U));
-    assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
-        log->core, 1U));
+    assert(
+        !pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+            log->core, 1U));
     assert(!pocketjs_net_http_client_core_deinit(log->core));
     assert(pocketjs_net_http_client_core_init(log->storage, log->config,
                                                &reinitialized) ==
@@ -506,6 +507,23 @@ static bool bytes_contain(const uint8_t *haystack, size_t haystack_length,
   return false;
 }
 
+static bool slice_equals(pocketjs_net_http_client_slice_t slice,
+                         const char *expected) {
+  const size_t length = strlen(expected);
+  return slice.length == length && memcmp(slice.data, expected, length) == 0;
+}
+
+static void complete_dns_connect(fixture_t *fixture, uint32_t address) {
+  assert(fixture->fake.active_kind == FAKE_RESOLVE);
+  fake_complete_resolve(&fixture->fake, &address, 1U);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_CONNECT);
+  assert(fixture->fake.connect_ipv4_be == address);
+  fake_complete_connect(&fixture->fake);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_WRITE);
+}
+
 static void retire_event(fixture_t *fixture,
                          pocketjs_net_http_client_event_t event) {
   assert(pocketjs_net_http_client_core_retire_event(fixture->core,
@@ -518,9 +536,10 @@ static pocketjs_net_http_client_core_status_t get_status(fixture_t *fixture) {
   return status;
 }
 
-static void connect_and_write_request(
-    fixture_t *fixture, const pocketjs_net_http_client_request_t *request,
-    const char *expected_request_line) {
+static void
+connect_and_write_request(fixture_t *fixture,
+                          const pocketjs_net_http_client_request_t *request,
+                          const char *expected_request_line) {
   assert(pocketjs_net_http_client_core_start(fixture->core, request,
                                              fixture->now) ==
          POCKETJS_NET_HTTP_CLIENT_START_OK);
@@ -557,8 +576,9 @@ static void connect_and_write_get(fixture_t *fixture, uint64_t token,
   connect_and_write_request(fixture, &request, "GET /x?q=1 HTTP/1.1\r\n");
 }
 
-static pocketjs_net_http_client_request_t make_streaming_post(
-    uint64_t token, bool length_known, uint64_t content_length) {
+static pocketjs_net_http_client_request_t
+make_streaming_post(uint64_t token, bool length_known,
+                    uint64_t content_length) {
   static const uint8_t url[] = "http://127.0.0.1/upload";
   static const uint8_t post[] = "POST";
   return (pocketjs_net_http_client_request_t){
@@ -571,8 +591,9 @@ static pocketjs_net_http_client_request_t make_streaming_post(
   };
 }
 
-static void start_streaming_request(
-    fixture_t *fixture, const pocketjs_net_http_client_request_t *request) {
+static void
+start_streaming_request(fixture_t *fixture,
+                        const pocketjs_net_http_client_request_t *request) {
   assert(pocketjs_net_http_client_core_start(fixture->core, request,
                                              fixture->now) ==
          POCKETJS_NET_HTTP_CLIENT_START_OK);
@@ -603,10 +624,10 @@ static void start_streaming_request(
   pump(fixture);
 }
 
-static pocketjs_net_http_client_event_t take_request_body_pull(
-    fixture_t *fixture, size_t expected_maximum) {
-  pocketjs_net_http_client_event_t pull = take_event(
-      fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL);
+static pocketjs_net_http_client_event_t
+take_request_body_pull(fixture_t *fixture, size_t expected_maximum) {
+  pocketjs_net_http_client_event_t pull =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL);
   assert(pull.operation_token != 0U);
   assert(pull.detail.request_body_pull.body_generation != 0U);
   assert(pull.detail.request_body_pull.pull_generation != 0U);
@@ -614,8 +635,8 @@ static pocketjs_net_http_client_event_t take_request_body_pull(
   return pull;
 }
 
-static void retire_request_body_pull(
-    fixture_t *fixture, pocketjs_net_http_client_event_t pull) {
+static void retire_request_body_pull(fixture_t *fixture,
+                                     pocketjs_net_http_client_event_t pull) {
   retire_event(fixture, pull);
   pocketjs_net_http_client_core_status_t status = get_status(fixture);
   assert(status.request_body_credit_outstanding);
@@ -642,6 +663,306 @@ static void finish_empty_response(fixture_t *fixture) {
       take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
   retire_event(fixture, complete);
   assert(!pocketjs_net_http_client_core_take_event(fixture->core, &complete));
+}
+
+static void test_redirect_follow_resolves_relative_url(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com:8080/base/one?old=1");
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW;
+  request.max_redirects = 5U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+
+  complete_dns_connect(&fixture, 0x0100007fU);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /base/one?old=1 HTTP/1.1\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_READ);
+
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 302 Found\r\nLocation: ../next?x=1#ignored\r\n"
+                     "Content-Length: 4\r\n\r\nbody",
+                     false);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  pocketjs_net_http_client_event_t event;
+  assert(!pocketjs_net_http_client_core_take_event(fixture.core, &event));
+  assert(fixture.fake.releases == 1U);
+
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_RESOLVE);
+  assert(strcmp(fixture.fake.resolve_hostname, "example.com") == 0);
+  assert(fixture.permissions.hostname_calls == 2U);
+  complete_dns_connect(&fixture, 0x0200007fU);
+  assert(fixture.permissions.numeric_calls == 2U);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /next?x=1 HTTP/1.1\r\n"));
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "Host: example.com:8080\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(&fixture.fake, "HTTP/1.1 204 No Content\r\n\r\n", false);
+  pump(&fixture);
+
+  const pocketjs_net_http_client_event_t headers =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  assert(headers.detail.response.status_code == 204U);
+  assert(headers.detail.response.redirected);
+  assert(slice_equals(headers.detail.response.url,
+                      "http://example.com:8080/next?x=1"));
+  retire_event(&fixture, headers);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  const pocketjs_net_http_client_event_t complete =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  retire_event(&fixture, complete);
+}
+
+static void test_redirect_rechecks_permission_before_second_hop(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/start");
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW;
+  request.max_redirects = 5U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  complete_dns_connect(&fixture, 0x0100007fU);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(
+      &fixture.fake,
+      "HTTP/1.1 302 Found\r\nLocation: http://denied.example/next\r\n"
+      "Content-Length: 0\r\n\r\n",
+      false);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+
+  fixture.permissions.allow_hostname = false;
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_NONE);
+  assert(fixture.permissions.hostname_calls == 2U);
+  assert(fixture.permissions.numeric_calls == 1U);
+  assert(strcmp(fixture.permissions.observed_hostname, "denied.example") == 0);
+  const pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code ==
+         POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED);
+  retire_event(&fixture, error);
+}
+
+static void test_redirect_rewrites_post_and_strips_cross_origin_headers(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  static const uint8_t post[] = "POST";
+  static const uint8_t body[] = "payload";
+  static const uint8_t authorization[] = "Authorization";
+  static const uint8_t bearer[] = "Bearer secret";
+  static const uint8_t cookie[] = "Cookie";
+  static const uint8_t cookie_value[] = "a=b";
+  static const uint8_t content_type[] = "Content-Type";
+  static const uint8_t content_type_value[] = "text/plain";
+  static const uint8_t keep[] = "X-Keep";
+  static const uint8_t keep_value[] = "yes";
+  const pocketjs_net_http_client_header_t headers[] = {
+      {.name = {.data = authorization, .length = sizeof(authorization) - 1U},
+       .value = {.data = bearer, .length = sizeof(bearer) - 1U}},
+      {.name = {.data = cookie, .length = sizeof(cookie) - 1U},
+       .value = {.data = cookie_value, .length = sizeof(cookie_value) - 1U}},
+      {.name = {.data = content_type, .length = sizeof(content_type) - 1U},
+       .value = {.data = content_type_value,
+                 .length = sizeof(content_type_value) - 1U}},
+      {.name = {.data = keep, .length = sizeof(keep) - 1U},
+       .value = {.data = keep_value, .length = sizeof(keep_value) - 1U}},
+  };
+  pocketjs_net_http_client_request_t request = {
+      .operation_token = 1U,
+      .url = {.data = (const uint8_t *)"http://example.com:8080/start",
+              .length = sizeof("http://example.com:8080/start") - 1U},
+      .method = {.data = post, .length = sizeof(post) - 1U},
+      .headers = headers,
+      .header_count = sizeof(headers) / sizeof(headers[0]),
+      .body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED,
+      .body = {.data = body, .length = sizeof(body) - 1U},
+      .redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW,
+      .max_redirects = 5U,
+  };
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  complete_dns_connect(&fixture, 0x0100007fU);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "POST /start HTTP/1.1\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(fixture.fake.write_length == sizeof(body) - 1U);
+  assert(memcmp(fixture.fake.write_bytes, body, sizeof(body) - 1U) == 0);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+
+  fake_complete_read(
+      &fixture.fake,
+      "HTTP/1.1 302 Found\r\nLocation: http://other.example/final\r\n"
+      "Content-Length: 0\r\n\r\n",
+      false);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_RESOLVE);
+  assert(strcmp(fixture.fake.resolve_hostname, "other.example") == 0);
+  complete_dns_connect(&fixture, 0x0200007fU);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /final HTTP/1.1\r\n"));
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "Host: other.example\r\n"));
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "X-Keep: yes\r\n"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Authorization:"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Cookie:"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Content-Type:"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Content-Length:"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_READ);
+  finish_empty_response(&fixture);
+}
+
+static void
+test_redirect_replays_fixed_body_and_rejects_streaming_replay(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  static const uint8_t post[] = "POST";
+  static const uint8_t body[] = "abc";
+  pocketjs_net_http_client_request_t request = {
+      .operation_token = 1U,
+      .url = {.data = (const uint8_t *)"http://example.com/upload",
+              .length = sizeof("http://example.com/upload") - 1U},
+      .method = {.data = post, .length = sizeof(post) - 1U},
+      .body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED,
+      .body = {.data = body, .length = sizeof(body) - 1U},
+      .redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW,
+      .max_redirects = 5U,
+  };
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  complete_dns_connect(&fixture, 0x0100007fU);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\n"
+                     "Content-Length: 0\r\n\r\n",
+                     false);
+  pump(&fixture);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  complete_dns_connect(&fixture, 0x0200007fU);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "POST /again HTTP/1.1\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(fixture.fake.write_length == sizeof(body) - 1U);
+  assert(memcmp(fixture.fake.write_bytes, body, sizeof(body) - 1U) == 0);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  finish_empty_response(&fixture);
+
+  fixture_init(&fixture);
+  request = make_streaming_post(1U, false, 0U);
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW;
+  request.max_redirects = 5U;
+  start_streaming_request(&fixture, &request);
+  pocketjs_net_http_client_event_t pull = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  retire_request_body_pull(&fixture, pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, pull.operation_token,
+      pull.detail.request_body_pull.body_generation,
+      pull.detail.request_body_pull.pull_generation));
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_READ);
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\n"
+                     "Content-Length: 0\r\n\r\n",
+                     false);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  const pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code ==
+         POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_BODY_NOT_REPLAYABLE);
+  retire_event(&fixture, error);
+}
+
+static void test_redirect_modes_and_limit_fail_closed(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/start");
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_ERROR;
+  request.max_redirects = 5U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  complete_dns_connect(&fixture, 0x0100007fU);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 302 Found\r\nLocation: /next\r\n"
+                     "Content-Length: 0\r\n\r\n",
+                     false);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT);
+  retire_event(&fixture, error);
+
+  fixture_init(&fixture);
+  request = make_get(1U, "http://example.com/start");
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW;
+  request.max_redirects = 0U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  complete_dns_connect(&fixture, 0x0100007fU);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 302 Found\r\nLocation: /next\r\n"
+                     "Content-Length: 0\r\n\r\n",
+                     false);
+  pump(&fixture);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  error = take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code ==
+         POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_LIMIT);
+  retire_event(&fixture, error);
 }
 
 static void test_headers_body_and_status_success(void) {
@@ -857,9 +1178,8 @@ static void test_https_base_policy_is_fail_closed(void) {
   policy.server_name = (pocketjs_net_http_client_slice_t){
       .data = wrong_name, .length = sizeof(wrong_name) - 1U};
   assert_tls_policy_rejected("https://example.com/", &policy);
-  policy.server_name =
-      (pocketjs_net_http_client_slice_t){.data = server_name,
-                                        .length = sizeof(server_name) - 1U};
+  policy.server_name = (pocketjs_net_http_client_slice_t){
+      .data = server_name, .length = sizeof(server_name) - 1U};
   policy.maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3;
   assert_tls_policy_rejected("https://example.com/", &policy);
   policy.maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2;
@@ -869,9 +1189,8 @@ static void test_https_base_policy_is_fail_closed(void) {
   policy.server_name = (pocketjs_net_http_client_slice_t){0};
   assert_tls_policy_rejected("https://127.0.0.1/", &policy);
 
-  policy.server_name =
-      (pocketjs_net_http_client_slice_t){.data = server_name,
-                                        .length = sizeof(server_name) - 1U};
+  policy.server_name = (pocketjs_net_http_client_slice_t){
+      .data = server_name, .length = sizeof(server_name) - 1U};
   assert_tls_policy_rejected("http://example.com/", &policy);
 }
 
@@ -1448,8 +1767,8 @@ static void test_streaming_credit_is_hostile_input_safe(void) {
   static const uint8_t x[] = "x";
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       fixture.core, 1U, 1U, 1U, x, 1U));
-  assert(!pocketjs_net_http_client_core_submit_request_body_end(
-      fixture.core, 1U, 1U, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(fixture.core,
+                                                                1U, 1U, 1U));
   assert(!pocketjs_net_http_client_core_submit_request_body_error(
       fixture.core, 1U, 1U, 1U, 7));
   start_streaming_request(&fixture, &request);
@@ -1466,8 +1785,7 @@ static void test_streaming_credit_is_hostile_input_safe(void) {
       fixture.core, 1U, body_generation, first_pull_generation));
   retire_request_body_pull(&fixture, first);
 
-  uint8_t oversize
-      [POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES + 1U];
+  uint8_t oversize[POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES + 1U];
   memset(oversize, 'z', sizeof(oversize));
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       fixture.core, 2U, body_generation, first_pull_generation, x, 1U));
@@ -1633,8 +1951,8 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
   uint64_t pull_generation = pull.detail.request_body_pull.pull_generation;
   assert(pocketjs_net_http_client_core_abort(aborted.core, 1U));
   assert(!get_status(&aborted).request_body_credit_outstanding);
-  assert(pocketjs_net_http_client_core_retire_event(aborted.core,
-                                                     pull.sequence));
+  assert(
+      pocketjs_net_http_client_core_retire_event(aborted.core, pull.sequence));
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       aborted.core, 1U, body_generation, pull_generation, x, 1U));
   complete_streaming_error(&aborted,
@@ -1826,10 +2144,10 @@ static void test_close_error_preserves_success_and_explicit_teardown(void) {
   assert(status.first_poison_cause_code == 77);
   retire_event(&fixture, complete);
   assert(!pocketjs_net_http_client_core_is_quiescent(fixture.core));
-  assert(pocketjs_net_http_client_core_begin_shutdown(fixture.core,
-                                                       fixture.now));
-  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
-      fixture.core));
+  assert(
+      pocketjs_net_http_client_core_begin_shutdown(fixture.core, fixture.now));
+  assert(
+      pocketjs_net_http_client_core_confirm_transport_shutdown(fixture.core));
   assert(pocketjs_net_http_client_core_is_quiescent(fixture.core));
   assert(pocketjs_net_http_client_core_deinit(fixture.core));
   assert(!pocketjs_net_http_client_core_get_status(fixture.core, &status));
@@ -2060,20 +2378,19 @@ static void test_malformed_read_releases_and_view_failure_retains(void) {
   malformed.fake.read_length = 1U;
   ++malformed.fake.read_lease_generation;
   malformed.fake.read_lease_active = true;
-  fake_queue(&malformed.fake,
-             (pocketjs_net_http_client_transport_completion_t){
-                 .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
-                 .detail.read =
-                     {
-                         .connection = {.slot = 99U, .generation = 99U},
-                         .lease =
-                             {.slot = 0U,
-                              .generation =
-                                  malformed.fake.read_lease_generation},
-                         .byte_count = 1U,
-                         .eof = false,
-                     },
-             });
+  fake_queue(
+      &malformed.fake,
+      (pocketjs_net_http_client_transport_completion_t){
+          .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
+          .detail.read =
+              {
+                  .connection = {.slot = 99U, .generation = 99U},
+                  .lease = {.slot = 0U,
+                            .generation = malformed.fake.read_lease_generation},
+                  .byte_count = 1U,
+                  .eof = false,
+              },
+      });
   pump(&malformed);
   assert(malformed.fake.release_attempts == 1U);
   assert(malformed.fake.releases == 1U);
@@ -2235,8 +2552,8 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
       take_event(&healthy, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
   assert(pocketjs_net_http_client_core_begin_shutdown(healthy.core,
                                                        ++healthy.now));
-  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
-      healthy.core));
+  assert(
+      pocketjs_net_http_client_core_confirm_transport_shutdown(healthy.core));
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       healthy.core, complete.sequence));
   retire_event(&healthy, complete);
@@ -2359,9 +2676,27 @@ static void test_invalid_inputs(void) {
   assert(pocketjs_net_http_client_core_start(fixture.core, &request,
                                              fixture.now) ==
          POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST);
+  request = make_get(1U, "http://example.com/");
+  request.redirect_mode =
+      (pocketjs_net_http_client_redirect_mode_t)(POCKETJS_NET_HTTP_CLIENT_REDIRECT_ERROR +
+                                                 1U);
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request = make_get(1U, "http://example.com/");
+  request.redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW;
+  request.max_redirects = POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REDIRECTS + 1U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
 }
 
 int main(void) {
+  test_redirect_follow_resolves_relative_url();
+  test_redirect_rechecks_permission_before_second_hop();
+  test_redirect_rewrites_post_and_strips_cross_origin_headers();
+  test_redirect_replays_fixed_body_and_rejects_streaming_replay();
+  test_redirect_modes_and_limit_fail_closed();
   test_headers_body_and_status_success();
   test_response_header_limit_configuration_boundaries();
   test_selected_response_header_limit();

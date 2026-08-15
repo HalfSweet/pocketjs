@@ -101,9 +101,7 @@ async function run(): Promise<void> {
     for (let round = 1; round <= ROUNDS_TOTAL; round += 1) {
       state.roundsStarted = round;
       checkpoint("health");
-      const health = await fetch(`${ORIGIN}/health`, {
-        redirect: "manual",
-      });
+      const health = await fetch(`${ORIGIN}/health`);
       if (health.status !== 200 || await health.text() !== HEALTH_BODY) {
         throw new Error("formal smoke health response mismatch");
       }
@@ -114,7 +112,6 @@ async function run(): Promise<void> {
       const echo = await fetch(`${ORIGIN}/echo`, {
         method: "POST",
         body: streamedPayload(payload),
-        redirect: "manual",
       });
       const echoed = new Uint8Array(await echo.arrayBuffer());
       if (echo.status !== 200 || !equalBytes(echoed, payload)) {

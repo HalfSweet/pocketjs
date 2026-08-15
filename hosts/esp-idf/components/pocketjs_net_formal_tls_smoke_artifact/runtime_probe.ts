@@ -91,7 +91,7 @@ const binding = Object.freeze({
     if (
       command?.metadata?.url !== "https://pocketjs.test:8443/health" ||
       command?.metadata?.method !== "GET" ||
-      command?.metadata?.redirect !== 2 ||
+      command?.metadata?.redirect !== 1 ||
       tls?.serverName !== "pocketjs.test" ||
       tls?.minVersion !== 258 ||
       tls?.maxVersion !== 258 ||

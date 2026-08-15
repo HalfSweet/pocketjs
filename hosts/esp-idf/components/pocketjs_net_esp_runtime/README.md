@@ -33,13 +33,16 @@ that failure to `tls_certificate_invalid` and reports
 `distinct_tls_errors=false`; it does not promise a separate
 `tls_hostname_mismatch` result for this provider.
 
-Redirect mode `manual` is the only admitted mode. `follow` remains disabled
-because the current Core does not expose relative Location canonicalization
-and the formal one-shot streaming producer cannot replay a retained request
-body for 307/308. The selected TLS provider and complete Host descriptor are
-not yet verified against the Build Plan by this component, TLS close-notify is
-not bounded, and native TLS allocation limits are not proven. **The descriptor
-therefore keeps public capability advertisement off.**
+The runtime passes `manual`, `error`, and bounded `follow` modes into the Core.
+The final response metadata carries the effective URL and whether any hop was
+followed. A one-shot streaming producer can follow redirects that rewrite the
+request to GET, but 307/308 and other preserve-body redirects fail with
+`invalid_state`; the runtime never asks the Guest producer to replay consumed
+input. The native redirect resolver is still an ASCII-only subset of the
+framework URL implementation. The selected TLS provider and complete Host
+descriptor are not yet verified against the Build Plan by this component, TLS
+close-notify is not bounded, and native TLS allocation limits are not proven.
+**The descriptor therefore keeps public capability advertisement off.**
 
 Shutdown has three explicit stages: stop admission and request cancellation,
 run guarded shutdown service turns while pumping native cleanup, then destroy

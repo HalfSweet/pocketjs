@@ -8,7 +8,7 @@ The verified Build Plan admits exactly `network.http.client` and
 `network.http.client.tls`, the ESP HTTP Core, the ESP transport, and the ESP-TLS
 provider. The only endpoint is **`https://pocketjs.test:8443`**. Each of 20
 rounds performs one health request and one streamed binary echo request with
-manual redirect handling and this exact Guest TLS policy:
+the SDK's default redirect-follow mode and this exact Guest TLS policy:
 
 - DNS A-label and SNI: `pocketjs.test`
 - TLS minimum and maximum: 1.2

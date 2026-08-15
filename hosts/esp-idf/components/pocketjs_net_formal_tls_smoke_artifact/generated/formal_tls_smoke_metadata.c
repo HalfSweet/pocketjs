@@ -9,9 +9,9 @@ extern const uint8_t embedded_factory_start[]
 const uint8_t *const pocketjs_net_formal_tls_smoke_factory_bytes =
     embedded_factory_start;
 const size_t pocketjs_net_formal_tls_smoke_factory_length =
-    470989U;
+    470917U;
 const size_t pocketjs_net_formal_tls_smoke_factory_storage_length =
-    470990U;
+    470918U;
 
 const char pocketjs_net_formal_tls_smoke_plan_hash[] = "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654";
 const uint8_t pocketjs_net_formal_tls_smoke_plan_hash_bytes
@@ -30,11 +30,11 @@ const uint16_t pocketjs_net_formal_tls_smoke_feature_count =
     2U;
 
 const char pocketjs_net_formal_tls_smoke_factory_sha256[] =
-    "sha256:a7091cf15823bc73f0ad3ed1ceaf00e5ecc5c4f5de49f0abc99043241dec0be1";
+    "sha256:55b7bc93ff27ad2ed686767484fea1775c966637572e28fe9a04472be90c5847";
 const uint8_t pocketjs_net_formal_tls_smoke_factory_sha256_bytes[32] = {
-    0xa7, 0x09, 0x1c, 0xf1, 0x58, 0x23, 0xbc, 0x73, 0xf0, 0xad, 0x3e, 0xd1,
-    0xce, 0xaf, 0x00, 0xe5, 0xec, 0xc5, 0xc4, 0xf5, 0xde, 0x49, 0xf0, 0xab,
-    0xc9, 0x90, 0x43, 0x24, 0x1d, 0xec, 0x0b, 0xe1,
+    0x55, 0xb7, 0xbc, 0x93, 0xff, 0x27, 0xad, 0x2e, 0xd6, 0x86, 0x76, 0x74,
+    0x84, 0xfe, 0xa1, 0x77, 0x5c, 0x96, 0x66, 0x37, 0x57, 0x2e, 0x28, 0xfe,
+    0x9a, 0x04, 0x47, 0x2b, 0xe9, 0x0c, 0x58, 0x47,
 };
 
 const pocketjs_net_formal_tls_smoke_endpoint_t

@@ -102,10 +102,26 @@ before shutdown, on a healthy Core, before transport confirmation, for a pending
 event, or for a mismatched sequence. `init` detects and rejects reuse of live
 storage.
 
-The Core performs no automatic redirect, retry, authentication, cookie,
-proxy, compression, or decompression behavior. Redirect responses are exposed
-as ordinary responses. A streamed request body is consumed once and is never
-buffered in full or implicitly replayed.
+The Core implements `manual`, `error`, and bounded `follow` redirect modes in
+the original operation. Intermediate redirect headers and bodies are not
+published to the Guest. The Core closes the old connection, resolves the new
+target, and repeats hostname and every numeric-candidate permission check
+before the next write. The original total deadline spans all hops. It rewrites
+POST for 301/302 and every method except HEAD for 303, removes the body fields,
+and strips `Authorization`, `Proxy-Authorization`, and `Cookie` across origins.
+A fixed body can be replayed for 307/308. **A consumed streaming body is never
+buffered or replayed; a redirect that must preserve it fails with
+`invalid_state` before the next hop.** Redirect response bodies and trailers
+are abandoned only because `Connection: close` prevents reuse.
+
+Redirect resolution currently accepts bounded ASCII HTTP(S) references,
+including absolute, scheme-relative, root-relative, path-relative,
+query-relative, fragment-only, and percent-encoded dot segments. Control
+bytes, raw non-ASCII bytes, backslashes, invalid escapes, unsupported schemes,
+IPv6, and non-canonical host syntax fail closed. This is sufficient for the
+formal ESP smoke target but remains narrower than the framework's pinned
+WHATWG/UTS #46 parser. Retry, authentication, cookie storage, proxy,
+compression, and decompression remain absent.
 
 ## HTTPS and admission blockers
 
@@ -131,8 +147,9 @@ The current Core additionally has these gaps:
 - it supports one in-flight operation and one connection, not the architecture
   concurrency target;
 - it supports IPv4 only and does not implement IDNA or IPv6;
-- it does not follow redirects or implement redirect method rewriting and
-  cross-origin sensitive-field stripping;
+- its redirect resolver remains an ASCII-only native subset and therefore
+  still needs differential conformance against the pinned framework URL
+  implementation before public admission;
 - a native failure to start or complete the final close has no lower-level
   force-close primitive, so the Core preserves the HTTP terminal result,
   exposes the cleanup poison and retained ownership, and requires the product
@@ -140,8 +157,9 @@ The current Core additionally has these gaps:
 - fixed PocketJS-owned storage is proven, but the composed lwIP pools and socket
   allocations still need target-specific Kconfig bounds, peak measurements,
   and soak evidence;
-- it is not connected to the QuickJS Guest Binding or NetworkServiceTurn and
-  has not passed the AtomS3R/Tab5 hardware admission matrix.
+- the composed product scheduler, resource ledger, and full AtomS3R/Tab5
+  admission matrix remain incomplete even though the formal runtime smoke
+  artifacts now exercise this Core on both targets.
 
 Until those gaps are resolved, this component must not enter a formal Build
 Plan and must not advertise `network.http.client` or
@@ -153,7 +171,10 @@ Plan and must not advertise `network.http.client` or
 ordering, headers-first delivery, bounded body credit and leases, 4xx success,
 strict trailer failure, close-before-error ordering, default pre-I/O HTTPS
 rejection, exact base-policy validation and explicit TLS connect selection,
-abort, total timeout, selected response-header configuration and parse
+redirect follow/error/manual decisions, relative URL resolution, per-hop
+permission checks, method/body rewrite, cross-origin sensitive-field removal,
+fixed-body replay, streaming-body replay refusal, abort, total timeout,
+selected response-header configuration and parse
 boundaries, and exact-one terminal delivery. Hostile cases cover all
 public API calls attempted from a permission callback, bytes-plus-EOF reads,
 stale completions while idle, malformed read cleanup, lease and completion

@@ -610,9 +610,9 @@ static bool parse_limits(JSContext *context, JSValueConst metadata,
   return valid;
 }
 
-static bool parse_base_tls_metadata(
-    JSContext *context, JSValueConst tls,
-    pocketjs_net_esp_runtime_http_command_t *command) {
+static bool
+parse_base_tls_metadata(JSContext *context, JSValueConst tls,
+                        pocketjs_net_esp_runtime_http_command_t *command) {
   if (JS_IsNull(tls)) {
     command->tls_present = false;
     return true;
@@ -1014,11 +1014,21 @@ core_error(const pocketjs_net_esp_runtime_slot_t *slot) {
     error.temporary = true;
     break;
   case POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT:
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_LIMIT:
     error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME;
     error.code = POCKETJS_NETWORK_V1_ERROR_RESOURCE_LIMIT;
     break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_UNSUPPORTED:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME;
+    error.code = POCKETJS_NETWORK_V1_ERROR_UNSUPPORTED;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_BODY_NOT_REPLAYABLE:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME;
+    error.code = POCKETJS_NETWORK_V1_ERROR_INVALID_STATE;
+    break;
   case POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL:
   case POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY:
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT:
     error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_PROTOCOL;
     error.code = POCKETJS_NETWORK_V1_ERROR_HTTP_PROTOCOL_ERROR;
     break;
@@ -1099,10 +1109,11 @@ static JSValue new_response_metadata(JSContext *context,
                     new_headers(context, event->detail.response.headers,
                                 event->detail.response.header_count)) ||
       !set_property(context, object, "url",
-                    JS_NewStringLen(context, (const char *)slot->request_url,
-                                    slot->request_url_length)) ||
+                    JS_NewStringLen(
+                        context, (const char *)event->detail.response.url.data,
+                        event->detail.response.url.length)) ||
       !set_property(context, object, "redirected",
-                    JS_NewBool(context, false)) ||
+                    JS_NewBool(context, event->detail.response.redirected)) ||
       !set_property(
           context, object, "bufferedBodyBytes",
           JS_NewInt64(
@@ -1497,9 +1508,8 @@ static JSValue new_limit_entry(JSContext *context, const char *name,
   return entry;
 }
 
-static bool set_feature_projection(
-    JSContext *context, JSValueConst array,
-    const pocketjs_net_esp_runtime_t *runtime) {
+static bool set_feature_projection(JSContext *context, JSValueConst array,
+                                   const pocketjs_net_esp_runtime_t *runtime) {
   for (uint32_t index = 0U; index < runtime->feature_count; ++index) {
     if (!set_array_property(
             context, array, index,

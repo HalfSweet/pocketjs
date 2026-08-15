@@ -51,6 +51,8 @@ static TaskHandle_t const OWNER_TASK = (TaskHandle_t)(uintptr_t)0x1234U;
 static size_t transport_creates;
 static size_t transport_destroys;
 static size_t core_starts;
+static pocketjs_net_http_client_redirect_mode_t last_core_redirect_mode;
+static uint16_t last_core_max_redirects;
 static size_t wake_count;
 static size_t permission_count;
 static size_t dispatcher_calls;
@@ -254,6 +256,8 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_start(
   }
   core->operation_token = request->operation_token;
   core->active = true;
+  last_core_redirect_mode = request->redirect_mode;
+  last_core_max_redirects = request->max_redirects;
   ++core_starts;
   return POCKETJS_NET_HTTP_CLIENT_START_OK;
 }
@@ -1005,6 +1009,8 @@ static void test_tls_profile_snapshot(
   expected_permission_scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP;
   command.tls_present = false;
   command.tls_requested = false;
+  command.redirect_mode = POCKETJS_NETWORK_V1_HTTP_REDIRECT_FOLLOW;
+  command.max_redirects = 2U;
   memcpy(command.url, "http://example.test/",
          sizeof("http://example.test/"));
   command.url_length = sizeof("http://example.test/") - 1U;
@@ -1012,6 +1018,8 @@ static void test_tls_profile_snapshot(
       identity(2U, (pocketjs_network_v1_handle_t){0U, 0U}, 2U);
   assert(pocketjs_net_esp_runtime_start_http(runtime, &request_identity,
                                              &command, &error));
+  assert(last_core_redirect_mode == POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW &&
+         last_core_max_redirects == 2U);
   assert(transport_creates == creates_before + 1U &&
          core_starts == starts_before + 2U);
   queue_event(slot->core,

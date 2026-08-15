@@ -23,4 +23,5 @@ silicon. They also retain the 1000 Hz FreeRTOS tick. The smoke app does not
 write eFuses or modify the Tab5 ESP32-C6 companion.
 
 The component descriptor deliberately keeps public capability advertisement
-disabled while redirect-follow and the hardware gate remain incomplete.
+disabled while redirect URL differential conformance, descriptor aggregation,
+resource admission, and the complete hardware gate remain incomplete.

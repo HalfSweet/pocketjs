@@ -27,6 +27,7 @@ extern "C" {
 #define POCKETJS_NET_HTTP_CLIENT_CORE_WRITE_BYTES 4096U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES 2048U
 #define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_DNS_CANDIDATES 4U
+#define POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REDIRECTS 5U
 
 typedef struct pocketjs_net_http_client_core pocketjs_net_http_client_core_t;
 
@@ -236,6 +237,13 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING,
 } pocketjs_net_http_client_request_body_kind_t;
 
+typedef enum {
+  /* Zero intentionally preserves the historical manual behavior. */
+  POCKETJS_NET_HTTP_CLIENT_REDIRECT_MANUAL = 0,
+  POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW,
+  POCKETJS_NET_HTTP_CLIENT_REDIRECT_ERROR,
+} pocketjs_net_http_client_redirect_mode_t;
+
 typedef struct {
   pocketjs_net_http_client_operation_token_t operation_token;
   pocketjs_net_http_client_slice_t url;
@@ -248,6 +256,8 @@ typedef struct {
   /* Used only by STREAMING. Unknown-length streams use strict chunked coding. */
   bool streaming_content_length_known;
   uint64_t streaming_content_length;
+  pocketjs_net_http_client_redirect_mode_t redirect_mode;
+  uint16_t max_redirects;
   /** Required for HTTPS and forbidden for plaintext HTTP. Snapshotted by start. */
   const pocketjs_net_http_client_tls_policy_t *tls;
 } pocketjs_net_http_client_request_t;
@@ -322,6 +332,10 @@ typedef enum {
   POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HANDSHAKE_FAILED,
   POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_VERSION_UNSUPPORTED,
   POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_ALERT,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_UNSUPPORTED,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_LIMIT,
+  POCKETJS_NET_HTTP_CLIENT_ERROR_REDIRECT_BODY_NOT_REPLAYABLE,
 } pocketjs_net_http_client_error_t;
 
 typedef enum {
@@ -352,6 +366,8 @@ typedef struct {
       pocketjs_net_http_client_slice_t status_text;
       const pocketjs_net_http_client_header_t *headers;
       size_t header_count;
+      pocketjs_net_http_client_slice_t url;
+      bool redirected;
     } response;
     struct {
       /* The lease must be released before this event can be retired. */
@@ -388,6 +404,10 @@ typedef struct {
   bool explicit_body_credit;
   bool explicit_body_lease;
   bool redirects_followed;
+  bool redirect_manual;
+  bool redirect_error;
+  bool redirect_fixed_body_replay;
+  bool redirect_streaming_body_replay;
   bool hidden_retry;
   bool hidden_auth;
   bool hidden_cookie_store;

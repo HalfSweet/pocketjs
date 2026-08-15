@@ -44,9 +44,9 @@
     256
   ],
   "factory": {
-    "sourceBytes": 470681,
-    "storageBytes": 470682,
-    "sha256": "sha256:d27e21e3f6eed28679a38fb4590b0e9cb71813fc407b447446eb96163edf6421"
+    "sourceBytes": 470591,
+    "storageBytes": 470592,
+    "sha256": "sha256:951049cdb1147f2dc06eda38b2653241e94de3b526e3880755cbe22789a72a6e"
   },
   "endpoint": {
     "origin": "http://172.16.10.126:8088",

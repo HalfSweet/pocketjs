@@ -45,9 +45,9 @@
     257
   ],
   "factory": {
-    "sourceBytes": 470989,
-    "storageBytes": 470990,
-    "sha256": "sha256:a7091cf15823bc73f0ad3ed1ceaf00e5ecc5c4f5de49f0abc99043241dec0be1"
+    "sourceBytes": 470917,
+    "storageBytes": 470918,
+    "sha256": "sha256:55b7bc93ff27ad2ed686767484fea1775c966637572e28fe9a04472be90c5847"
   },
   "endpoint": {
     "origin": "https://pocketjs.test:8443",

@@ -98,7 +98,6 @@ async function run(): Promise<void> {
       state.roundsStarted = round;
       checkpoint("health");
       const health = await fetch(`${ORIGIN}/health`, {
-        redirect: "manual",
         tls: TLS_POLICY,
       });
       if (health.status !== 200 || await health.text() !== HEALTH_BODY) {
@@ -111,7 +110,6 @@ async function run(): Promise<void> {
       const echo = await fetch(`${ORIGIN}/echo`, {
         method: "POST",
         body: streamedPayload(payload),
-        redirect: "manual",
         tls: TLS_POLICY,
       });
       const echoed = new Uint8Array(await echo.arrayBuffer());

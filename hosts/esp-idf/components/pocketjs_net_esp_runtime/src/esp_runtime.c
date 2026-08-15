@@ -10,6 +10,10 @@
 #include "runtime_contract.h"
 #include "runtime_internal.h"
 
+_Static_assert(POCKETJS_NET_ESP_RUNTIME_MAX_REDIRECTS ==
+                   POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REDIRECTS,
+               "runtime and HTTP Core redirect ceilings must match");
+
 static const pocketjs_net_esp_runtime_descriptor_t RUNTIME_DESCRIPTOR = {
     .id = POCKETJS_NET_ESP_RUNTIME_ID,
     .implementation_version = POCKETJS_NET_ESP_RUNTIME_IMPLEMENTATION_VERSION,
@@ -32,8 +36,8 @@ static const pocketjs_net_esp_runtime_descriptor_t RUNTIME_DESCRIPTOR = {
     .distinct_tls_errors = false,
     .tls_provider_id = POCKETJS_NET_ESP_TLS_PROVIDER_ID,
     .redirect_manual = true,
-    .redirect_error = false,
-    .redirect_follow = false,
+    .redirect_error = true,
+    .redirect_follow = true,
     .redirect_replayable_stream_body = false,
     .guest_execution_guarded_dispatch = true,
     .hidden_retry = false,
@@ -72,8 +76,9 @@ static bool valid_limit(pocketjs_net_esp_runtime_limit_range_t limit,
          limit.hard <= POCKETJS_NET_ESP_RUNTIME_SEQUENCE_MAX;
 }
 
-static bool valid_tls_config_shape(
-    const pocketjs_net_esp_runtime_config_t *config, bool tls_enabled) {
+static bool
+valid_tls_config_shape(const pocketjs_net_esp_runtime_config_t *config,
+                       bool tls_enabled) {
   if (!tls_enabled) {
     return config->tls_trust_source == POCKETJS_NET_ESP_TLS_TRUST_DISABLED &&
            config->host_pinned_ca_pem == NULL &&
@@ -397,9 +402,8 @@ bool pocketjs_net_esp_runtime_start_http(
     return false;
   }
   if ((command->tls_requested && !runtime->tls_enabled) ||
-      command->borrowed_input_present ||
-      command->has_timeout_overrides || command->has_limit_overrides ||
-      command->redirect_mode != POCKETJS_NETWORK_V1_HTTP_REDIRECT_MANUAL) {
+      command->borrowed_input_present || command->has_timeout_overrides ||
+      command->has_limit_overrides) {
     set_error(out_error, POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME,
               POCKETJS_NETWORK_V1_ERROR_UNSUPPORTED, "http.fetch", false);
     return false;
@@ -421,13 +425,8 @@ bool pocketjs_net_esp_runtime_start_http(
   slot->request_body = identity->body;
   slot->response_body = ABSENT_HANDLE;
   slot->core_operation_token = operation_token;
-  slot->redirect_mode = command->redirect_mode;
-  slot->max_redirects = command->max_redirects;
-  slot->has_request_body = command->has_body;
   memcpy(slot->request_method, command->method, command->method_length);
   slot->request_method_length = command->method_length;
-  memcpy(slot->request_url, command->url, command->url_length);
-  slot->request_url_length = command->url_length;
 
   pocketjs_net_http_client_request_t request = {
       .operation_token = operation_token,
@@ -440,6 +439,13 @@ bool pocketjs_net_esp_runtime_start_http(
                        : POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE,
       .streaming_content_length_known = false,
       .streaming_content_length = 0U,
+      .redirect_mode =
+          command->redirect_mode == POCKETJS_NETWORK_V1_HTTP_REDIRECT_FOLLOW
+              ? POCKETJS_NET_HTTP_CLIENT_REDIRECT_FOLLOW
+          : command->redirect_mode == POCKETJS_NETWORK_V1_HTTP_REDIRECT_ERROR
+              ? POCKETJS_NET_HTTP_CLIENT_REDIRECT_ERROR
+              : POCKETJS_NET_HTTP_CLIENT_REDIRECT_MANUAL,
+      .max_redirects = command->max_redirects,
       .tls = command->tls_present ? &command->tls_policy : NULL,
   };
   const uint64_t now_us = (uint64_t)esp_timer_get_time();

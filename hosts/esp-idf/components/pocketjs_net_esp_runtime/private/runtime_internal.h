@@ -47,14 +47,8 @@ typedef struct {
   uint64_t upload_body_generation;
   uint64_t upload_pull_generation;
   size_t upload_maximum_bytes;
-  pocketjs_network_v1_http_redirect_mode_t redirect_mode;
-  uint16_t redirect_count;
-  uint16_t max_redirects;
-  bool has_request_body;
   uint8_t request_method[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_METHOD_BYTES];
   size_t request_method_length;
-  uint8_t request_url[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_URL_BYTES];
-  size_t request_url_length;
 
   pocketjs_net_esp_transport_t *transport;
   bool transport_detached_awaiting_confirm;

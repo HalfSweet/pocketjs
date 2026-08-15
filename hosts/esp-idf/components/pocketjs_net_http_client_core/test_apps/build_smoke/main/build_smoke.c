@@ -32,7 +32,11 @@ void app_main(void) {
   assert(descriptor->headers_first);
   assert(descriptor->explicit_body_credit);
   assert(descriptor->explicit_body_lease);
-  assert(!descriptor->redirects_followed);
+  assert(descriptor->redirects_followed);
+  assert(descriptor->redirect_manual);
+  assert(descriptor->redirect_error);
+  assert(descriptor->redirect_fixed_body_replay);
+  assert(!descriptor->redirect_streaming_body_replay);
   assert(!descriptor->hidden_retry);
   assert(!descriptor->hidden_auth);
   assert(!descriptor->hidden_cookie_store);

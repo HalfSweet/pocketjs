@@ -14,11 +14,11 @@ transport. Normal builds, changed plans, `Headers`, `serve`, and namespace
 imports remain staged.
 
 The Guest runs 20 rounds against `http://172.16.10.126:8088`. Each round checks
-`GET /health` and a binary, unknown-length streamed `POST /echo`. Every request
-sets `redirect: "manual"` because redirect follow is not admitted by the ESP
-runtime candidate. The factory installs the legacy `frame` slot required by
-the Guest host, but **the headless runner never calls it and requires
-`frameCalls === 0`.**
+`GET /health` and a binary, unknown-length streamed `POST /echo`. The requests
+use the SDK's default `redirect: "follow"`, which verifies that an ordinary
+`fetch(url)` reaches the native runtime without a smoke-only option override.
+The factory installs the legacy `frame` slot required by the Guest host, but
+**the headless runner never calls it and requires `frameCalls === 0`.**
 
 Generate or check the committed artifact from the repository root:
 
@@ -42,9 +42,9 @@ fail-stop diagnostic but does not abandon callback-owned memory. A broken
 native subsystem therefore keeps the dedicated owner task in cleanup instead
 of returning with a dangling wake or permission context.
 
-This artifact validates the formal plaintext request path and board scheduler
-integration. It does not satisfy public HTTP admission: redirect follow,
-connection reuse, descriptor aggregation, complete resource accounting, DNS
-candidate completeness, and the full hardware/conformance matrix remain
-required before the compiler or stock target registry can expose
-`network.http.client`.
+This artifact validates the formal plaintext request path, default redirect
+mode admission, and board scheduler integration. It does not satisfy public
+HTTP admission: redirect URL differential conformance, connection reuse,
+descriptor aggregation, complete resource accounting, DNS candidate
+completeness, and the full hardware/conformance matrix remain required before
+the compiler or stock target registry can expose `network.http.client`.

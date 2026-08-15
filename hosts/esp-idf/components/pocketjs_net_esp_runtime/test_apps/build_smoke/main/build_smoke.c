@@ -167,7 +167,8 @@ void app_main(void) {
   assert(strcmp(descriptor->tls_provider_id,
                 POCKETJS_NET_ESP_TLS_PROVIDER_ID) == 0);
   assert(descriptor->redirect_manual);
-  assert(!descriptor->redirect_follow);
+  assert(descriptor->redirect_error);
+  assert(descriptor->redirect_follow);
   assert(!descriptor->redirect_replayable_stream_body);
   assert(descriptor->guest_execution_guarded_dispatch);
 
@@ -267,9 +268,9 @@ void app_main(void) {
   assert(pocketjs_net_esp_runtime_create(&tls_config, &runtime) == ESP_OK);
   binding = JS_UNDEFINED;
   assert(pocketjs_net_esp_runtime_get_binding(runtime, &binding) == ESP_OK);
-  assert(pocketjs_esp_guest_mount_factory(
-             guest, "esp-runtime-tls-smoke.js", TLS_FACTORY,
-             sizeof(TLS_FACTORY) - 1U, binding, NULL) == ESP_OK);
+  assert(pocketjs_esp_guest_mount_factory(guest, "esp-runtime-tls-smoke.js",
+                                          TLS_FACTORY, sizeof(TLS_FACTORY) - 1U,
+                                          binding, NULL) == ESP_OK);
   JS_FreeValue(pocketjs_esp_guest_context(guest), binding);
   assert(pocketjs_esp_guest_call_frame(guest, 0U, NULL) == ESP_OK);
   assert(!permission_called && tls_clock_context == 0U);
@@ -279,9 +280,9 @@ void app_main(void) {
   for (size_t turn = 0U;
        turn < 4U && !pocketjs_net_esp_runtime_is_ready_to_destroy(runtime);
        ++turn) {
-    assert(pocketjs_net_esp_runtime_service(
-               runtime, (uint64_t)esp_timer_get_time(), 1U, 1U, 8U, 4096U,
-               &service) == ESP_OK);
+    assert(pocketjs_net_esp_runtime_service(runtime,
+                                            (uint64_t)esp_timer_get_time(), 1U,
+                                            1U, 8U, 4096U, &service) == ESP_OK);
   }
   assert(wake_called &&
          pocketjs_net_esp_runtime_is_ready_to_destroy(runtime));
