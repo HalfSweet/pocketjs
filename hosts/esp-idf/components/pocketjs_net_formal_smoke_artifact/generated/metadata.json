@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "testOnly": true,
+  "target": {
+    "id": "esp-formal-network-smoke-test",
+    "hostAbi": 1
+  },
+  "planHash": "sha256:04856acc82e7aa31648b015e62a63a4cadf6f48a3d1d3f46f3987539520b63fd",
+  "planHashBytes": [
+    4,
+    133,
+    106,
+    204,
+    130,
+    231,
+    170,
+    49,
+    100,
+    139,
+    1,
+    94,
+    98,
+    166,
+    58,
+    76,
+    173,
+    246,
+    244,
+    138,
+    61,
+    29,
+    63,
+    70,
+    243,
+    152,
+    117,
+    57,
+    82,
+    11,
+    99,
+    253
+  ],
+  "featureIds": [
+    256
+  ],
+  "factory": {
+    "sourceBytes": 464962,
+    "storageBytes": 464963,
+    "sha256": "sha256:2958460d6e54176aeb1d79ce5500b6611eb04c37fc3c40a12b47d0acbf12fc04"
+  },
+  "endpoint": {
+    "origin": "http://172.16.10.126:8088",
+    "scheme": "http",
+    "host": "172.16.10.126",
+    "port": 8088,
+    "healthUrl": "http://172.16.10.126:8088/health",
+    "echoUrl": "http://172.16.10.126:8088/echo"
+  },
+  "reportGlobal": "__pocketjsFormalNetworkSmokeReportV1",
+  "stagedSurfaceBuild": {
+    "publicSpecifier": "@pocketjs/framework/net/http",
+    "permit": "test-only-staged-http-client-fetch",
+    "exactAppId": "dev.pocketjs.esp-formal-network-smoke",
+    "exactTargetId": "esp-formal-network-smoke-test",
+    "productionGateChanged": false
+  }
+}
