@@ -79,7 +79,7 @@ describe("net package namespace", () => {
 
   test("unbound support queries and direct protocol calls fail explicitly", async () => {
     expect(() => net.getNetworkLimits()).toThrow(net.NetworkError);
-    expect(() => net.getNetworkLimits()).toThrow(/without an admitted network binding/);
+    expect(() => net.getNetworkLimits()).toThrow(/unadmitted scope/);
     await expect(http.fetch("https://example.test/")).rejects.toMatchObject({
       code: "unsupported",
       operation: "http.fetch",
