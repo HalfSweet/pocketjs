@@ -397,6 +397,10 @@ allow_endpoint(void *context,
     assert(!pocketjs_net_http_client_core_is_quiescent(log->core));
     assert(!pocketjs_net_http_client_core_confirm_transport_shutdown(
         log->core));
+    assert(!pocketjs_net_http_client_core_report_host_event_retire_failure(
+        log->core, 1U));
+    assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+        log->core, 1U));
     assert(!pocketjs_net_http_client_core_deinit(log->core));
     assert(pocketjs_net_http_client_core_init(log->storage, log->config,
                                                &reinitialized) ==
@@ -1484,8 +1488,8 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
   uint64_t pull_generation = pull.detail.request_body_pull.pull_generation;
   assert(pocketjs_net_http_client_core_abort(aborted.core, 1U));
   assert(!get_status(&aborted).request_body_credit_outstanding);
-  assert(!pocketjs_net_http_client_core_retire_event(aborted.core,
-                                                      pull.sequence));
+  assert(pocketjs_net_http_client_core_retire_event(aborted.core,
+                                                     pull.sequence));
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       aborted.core, 1U, body_generation, pull_generation, x, 1U));
   complete_streaming_error(&aborted,
@@ -2067,6 +2071,128 @@ static void test_empty_pump_budget_is_rejected_without_poison(void) {
   assert(!status.poisoned && status.poison_flags == 0U);
 }
 
+static void test_poison_shutdown_can_abandon_exact_host_event(void) {
+  fixture_t healthy;
+  fixture_init(&healthy);
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      healthy.core, 1U));
+  connect_and_write_get(&healthy, 1U,
+                        "http://example.com:8080/x?q=1");
+  fake_complete_read(&healthy.fake, "HTTP/1.1 204 No Content\r\n\r\n",
+                     false);
+  pump(&healthy);
+  pocketjs_net_http_client_event_t headers =
+      take_event(&healthy, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(&healthy, headers);
+  fake_complete_close(&healthy.fake);
+  pump(&healthy);
+  pocketjs_net_http_client_event_t complete =
+      take_event(&healthy, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  assert(pocketjs_net_http_client_core_begin_shutdown(healthy.core,
+                                                       ++healthy.now));
+  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
+      healthy.core));
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      healthy.core, complete.sequence));
+  retire_event(&healthy, complete);
+  assert(pocketjs_net_http_client_core_is_quiescent(healthy.core));
+  assert(pocketjs_net_http_client_core_deinit(healthy.core));
+
+  fixture_t body_fixture;
+  fixture_init(&body_fixture);
+  connect_and_write_get(&body_fixture, 1U,
+                        "http://example.com:8080/x?q=1");
+  fake_complete_read(&body_fixture.fake,
+                     "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx", false);
+  pump(&body_fixture);
+  headers = take_event(&body_fixture,
+                       POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(&body_fixture, headers);
+  assert(pocketjs_net_http_client_core_grant_body_credit(body_fixture.core, 1U,
+                                                          1U));
+  pump(&body_fixture);
+  pocketjs_net_http_client_event_t body =
+      take_event(&body_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
+  const uint8_t *body_bytes = NULL;
+  size_t body_length = 0U;
+  assert(pocketjs_net_http_client_core_body_lease_view(
+      body_fixture.core, body.detail.body.lease, &body_bytes, &body_length));
+  assert(body_length == 1U && body_bytes[0] == 'x');
+  assert(pocketjs_net_http_client_core_report_host_event_retire_failure(
+      body_fixture.core, body.sequence));
+  assert(get_status(&body_fixture).poisoned);
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      body_fixture.core, body.sequence));
+  assert(pocketjs_net_http_client_core_begin_shutdown(body_fixture.core,
+                                                       ++body_fixture.now));
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      body_fixture.core, body.sequence));
+  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
+      body_fixture.core));
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      body_fixture.core, body.sequence + 1U));
+  assert(pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      body_fixture.core, body.sequence));
+  assert(!pocketjs_net_http_client_core_body_lease_view(
+      body_fixture.core, body.detail.body.lease, &body_bytes, &body_length));
+  pocketjs_net_http_client_event_t error =
+      take_event(&body_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  retire_event(&body_fixture, error);
+  assert(pocketjs_net_http_client_core_is_quiescent(body_fixture.core));
+  assert(pocketjs_net_http_client_core_deinit(body_fixture.core));
+
+  fixture_t pull_fixture;
+  fixture_init(&pull_fixture);
+  pocketjs_net_http_client_request_t request =
+      make_streaming_post(1U, false, 0U);
+  start_streaming_request(&pull_fixture, &request);
+  pocketjs_net_http_client_event_t pull = take_request_body_pull(
+      &pull_fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  assert(pocketjs_net_http_client_core_report_host_event_retire_failure(
+      pull_fixture.core, pull.sequence));
+  assert(get_status(&pull_fixture).poisoned);
+  assert(pocketjs_net_http_client_core_begin_shutdown(pull_fixture.core,
+                                                       ++pull_fixture.now));
+  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
+      pull_fixture.core));
+  assert(pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      pull_fixture.core, pull.sequence));
+  pocketjs_net_http_client_core_status_t status = get_status(&pull_fixture);
+  assert(!status.request_body_credit_outstanding && status.event_outstanding);
+  error = take_event(&pull_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  retire_event(&pull_fixture, error);
+  assert(pocketjs_net_http_client_core_is_quiescent(pull_fixture.core));
+  assert(pocketjs_net_http_client_core_deinit(pull_fixture.core));
+
+  fixture_t terminal_fixture;
+  fixture_init(&terminal_fixture);
+  connect_and_write_get(&terminal_fixture, 1U,
+                        "http://example.com:8080/x?q=1");
+  fake_complete_read(&terminal_fixture.fake,
+                     "HTTP/1.1 204 No Content\r\n\r\n", false);
+  pump(&terminal_fixture);
+  headers = take_event(&terminal_fixture,
+                       POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(&terminal_fixture, headers);
+  fake_queue_error(&terminal_fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO, 91);
+  pump(&terminal_fixture);
+  status = get_status(&terminal_fixture);
+  assert(status.poisoned && status.event_outstanding);
+  assert(pocketjs_net_http_client_core_begin_shutdown(terminal_fixture.core,
+                                                       ++terminal_fixture.now));
+  assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
+      terminal_fixture.core));
+  assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      terminal_fixture.core, status.operation_token));
+  complete = take_event(&terminal_fixture,
+                        POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  assert(pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
+      terminal_fixture.core, complete.sequence));
+  assert(pocketjs_net_http_client_core_is_quiescent(terminal_fixture.core));
+  assert(pocketjs_net_http_client_core_deinit(terminal_fixture.core));
+}
+
 static void test_invalid_inputs(void) {
   fixture_t fixture;
   fixture_init(&fixture);
@@ -2127,6 +2253,7 @@ int main(void) {
   test_native_only_pump_budget();
   test_completion_only_pump_budget();
   test_empty_pump_budget_is_rejected_without_poison();
+  test_poison_shutdown_can_abandon_exact_host_event();
   test_invalid_inputs();
   puts("http client core host tests passed");
   return 0;
