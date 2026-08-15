@@ -57,6 +57,8 @@ ESP32-P4 不原生提供 Wi-Fi。目标产品必须在 Host descriptor 中明确
 
 Tab5 rev 1.3 的 image 必须选择 pre-v3 silicon，并锁定 1.x revision range：`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`、`CONFIG_ESP32P4_REV_MIN_100=y`。首轮 C6 transport 使用 `CONFIG_ESP32P4_TAB5_C6_BOARD=y` 对应的 SDIO1/四线/40 MHz board preset，并锁定 `esp_wifi_remote` 1.6.4 与 `esp_hosted` 2.12.12。BSP 必须在 `esp_wifi_init()` 前打开 Tab5 的 `WLAN_PWR_EN`；revision 支持不能通过烧 eFuse 或忽略 revision check 绕过。
 
+Tab5 的 P4 GPIO15 经 1 kΩ 电阻直接连接 C6 `EN`，运行态必须保持高电平。`esp_hosted` 2.12.12 的 Tab5 preset 默认选择 active-low reset，并在 reset sequence 结束后把 GPIO15 保持为低，导致 SDIO CMD5 超时；host defaults 必须显式设置 `CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y` 并取消 `CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW`。同时设置 `CONFIG_FREERTOS_HZ=1000`，避免 Hosted 在 100 Hz tick 下报告 bus-level jitter 风险。每次 clean configure 后必须从生成的 `sdkconfig` 复核 revision range、reset polarity、SDIO pins 和 tick frequency。
+
 ### 1.3 PSP 第二阶段边界
 
 当前 PSP Host 是固定 frame loop 上的单 QuickJS worker，仓库尚未接入 PSP network、HTTP 或 TLS SDK。Phase 2A 不是“把 ESP-IDF adapter 换一层 FFI”，而是先补齐下列 Host 基础设施：
