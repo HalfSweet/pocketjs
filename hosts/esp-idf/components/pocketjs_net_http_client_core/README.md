@@ -9,10 +9,13 @@ register or advertise a PocketJS capability.
 
 One statically supplied 36 KiB instance storage admits one request at a time.
 The Core snapshots the method, URL, fields, and an optional fixed request body
-before native I/O. The fixed limits are exposed in
-`pocketjs/net/http_client_core.h`: the request body is at most 4096 bytes,
-request and response field storage are each 8192 bytes, and each downstream
-body lease is at most 2048 bytes. The Core and wire parser do not allocate.
+before native I/O. A request selects exactly one body mode: none, a fixed
+snapshot, or a credit-driven stream. The fixed snapshot is at most 4096 bytes.
+A streaming producer may send more than that total, but each submitted chunk
+is at most 2048 bytes and is copied into fixed Core storage before the owner API
+returns. Request and response field storage are each 8192 bytes, and each
+downstream response-body lease is at most 2048 bytes. The Core and wire parser
+do not allocate.
 
 Only canonical ASCII DNS names and canonical dotted-decimal IPv4 literals are
 accepted. User information, fragments, IPv6, non-canonical numeric hosts,
@@ -22,6 +25,25 @@ Requests use origin-form, add `Connection: close` and
 framing, proxy, upgrade, and content-coding fields. GET and HEAD request bodies
 are rejected. Every accepted request opens one connection and closes it after
 the response; there is no pooling or reuse.
+
+Unknown-length request streams use strict HTTP/1.1 chunked coding: one
+lowercase hexadecimal size, CRLF, the credited non-empty payload, and CRLF per
+chunk, followed by exactly `0\r\n\r\n`. Known-length request streams emit
+`Content-Length` and must submit exactly that many raw bytes. Their final byte
+ends the upload without another producer pull; an early producer end selects a
+request-body error. The fixed and known-length paths never use chunk markers.
+
+For each streaming chunk, the Core publishes one `REQUEST_BODY_PULL` carrying
+the operation token, a non-reusable body generation, a non-reusable pull
+generation, and `maximum_bytes`. The native adapter takes and immediately
+retires that event. Retirement frees the event slot but leaves exactly one
+credit active, so an asynchronous Guest producer can submit a later
+`BODY_CHUNK`, `BODY_END`, or `BODY_ERROR` command that echoes the token and both
+generations. A command before retirement, without credit, with stale identity,
+with an empty chunk, or above the advertised bound is rejected without
+consuming credit. Abort, timeout, producer failure, and shutdown revoke the
+credit before connection cleanup. Event, body, and pull generations never
+wrap or reuse during a live Core instance.
 
 The permission callback runs on the owner task. For a DNS name it receives the
 canonical `(scheme, hostname, port)` tuple before resolve starts. After resolve,
@@ -68,8 +90,8 @@ can become quiescent. `init` detects and rejects reuse of live storage.
 
 The Core performs no automatic redirect, retry, authentication, cookie,
 proxy, compression, or decompression behavior. Redirect responses are exposed
-as ordinary responses. Request bodies are fixed snapshots, so there is no
-implicit replay.
+as ordinary responses. A streamed request body is consumed once and is never
+buffered in full or implicitly replayed.
 
 ## HTTPS and admission blockers
 
@@ -112,9 +134,13 @@ public API calls attempted from a permission callback, bytes-plus-EOF reads,
 stale completions while idle, malformed read cleanup, lease and completion
 retirement failures, close admission/error/timeout, terminal immutability,
 explicit teardown, HEAD, 1xx followed by 304, numeric-host denial, and the exact
-4096-byte request-body boundary. It is compiled with `-Wall -Wextra -Werror`
-plus AddressSanitizer and UndefinedBehaviorSanitizer and is also checked with
-Clang Static Analyzer.
+4096-byte fixed request-body boundary. Streaming hostile cases cover strict
+chunk coding over more than 64 KiB, one-byte chunks, asynchronous credit after
+event retirement, empty/oversized/no-credit/stale submissions, known-length
+underflow and overflow, abort, timeout, producer error, shutdown, and
+generation non-reuse. It is compiled with `-Wall -Wextra -Werror` plus
+AddressSanitizer and UndefinedBehaviorSanitizer and is also checked with Clang
+Static Analyzer.
 
 `test_apps/build_smoke` links the Core, wire codec, and real ESP transport under
 the pinned ESP-IDF v6.0.2 tree. It builds for both `esp32s3` and `esp32p4` with
