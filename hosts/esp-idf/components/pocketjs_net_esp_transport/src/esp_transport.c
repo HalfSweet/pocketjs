@@ -718,12 +718,19 @@ static bool validate_pinned_ca(const uint8_t *pem, size_t bytes) {
       memchr(pem, '\0', bytes) != NULL) {
     return false;
   }
+  uint8_t *snapshot = malloc(bytes + 1U);
+  if (snapshot == NULL) {
+    return false;
+  }
+  memcpy(snapshot, pem, bytes);
+  snapshot[bytes] = '\0';
   mbedtls_x509_crt certificate;
   mbedtls_x509_crt_init(&certificate);
-  int result = mbedtls_x509_crt_parse(&certificate, pem, bytes + 1U);
+  int result = mbedtls_x509_crt_parse(&certificate, snapshot, bytes + 1U);
   bool valid = result == 0 && certificate.next == NULL &&
                mbedtls_x509_crt_get_ca_istrue(&certificate) == 1;
   mbedtls_x509_crt_free(&certificate);
+  free(snapshot);
   return valid;
 }
 
