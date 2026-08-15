@@ -10,8 +10,16 @@ export const HTTP_BODY_HELPER_BYTES = 8 * 1024 * 1024;
 const HTTP_BUFFERED_BODY_INPUT_BYTES = 8 * 1024 * 1024;
 const HTTP_BODY_EMPTY_CHUNK_LIMIT = 1024;
 const HTTP_BODY_CLONE_BRANCHES = 8;
-const HTTP_BODY_TEE_SEGMENT_BYTES = HTTP_BODY_CHUNK_BYTES;
 const HTTP_BODY_TEE_SEGMENT_SLOTS = 5;
+
+export interface HttpBodyLimits {
+  /** Maximum bytes retained by a buffered input or aggregation helper. */
+  readonly bufferedBytes: number;
+  /** Maximum single source/read credit exposed inside the Guest. */
+  readonly chunkBytes: number;
+  /** Maximum queued bytes for either live tee branch. */
+  readonly teeBranchBytes: number;
+}
 
 export interface BodyStream extends AsyncIterable<Uint8Array> {
   readInto(destination: Uint8Array): Promise<{ bytes: number; done: boolean }>;
@@ -93,6 +101,12 @@ const textEncoderEncode = TextEncoder.prototype.encode;
 const promiseResolve = PromiseIntrinsic.resolve;
 const promiseThen = PromiseIntrinsic.prototype.then;
 const promiseAllSettled = PromiseIntrinsic.allSettled;
+
+export const DEFAULT_HTTP_BODY_LIMITS: Readonly<HttpBodyLimits> = objectFreeze({
+  bufferedBytes: HTTP_BUFFERED_BODY_INPUT_BYTES,
+  chunkBytes: HTTP_BODY_CHUNK_BYTES,
+  teeBranchBytes: HTTP_BODY_TEE_BRANCH_BYTES,
+});
 
 function ignoreBodyRejection(value: unknown): void {
   const promise = reflectApply(promiseResolve, PromiseIntrinsic, [value]);
@@ -241,6 +255,36 @@ function bodyError(
   });
 }
 
+function normalizedBodyLimits(
+  input: Readonly<HttpBodyLimits> = DEFAULT_HTTP_BODY_LIMITS,
+): Readonly<HttpBodyLimits> {
+  const bufferedBytes = input.bufferedBytes;
+  const chunkBytes = input.chunkBytes;
+  const teeBranchBytes = input.teeBranchBytes;
+  if (!numberIsSafeInteger(bufferedBytes) || bufferedBytes <= 0 ||
+    !numberIsSafeInteger(chunkBytes) || chunkBytes <= 0 ||
+    !numberIsSafeInteger(teeBranchBytes) || teeBranchBytes <= 0) {
+    throw bodyError(
+      "resource_limit",
+      "http.body",
+      "HTTP body limits must be positive safe integers",
+    );
+  }
+  const effectiveBufferedBytes = mathMin(bufferedBytes, HTTP_BUFFERED_BODY_INPUT_BYTES);
+  const effectiveChunkBytes = mathMin(chunkBytes, HTTP_BODY_CHUNK_BYTES);
+  return objectFreeze({
+    bufferedBytes: effectiveBufferedBytes,
+    chunkBytes: effectiveChunkBytes,
+    // Four fixed segments per branch bound both retained bytes and object count.
+    teeBranchBytes: mathMin(
+      teeBranchBytes,
+      HTTP_BODY_TEE_BRANCH_BYTES,
+      effectiveBufferedBytes,
+      effectiveChunkBytes * (HTTP_BODY_TEE_SEGMENT_SLOTS - 1),
+    ),
+  });
+}
+
 function assertPositiveCapacity(maxBytes: number, operation: string): void {
   if (!numberIsSafeInteger(maxBytes) || maxBytes <= 0) {
     throw bodyError(
@@ -304,6 +348,7 @@ class AsyncIterableBodySource implements BodySource {
   constructor(
     private readonly iterable: AsyncIterable<Uint8Array>,
     private readonly iteratorFactory: () => AsyncIterator<Uint8Array>,
+    private readonly chunkBytes: number,
   ) {}
 
   async pull(maxBytes: number): Promise<Uint8Array | null> {
@@ -330,7 +375,7 @@ class AsyncIterableBodySource implements BodySource {
         return null;
       }
       const value = item.value;
-      const chunk = snapshotUint8Array(value, HTTP_BODY_CHUNK_BYTES, "HTTP body chunk");
+      const chunk = snapshotUint8Array(value, this.chunkBytes, "HTTP body chunk");
       if (byteLengthOf(chunk) === 0) {
         emptyChunks++;
         if (emptyChunks > HTTP_BODY_EMPTY_CHUNK_LIMIT) {
@@ -479,6 +524,8 @@ interface TeeState {
   readonly source: BodySource;
   readonly branches: readonly [TeeBranchState, TeeBranchState];
   readonly waiters: Set<() => void>;
+  readonly chunkBytes: number;
+  readonly branchBytes: number;
   readPromise?: Promise<void>;
   done: boolean;
   hasError: boolean;
@@ -521,7 +568,7 @@ function dequeueTee(branch: TeeBranchState, maxBytes: number): Uint8Array {
   return result;
 }
 
-function enqueueTee(branch: TeeBranchState, chunk: Uint8Array): void {
+function enqueueTee(state: TeeState, branch: TeeBranchState, chunk: Uint8Array): void {
   let offset = 0;
   const chunkLength = byteLengthOf(chunk);
   while (offset < chunkLength) {
@@ -535,7 +582,7 @@ function enqueueTee(branch: TeeBranchState, chunk: Uint8Array): void {
         );
       }
       tail = {
-        bytes: branch.spare ?? new Uint8ArrayIntrinsic(HTTP_BODY_TEE_SEGMENT_BYTES),
+        bytes: branch.spare ?? new Uint8ArrayIntrinsic(state.chunkBytes),
         start: 0,
         end: 0,
       };
@@ -575,11 +622,11 @@ function fillTee(state: TeeState): Promise<void> | undefined {
     if (!branch.cancelled) active[active.length] = branch;
   }
   if (active.length === 0 || state.done || state.hasError) return;
-  let credit = HTTP_BODY_CHUNK_BYTES;
+  let credit = state.chunkBytes;
   for (let index = 0; index < active.length; index++) {
     credit = mathMin(
       credit,
-      HTTP_BODY_TEE_BRANCH_BYTES - active[index]!.bufferedBytes,
+      state.branchBytes - active[index]!.bufferedBytes,
     );
   }
   if (credit <= 0) return;
@@ -601,7 +648,7 @@ function fillTee(state: TeeState): Promise<void> | undefined {
           for (let index = 0; index < active.length; index++) {
             const branch = active[index]!;
             if (branch.cancelled) continue;
-            enqueueTee(branch, chunk);
+            enqueueTee(state, branch, chunk);
           }
         }
       }
@@ -639,7 +686,7 @@ class TeeBodySource implements BodySource {
         const candidate = this.state.branches[index]!;
         if (candidate.cancelled) continue;
         activeCount++;
-        if (candidate.bufferedBytes >= HTTP_BODY_TEE_BRANCH_BYTES) canRead = false;
+        if (candidate.bufferedBytes >= this.state.branchBytes) canRead = false;
       }
       canRead = activeCount > 0 && canRead;
       if (this.state.readPromise || canRead) {
@@ -670,11 +717,16 @@ class TeeBodySource implements BodySource {
   }
 }
 
-function teeBodySource(source: BodySource): readonly [BodySource, BodySource] {
+function teeBodySource(
+  source: BodySource,
+  limits: Readonly<HttpBodyLimits>,
+): readonly [BodySource, BodySource] {
   const state: TeeState = {
     source,
     branches: [newTeeBranchState(), newTeeBranchState()],
     waiters: new SetIntrinsic(),
+    chunkBytes: limits.chunkBytes,
+    branchBytes: limits.teeBranchBytes,
     done: false,
     hasError: false,
     error: undefined,
@@ -694,7 +746,7 @@ class BodyAsyncIterator implements AsyncIterableIterator<Uint8Array> {
 
   async next(): Promise<IteratorResult<Uint8Array>> {
     if (this.#closed) return { value: undefined, done: true };
-    const destination = new Uint8ArrayIntrinsic(HTTP_BODY_CHUNK_BYTES);
+    const destination = new Uint8ArrayIntrinsic(this.controller.chunkBytes);
     const result = await this.controller.readInto("iterator", destination);
     if (result.done) {
       this.#closed = true;
@@ -731,6 +783,8 @@ class BodyStreamValue implements BodyStream {
 export class BodyController {
   readonly stream: BodyStream;
   readonly aggregateLimit: number;
+  readonly chunkBytes: number;
+  readonly limits: Readonly<HttpBodyLimits>;
   #source: BodySource;
   #readerKind: ReaderKind | undefined;
   #pending = false;
@@ -745,24 +799,19 @@ export class BodyController {
 
   constructor(
     source: BodySource,
-    aggregateLimit = HTTP_BODY_HELPER_BYTES,
+    limits: Readonly<HttpBodyLimits> = DEFAULT_HTTP_BODY_LIMITS,
     cloneGroup: BodyCloneGroup = {
       branches: 1,
       controllers: new SetIntrinsic(),
       terminalCallbacks: new SetIntrinsic(),
     },
   ) {
-    if (!numberIsSafeInteger(aggregateLimit) || aggregateLimit <= 0) {
-      throw bodyError(
-        "resource_limit",
-        "http.body",
-        "HTTP buffered body limit must be a positive safe integer",
-      );
-    }
+    this.limits = normalizedBodyLimits(limits);
     this.#source = source;
     this.#cloneGroup = cloneGroup;
     addSetValue(this.#cloneGroup.controllers, this);
-    this.aggregateLimit = mathMin(aggregateLimit, HTTP_BODY_HELPER_BYTES);
+    this.aggregateLimit = this.limits.bufferedBytes;
+    this.chunkBytes = this.limits.chunkBytes;
     this.stream = new BodyStreamValue(this);
   }
 
@@ -868,7 +917,7 @@ export class BodyController {
           return { bytes: count, done: false };
         }
         const chunk = await this.#source.pull(
-          mathMin(destinationLength, HTTP_BODY_CHUNK_BYTES),
+          mathMin(destinationLength, this.chunkBytes),
         );
         if (this.#cancelled) return { bytes: 0, done: true };
         if (chunk === null) {
@@ -887,11 +936,11 @@ export class BodyController {
           }
           continue;
         }
-        if (chunkLength > HTTP_BODY_CHUNK_BYTES) {
+        if (chunkLength > this.chunkBytes) {
           throw bodyError(
             "resource_limit",
             "http.body.readInto",
-            `HTTP body chunk exceeds ${HTTP_BODY_CHUNK_BYTES} bytes`,
+            `HTTP body chunk exceeds ${this.chunkBytes} bytes`,
           );
         }
         const count = mathMin(destinationLength, chunkLength);
@@ -937,7 +986,7 @@ export class BodyController {
     return objectFreeze({
       pull: async (maxBytes: number) => {
         assertPositiveCapacity(maxBytes, "http.body.pull");
-        const capacity = mathMin(maxBytes, HTTP_BODY_CHUNK_BYTES);
+        const capacity = mathMin(maxBytes, this.chunkBytes);
         const destination = new Uint8ArrayIntrinsic(capacity);
         const result = await this.readInto("binding", destination);
         return result.done ? null : sliceOf(destination, 0, result.bytes);
@@ -962,9 +1011,9 @@ export class BodyController {
       );
     }
     this.#cloneGroup.branches++;
-    const [first, second] = teeBodySource(this.#source);
+    const [first, second] = teeBodySource(this.#source, this.limits);
     this.#source = first;
-    return new BodyController(second, this.aggregateLimit, this.#cloneGroup);
+    return new BodyController(second, this.limits, this.#cloneGroup);
   }
 
   transfer(): BodyController {
@@ -978,7 +1027,7 @@ export class BodyController {
     const source = this.#source;
     const transferred = new BodyController(
       source,
-      this.aggregateLimit,
+      this.limits,
       this.#cloneGroup,
     );
     this.#readerKind = "binding";
@@ -999,7 +1048,7 @@ export class BodyController {
     this.#helperCreated = true;
     this.#claim("helper");
     const maximum = this.aggregateLimit;
-    let output = new Uint8ArrayIntrinsic(mathMin(HTTP_BODY_CHUNK_BYTES, maximum + 1));
+    let output = new Uint8ArrayIntrinsic(mathMin(this.chunkBytes, maximum + 1));
     let total = 0;
     for (;;) {
       const outputLength = byteLengthOf(output);
@@ -1015,7 +1064,7 @@ export class BodyController {
       const destination = subarrayOf(
         output,
         total,
-        mathMin(byteLengthOf(output), total + HTTP_BODY_CHUNK_BYTES),
+        mathMin(byteLengthOf(output), total + this.chunkBytes),
       );
       const result = await this.readInto("helper", destination);
       if (result.done) break;
@@ -1065,28 +1114,31 @@ export interface ExtractedBody {
   readonly contentType?: string;
 }
 
-function bufferedBodySource(bytes: Uint8Array, aggregateLimit: number): BodyController {
-  if (byteLengthOf(bytes) > HTTP_BUFFERED_BODY_INPUT_BYTES) {
+function bufferedBodySource(
+  bytes: Uint8Array,
+  limits: Readonly<HttpBodyLimits>,
+): BodyController {
+  if (byteLengthOf(bytes) > limits.bufferedBytes) {
     throw bodyError(
       "resource_limit",
       "http.body",
-      `Buffered HTTP body exceeds ${HTTP_BUFFERED_BODY_INPUT_BYTES} bytes`,
+      `Buffered HTTP body exceeds ${limits.bufferedBytes} bytes`,
     );
   }
-  return new BodyController(new MemoryBodySource(bytes), aggregateLimit);
+  return new BodyController(new MemoryBodySource(bytes), limits);
 }
 
-function assertBufferedBodySize(byteLength: number): void {
-  if (byteLength > HTTP_BUFFERED_BODY_INPUT_BYTES) {
+function assertBufferedBodySize(byteLength: number, maximumBytes: number): void {
+  if (byteLength > maximumBytes) {
     throw bodyError(
       "resource_limit",
       "http.body",
-      `Buffered HTTP body exceeds ${HTTP_BUFFERED_BODY_INPUT_BYTES} bytes`,
+      `Buffered HTTP body exceeds ${maximumBytes} bytes`,
     );
   }
 }
 
-function assertEncodedStringSize(value: string): void {
+function assertEncodedStringSize(value: string, maximumBytes: number): void {
   let bytes = 0;
   for (let index = 0; index < value.length; index++) {
     const code = reflectApply(stringCharCodeAt, value, [index]) as number;
@@ -1103,8 +1155,8 @@ function assertEncodedStringSize(value: string): void {
     } else {
       bytes += 3;
     }
-    if (bytes > HTTP_BUFFERED_BODY_INPUT_BYTES) {
-      assertBufferedBodySize(bytes);
+    if (bytes > maximumBytes) {
+      assertBufferedBodySize(bytes, maximumBytes);
     }
   }
 }
@@ -1141,14 +1193,15 @@ function bodyStreamMethods(snapshot: BodyObjectMethodsSnapshot): BodyStreamMetho
 
 export function extractBody(
   input: string | ArrayBuffer | ArrayBufferView | BodyStream | AsyncIterable<Uint8Array>,
-  aggregateLimit = HTTP_BODY_HELPER_BYTES,
+  requestedLimits: Readonly<HttpBodyLimits> = DEFAULT_HTTP_BODY_LIMITS,
 ): ExtractedBody {
+  const limits = normalizedBodyLimits(requestedLimits);
   if (typeof input === "string") {
-    assertEncodedStringSize(input);
+    assertEncodedStringSize(input, limits.bufferedBytes);
     return {
       controller: bufferedBodySource(
         reflectApply(textEncoderEncode, textEncoder, [input]),
-        aggregateLimit,
+        limits,
       ),
       contentType: "text/plain;charset=UTF-8",
     };
@@ -1162,16 +1215,16 @@ export function extractBody(
   if (arrayBufferLength !== undefined) {
     const buffer = input as ArrayBuffer;
     const byteLength = arrayBufferLength;
-    assertBufferedBodySize(byteLength);
+    assertBufferedBodySize(byteLength, limits.bufferedBytes);
     return {
-      controller: bufferedBodySource(copyArrayBuffer(buffer), aggregateLimit),
+      controller: bufferedBodySource(copyArrayBuffer(buffer), limits),
     };
   }
   if (reflectApply(arrayBufferIsView, ArrayBufferIntrinsic, [input])) {
     const snapshot = intrinsicViewSnapshot(input as ArrayBufferView);
-    assertBufferedBodySize(snapshot.byteLength);
+    assertBufferedBodySize(snapshot.byteLength, limits.bufferedBytes);
     return {
-      controller: bufferedBodySource(copyIntrinsicBytes(snapshot), aggregateLimit),
+      controller: bufferedBodySource(copyIntrinsicBytes(snapshot), limits),
     };
   }
   if (typeof input === "object" && input !== null) {
@@ -1185,7 +1238,7 @@ export function extractBody(
             methods.readInto,
             methods.cancel,
           ),
-          aggregateLimit,
+          limits,
         ),
       };
     }
@@ -1200,8 +1253,9 @@ export function extractBody(
         new AsyncIterableBodySource(
           input as AsyncIterable<Uint8Array>,
           iteratorFactory as () => AsyncIterator<Uint8Array>,
+          limits.chunkBytes,
         ),
-        aggregateLimit,
+        limits,
       ),
     };
   }
@@ -1212,7 +1266,7 @@ export function extractBody(
 
 export function bodyFromBinding(
   input: BodyStream,
-  aggregateLimit?: number,
+  limits: Readonly<HttpBodyLimits> = DEFAULT_HTTP_BODY_LIMITS,
 ): BodyController {
   if (typeof input !== "object" || input === null) {
     throw new TypeErrorIntrinsic("Private HTTP binding response body must be a BodyStream");
@@ -1223,6 +1277,6 @@ export function bodyFromBinding(
   }
   return new BodyController(
     new ExternalBodyStreamSource(input, methods.readInto, methods.cancel),
-    aggregateLimit,
+    limits,
   );
 }
