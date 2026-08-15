@@ -44,9 +44,18 @@ NetDriver 的 plain stream、listener 和 datagram 形状继续作为完整 subs
 | Phase 2C | **PSP：WebSocket Client parity** | Phase 2A/2B 通过后执行 WebSocket 长连接、WLAN 断开/恢复、休眠/恢复和真机资源测试；WSS 仍需要独立 TLS source/descriptor/peer gate，不能继承 Phase 2B 的 HTTP TLS |
 | 后续阶段 | staged target 中的单个 role | 每个 role 独立提出用户故事、Host 列表、预算和 conformance gate；不能把整组协议一次晋级 |
 
-第一 ESP-IDF 落点使用仓库已支持的 **ESP-IDF v6.0 最低基线**，并以 ESP32-P4 产品 Host 作为首个硬件集成目标。当前 `hosts/esp32p4` 只提供可复用的 PPA renderer 侧和 smoke build，**不是已经具备 QuickJS 网络能力的完整产品 Host**；Phase 1 必须补齐产品 BSP、Guest owner thread、network interface、wake 与生命周期集成后才可声明完成。
+第一 ESP-IDF 落点使用 **ESP-IDF v6.0 最低基线**；首轮硬件工作锁定 v6.0.2 tag 的 commit `7101770dc6db2667b3c477cc31365dd1acd6db4e`。ESP32-P4 产品 Host 是首个产品集成目标，ESP32-S3 同时作为独立 Host profile 验证。当前 `hosts/esp32p4` 只提供可复用的 PPA renderer 侧和 smoke build，**不是已经具备 QuickJS 网络能力的完整产品 Host**；仓库也没有 ESP32-S3 产品 Host。Phase 1 必须分别补齐产品 BSP、Guest owner thread、network interface、wake、limits、descriptor、资源报告与生命周期集成后，目标 profile 才可声明完成。一个 profile 的结果不能外推到另一个 profile。
+
+首轮板级 gate 使用以下固定组合：
+
+| Host profile | 开发板与数据路径 | 首轮验证边界 |
+|---|---|---|
+| ESP32-S3 | AtomS3R，ESP32-S3-PICO-1-N8R8，原生 Wi-Fi | 独立 firmware build/link、STA/DHCP、HTTP Client 与资源测试；板间测试中可以临时运行 HTTP Server，但这不开放公共 Server capability |
+| ESP32-P4+C6 | Tab5 rev 1.3，P4 经 SDIO 连接板载 C6 | 独立 firmware build/link、C6 power/reset/transport、STA/DHCP、HTTP Client 与资源测试 |
 
 ESP32-P4 不原生提供 Wi-Fi。目标产品必须在 Host descriptor 中明确选择并验证具体 `esp_netif` 数据路径，例如外接 PHY 的 Ethernet，或通过 companion chip 提供的 [Wi-Fi expansion](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32p4/api-guides/wifi-expansion.html)；不能把“ESP-IDF Host”解释为必然存在 Wi-Fi。link driver、BSP 和凭据配置属于产品 Host，公共网络模块不直接暴露板卡 SDK 概念。
+
+Tab5 rev 1.3 的 image 必须选择 pre-v3 silicon，并锁定 1.x revision range：`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`、`CONFIG_ESP32P4_REV_MIN_100=y`。首轮 C6 transport 使用 `CONFIG_ESP32P4_TAB5_C6_BOARD=y` 对应的 SDIO1/四线/40 MHz board preset，并锁定 `esp_wifi_remote` 1.6.4 与 `esp_hosted` 2.12.12。BSP 必须在 `esp_wifi_init()` 前打开 Tab5 的 `WLAN_PWR_EN`；revision 支持不能通过烧 eFuse 或忽略 revision check 绕过。
 
 ### 1.3 PSP 第二阶段边界
 
@@ -998,7 +1007,9 @@ ESP-IDF Phase 1 固定以下装配候选，并把最终选择写入 canonical Bu
 
 ESP HTTP Client 只作为 `HttpClientBackend` 候选。它必须证明 DNS candidate policy、逐跳 redirect、完整重复 header、严格 framing、streaming/backpressure、取消、timeout 和隐藏重试都能受 Core 控制；任一项无法兑现时，Phase 1 改用 reference HTTP/1.1 Backend over lwIP + ESP-TLS。两种路径只能选择一个并写入 plan；选择变化会改变 `ResolvedNetworkProviders`/`planHash`，必须重跑整个 Phase 1A HTTP/TLS suite，不能放宽公共合同。
 
-Phase 1A 只要求 IPv4、HTTP/1.1、TLS 1.2、Host trust、hostname verification 与 SNI。TLS 1.3 requirement、custom CA、client certificate、custom ALPN 和 revocation capability 默认 staged；只有对应测试和资源预算通过后，ESP-IDF descriptor 才能逐项增加 feature。整个 HTTP Client contract 通过前，ESP32-P4 profile 保持 experimental，不能在 target registry 中广告 `network.http.client` 或 `.tls`。
+对锁定的 ESP-IDF v6.0.2 实现审阅后，ESP HTTP Client 当前只可作为 experimental transport spike。它在调用 response header callback 前会动态累积 parser/header 状态，公开 API 不提供任意 method token 或 wire reason phrase，同步 DNS/connect/TLS 没有安全的跨 task 取消点，`esp_http_client_cancel_request()` 也不能从 owner task 与 worker 并发调用。spike 必须把所有 handle 操作固定在同一个 worker，使用手动 `open/write/fetch_headers/read/close` 路径，关闭自动 redirect/auth retry，并在 descriptor 中把这些缺口标为 unsupported。解决有界 parser、method/status text、DNS policy 和可中断连接前，不能把该 Backend 选入正式 Build Plan。
+
+Phase 1A 只要求 IPv4、HTTP/1.1、TLS 1.2、Host trust、hostname verification 与 SNI。TLS 1.3 requirement、custom CA、client certificate、custom ALPN 和 revocation capability 默认 staged；只有对应测试和资源预算通过后，ESP-IDF descriptor 才能逐项增加 feature。整个 HTTP Client contract 通过前，ESP32-P4+C6 与 ESP32-S3 profile 都保持 experimental，不能在 target registry 中广告 `network.http.client` 或 `.tls`。
 
 ESP-IDF Host 必须提供显式的 wall-clock trust 状态。时间可以由产品 provisioning、持久化 RTC 或 [ESP-NETIF SNTP](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32p4/api-reference/system/system_time.html) 建立，但“系统有一个数值”不等于可信。需要检查证书有效期而 wall clock 尚未可信时，TLS handshake fail closed 并映射为 `tls_certificate_invalid`，平台细节只进入脱敏的 `causeCode`；生产构建不能通过关闭有效期验证继续连接。
 
@@ -1492,7 +1503,7 @@ reference 与 native Backend 对共同 feature 使用同一套断言；native Ba
 
 Phase 1A 的 ESP-IDF admission 额外要求：
 
-- 固定 ESP-IDF v6.0 commit、具体 board/BSP 和具体 Ethernet/Wi-Fi expansion；完整 firmware build/link 并记录 flash、internal DRAM、PSRAM、task stack 与 native pool；
+- 固定 ESP-IDF v6.0.2 commit `7101770dc6db2667b3c477cc31365dd1acd6db4e`、具体 board/BSP 和具体 Ethernet/Wi-Fi expansion；AtomS3R 与 Tab5 分别完成 firmware build/link，并分别记录 flash、internal DRAM、PSRAM、task stack 与 native pool；
 - 真机证明停止 UI frame 后 HTTPS Promise/handler 仍运行，所有 QuickJS 调用只在 owner task，frame/network 同 ready、取消/timeout/success race 与 teardown 符合第 15–18 节；
 - 冷启动、DHCP、DNS 多候选、link down/up、私网过滤，以及没有 BSP network interface 时 capability admission 失败；
 - 独立 HTTP peer 覆盖 streaming、chunked/trailer validation、TE+CL、重复 CL、obs-fold、逐跳 redirect permission、各阶段 abort/timeout、4xx/5xx 与连接复用，并证明没有隐藏 retry/redirect/auth/cookie/proxy/compression；
@@ -1516,7 +1527,7 @@ PSP Phase 2 的 admission 额外要求：
 建议按以下顺序落地：
 
 1. **Phase 0：冻结旧 NET。** 立即停止增加旧 API，在首个新 capability 合入前移除 `@pocketjs/framework/net` 的旧 value export、manifest capability 与 Host 注入形成的应用可达 `globalThis.net` 和 `net.http`；只有有明确迁移用途的 parser、bounded allocation 或 fixture 可以暂留内部。旧导出清除后，新的公共支持模块与协议子路径才可以接管 `@pocketjs/framework/net` namespace。
-2. **先建 gate。** 建立 fake clock/wake、竞态/model、HTTP/TLS 独立 peer 与硬件资源 harness；锁定首个 ESP32-P4 product board、network interface/BSP、ESP-IDF v6.0 commit、HTTP Backend 候选与 ESP-TLS TLS source。conformance 不是最终一步。
+2. **先建 gate。** 建立 fake clock/wake、竞态/model、HTTP/TLS 独立 peer 与硬件资源 harness；锁定 AtomS3R 与 Tab5 的 network interface/BSP、ESP-IDF v6.0.2 commit、HTTP Backend 候选与 ESP-TLS TLS source。两块板先运行独立 build/link gate，再运行板间 smoke 和各自的独立 peer/resource gate；板间互通不能替代 conformance。
 3. **独立固定 private ABI 注入。** 在跨仓库 build/artifact 变更中选择并验证第 11.1 节的 bundle factory 或满足全部约束的过渡适配器；覆盖所有实际参与 Phase 1 的 compiler/loader/test 路径。
 4. 固定 manifest format 3、ResolvedNetworkPolicy、ResolvedNetworkProviders、Build Plan/HostBuildInputs 传递、package admission、NetworkLimits 与稳定错误。
 5. 落地 Network Guest Binding、Shared Async Runtime、logical turn/slice、operation claim、completion credit、ready-resource list、BufferLease 和三阶段 teardown；同时把 framework/ESP-IDF Host 接到统一 `beginGuestTurn/flushGuestTurn/endGuestTurn`、non-presenting mutation commit 与 headless wake。
