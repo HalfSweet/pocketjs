@@ -20,4 +20,8 @@ export interface NetworkPrivateBuildContext {
   readonly bindingIdentifier: string;
   readonly pendingIdentifier: string;
   readonly argumentsIdentifier: string;
+  /** Raw digest bytes from the already-verified ResolvedBuildPlan. */
+  readonly planHashBytes: readonly number[];
+  /** Exact, sorted numeric projection of true network.* plan features. */
+  readonly featureIds: readonly number[];
 }

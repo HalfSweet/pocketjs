@@ -4,6 +4,10 @@ import {
 } from "../framework/src/manifest/plan.ts";
 import type { NetworkPrivateBuildContext } from
   "../framework/compiler/network-private.ts";
+import {
+  networkV1FeatureIdsFromBuildPlan,
+  networkV1PlanHashBytes,
+} from "../contracts/spec/network/network-v1.ts";
 
 export type BundleArtifactMode = "iife" | "network-factory";
 
@@ -53,6 +57,8 @@ export function createNetworkFactoryBuildContext(
     throw new TypeError("PocketJS network factory: unsupported plan checksum");
   }
   const token = digest.slice(0, 24);
+  const planHashBytes = Object.freeze(Array.from(networkV1PlanHashBytes(plan.planHash)));
+  const featureIds = Object.freeze(Array.from(networkV1FeatureIdsFromBuildPlan(plan.features)));
   return Object.freeze({
     token,
     bootstrapSpecifier: `pocketjs:network-bootstrap-v1-${token}`,
@@ -60,6 +66,8 @@ export function createNetworkFactoryBuildContext(
     bindingIdentifier: `__pocket_binding_${token}`,
     pendingIdentifier: `__pocket_pending_${token}`,
     argumentsIdentifier: `__pocket_arguments_${token}`,
+    planHashBytes,
+    featureIds,
   });
 }
 
@@ -71,7 +79,22 @@ function assertContext(context: NetworkPrivateBuildContext): void {
     context.takeIdentifier !== `__pocket_take_${context.token}` ||
     context.bindingIdentifier !== `__pocket_binding_${context.token}` ||
     context.pendingIdentifier !== `__pocket_pending_${context.token}` ||
-    context.argumentsIdentifier !== `__pocket_arguments_${context.token}`
+    context.argumentsIdentifier !== `__pocket_arguments_${context.token}` ||
+    !Array.isArray(context.planHashBytes) ||
+    !Object.isFrozen(context.planHashBytes) ||
+    context.planHashBytes.length !== 32 ||
+    context.planHashBytes.some(
+      (byte) => !Number.isInteger(byte) || byte < 0 || byte > 0xff,
+    ) ||
+    !Array.isArray(context.featureIds) ||
+    !Object.isFrozen(context.featureIds) ||
+    context.featureIds.some(
+      (feature, index) =>
+        !Number.isInteger(feature) ||
+        feature <= 0 ||
+        feature > 0xffff ||
+        (index > 0 && feature <= context.featureIds[index - 1]!),
+    )
   ) {
     throw new TypeError("PocketJS network factory: invalid private build context");
   }

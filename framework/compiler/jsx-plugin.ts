@@ -90,10 +90,31 @@ const PACKAGE_NAME = "@pocketjs/framework";
 const CACHE_DIR = new URL("../../.cache/transforms/", import.meta.url).pathname;
 const CACHE_VERSION = "2"; // manual backstop; compiler sources are hashed in below
 const COMPILER_DIR = new URL("./", import.meta.url).pathname;
-const NETWORK_BINDING_FRAMEWORK_SOURCE = realpathSync(new URL(
+const NETWORK_HTTP_BINDING_FRAMEWORK_SOURCE = realpathSync(new URL(
   "../src/net/http-binding.ts",
   import.meta.url,
 ).pathname);
+const NETWORK_V1_BINDING_FRAMEWORK_SOURCE = realpathSync(new URL(
+  "../src/net/network-v1-binding.ts",
+  import.meta.url,
+).pathname);
+const NETWORK_LIMITS_FRAMEWORK_SOURCE = realpathSync(new URL(
+  "../src/net/network-limits.ts",
+  import.meta.url,
+).pathname);
+const NETWORK_HTTP_FRAMEWORK_SOURCE = realpathSync(new URL(
+  "../src/net/http.ts",
+  import.meta.url,
+).pathname);
+const NETWORK_INDEX_FRAMEWORK_SOURCE = realpathSync(new URL(
+  "../src/net/index.ts",
+  import.meta.url,
+).pathname);
+const NETWORK_PRIVATE_FRAMEWORK_SOURCES = new Set([
+  NETWORK_HTTP_BINDING_FRAMEWORK_SOURCE,
+  NETWORK_V1_BINDING_FRAMEWORK_SOURCE,
+  NETWORK_LIMITS_FRAMEWORK_SOURCE,
+]);
 const FRAMEWORK_SOURCE_ROOT = realpathSync(new URL("../src/", import.meta.url).pathname);
 const NETWORK_PRIVATE_NAMESPACE = "pocketjs-network-private-v1";
 
@@ -383,7 +404,27 @@ function canonicalFile(path: string): string | null {
 }
 
 function isNetworkBindingFrameworkSource(path: string): boolean {
-  return canonicalFile(path) === NETWORK_BINDING_FRAMEWORK_SOURCE;
+  const canonical = canonicalFile(path);
+  return canonical !== null && NETWORK_PRIVATE_FRAMEWORK_SOURCES.has(canonical);
+}
+
+function isAllowedPrivateNetworkSourceImport(
+  target: string,
+  importer: string,
+): boolean {
+  if (importer === NETWORK_PRIVATE_SPECIFIER) {
+    return target === NETWORK_V1_BINDING_FRAMEWORK_SOURCE;
+  }
+  const canonicalImporter = canonicalFile(importer);
+  if (target === NETWORK_HTTP_BINDING_FRAMEWORK_SOURCE) {
+    return canonicalImporter === NETWORK_HTTP_FRAMEWORK_SOURCE ||
+      canonicalImporter === NETWORK_V1_BINDING_FRAMEWORK_SOURCE;
+  }
+  if (target === NETWORK_LIMITS_FRAMEWORK_SOURCE) {
+    return canonicalImporter === NETWORK_INDEX_FRAMEWORK_SOURCE ||
+      canonicalImporter === NETWORK_V1_BINDING_FRAMEWORK_SOURCE;
+  }
+  return false;
 }
 
 function isFrameworkSource(path: string): boolean {
@@ -399,24 +440,9 @@ function preparePrivateNetworkFrameworkSource(
   source: string,
   enabled: boolean,
 ): string {
-  if (!enabled || !isNetworkBindingFrameworkSource(path)) return source;
-  if (new RegExp(`from\\s*["']${NETWORK_PRIVATE_SPECIFIER}["']`).test(source)) {
-    return source;
-  }
-
-  const declaration = new RegExp(
-    `declare\\s+const\\s+${NETWORK_BINDING_RESERVED_IDENTIFIER}\\s*:\\s*unknown\\s*;`,
-  );
-  if (!declaration.test(source)) {
-    throw new TypeError(
-      "PocketJS compiler: framework private network binding declaration is missing",
-    );
-  }
-  return source.replace(
-    declaration,
-    `import { binding as ${NETWORK_BINDING_RESERVED_IDENTIFIER} } from ` +
-      `${JSON.stringify(NETWORK_PRIVATE_SPECIFIER)};`,
-  );
+  void path;
+  void enabled;
+  return source;
 }
 
 function makePrivateNetworkIdentifierGate(
@@ -503,34 +529,12 @@ async function transformPrivateNetworkJavaScript(
 
 function privateNetworkModuleSource(context: NetworkPrivateBuildContext): string {
   return `
-const ${context.bindingIdentifier} = ((privateTable) => {
-  const prototype = Object.getPrototypeOf(privateTable);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError("PocketJS private network binding must have an ordinary prototype");
-  }
-  const facade = {};
-  for (const key of Reflect.ownKeys(privateTable)) {
-    const descriptor = Object.getOwnPropertyDescriptor(privateTable, key);
-    if (
-      typeof key !== "string" ||
-      descriptor === undefined ||
-      !("value" in descriptor)
-    ) {
-      throw new TypeError("PocketJS private network binding must use data properties");
-    }
-    const value = descriptor.value;
-    Object.defineProperty(facade, key, {
-      configurable: false,
-      enumerable: descriptor.enumerable === true,
-      writable: false,
-      value: typeof value === "function"
-        ? function (...args) { return Reflect.apply(value, privateTable, args); }
-        : value,
-    });
-  }
-  return Object.freeze(facade);
-})(${context.takeIdentifier}());
-export { ${context.bindingIdentifier} as binding };
+import { mountNetworkV1HttpBinding } from ${JSON.stringify(NETWORK_V1_BINDING_FRAMEWORK_SOURCE)};
+const ${context.bindingIdentifier} = ${context.takeIdentifier}();
+mountNetworkV1HttpBinding(${context.bindingIdentifier}, Object.freeze({
+  planHashBytes: Object.freeze(${JSON.stringify(context.planHashBytes)}),
+  featureIds: Object.freeze(${JSON.stringify(context.featureIds)}),
+}));
 `;
 }
 
@@ -916,6 +920,26 @@ export function jsxPlugin(
   return {
     name: `pocketjs-${framework}-jsx`,
     setup(build) {
+      // Private installer/capture modules are inaccessible in every artifact
+      // mode, including a plain build with no network factory. Resolve the
+      // canonical target so absolute paths and symlink aliases are equivalent.
+      build.onResolve({ filter: /.*/ }, (args) => {
+        if (!isAbsolute(args.path) && !args.path.startsWith(".")) return undefined;
+        let resolved: string;
+        try {
+          resolved = Bun.resolveSync(args.path, args.resolveDir);
+        } catch {
+          return undefined;
+        }
+        const target = canonicalFile(resolved);
+        if (target === null || !NETWORK_PRIVATE_FRAMEWORK_SOURCES.has(target)) {
+          return undefined;
+        }
+        if (isAllowedPrivateNetworkSourceImport(target, args.importer)) return undefined;
+        throw new TypeError(
+          "PocketJS: application resolver rejected direct access to a private network binding module.",
+        );
+      });
       if (opts.networkPrivate !== undefined) {
         const context = opts.networkPrivate;
         if (!opts.entry) {
@@ -959,25 +983,6 @@ export function jsxPlugin(
             );
           }
           return { path: NETWORK_PRIVATE_SPECIFIER, namespace: NETWORK_PRIVATE_NAMESPACE };
-        });
-        build.onResolve({ filter: /.*/ }, (args) => {
-          if (args.path.startsWith(NETWORK_PRIVATE_PREFIX)) return undefined;
-          if (!isAbsolute(args.path) && !args.path.startsWith(".")) return undefined;
-          let resolved: string;
-          try {
-            resolved = Bun.resolveSync(args.path, args.resolveDir);
-          } catch {
-            return undefined;
-          }
-          if (
-            canonicalFile(resolved) === NETWORK_BINDING_FRAMEWORK_SOURCE &&
-            !isFrameworkSource(args.importer)
-          ) {
-            throw new TypeError(
-              "PocketJS: application resolver rejected direct access to the private network binding module.",
-            );
-          }
-          return undefined;
         });
       } else {
         build.onResolve({ filter: /^pocketjs:internal\// }, (args) => {
