@@ -136,7 +136,40 @@ function formalBinding(
         runtimeGeneration: 1,
         protocol: query.protocol,
         role: query.role,
-        values: Object.freeze([]),
+        values: Object.freeze(inProtocol && inRole
+          ? [
+              Object.freeze({
+                name: "http.bufferedBodyBytes",
+                default: 256 * 1024,
+                hard: 256 * 1024,
+                minimum: 1,
+              }),
+              Object.freeze({
+                name: "http.headerBytes",
+                default: 8 * 1024,
+                hard: 8 * 1024,
+                minimum: 1,
+              }),
+              Object.freeze({
+                name: "http.maxBodyChunkBytes",
+                default: 2 * 1024,
+                hard: 2 * 1024,
+                minimum: 1,
+              }),
+              Object.freeze({
+                name: "http.maxOperations",
+                default: 8,
+                hard: 8,
+                minimum: 1,
+              }),
+              Object.freeze({
+                name: "runtime.nativeBufferBytes",
+                default: 512 * 1024,
+                hard: 512 * 1024,
+                minimum: 1,
+              }),
+            ]
+          : []),
         featureIds: Object.freeze(inProtocol && inRole ? [...featureIds] : []),
       });
     },
@@ -179,7 +212,11 @@ async function bundleNetworkEntry(
     entrypoints: [context.bootstrapSpecifier],
     format: "iife",
     target: "browser",
-    plugins: [jsxPlugin("solid", { entry, networkPrivate: context })],
+    plugins: [jsxPlugin("solid", {
+      entry,
+      features: { "network.http.client": true },
+      networkPrivate: context,
+    })],
   });
 }
 
@@ -489,16 +526,17 @@ describe("network factory artifact", () => {
     }
   });
 
-  test("links the framework capture through the compiler-only module", async () => {
+  test("links admitted limits through the compiler-only framework capture", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-framework-capture-"));
     try {
       const entry = join(directory, "entry.ts");
       const context = networkContext();
       await Bun.write(entry, `
-        import { fetch } from ${JSON.stringify(join(ROOT, "framework/src/net/http.ts"))};
-        void fetch("http://127.0.0.1/").catch(() => {});
-        (globalThis as Record<string, unknown>).${MARKER} =
-          (globalThis as Record<string, unknown>).__bindingStartCheckpoint;
+        import { getNetworkLimits } from "@pocketjs/framework/net";
+        (globalThis as Record<string, unknown>).${MARKER} = getNetworkLimits(
+          "http",
+          "client",
+        ).values["http.maxBodyChunkBytes"].default;
       `);
       const result = await bundleNetworkEntry(entry, context);
       expect(result.success).toBe(true);
@@ -506,19 +544,9 @@ describe("network factory artifact", () => {
       expect(bundled).not.toMatch(/\bimport\s+[^;]*pocketjs:internal\//);
 
       const factory = evaluateArtifact(wrapNetworkBundleFactory(bundled, context));
-      let binding!: NetworkV1BindingTable;
-      binding = formalBinding(context, {
-        dispatch(this: NetworkV1BindingTable, command) {
-          if (command.opcode !== NetworkV1CommandOpcode.HttpRequestStart) return;
-          globals().__bindingStartCheckpoint = this === binding
-            ? "framework-captured"
-            : "wrong-this";
-          throw new Error("expected test stop");
-        },
-      });
+      const binding = formalBinding(context);
       expect((factory as (value: object) => unknown)(binding)).toBeUndefined();
-      expect(globals()[MARKER]).toBe("framework-captured");
-      delete globals().__bindingStartCheckpoint;
+      expect(globals()[MARKER]).toBe(2 * 1024);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
