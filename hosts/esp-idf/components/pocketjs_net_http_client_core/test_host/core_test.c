@@ -41,6 +41,8 @@ typedef struct {
   size_t retires;
   size_t releases;
   size_t release_attempts;
+  size_t pump_calls;
+  size_t take_attempts;
   pocketjs_net_http_client_transport_result_t start_failure[6];
   pocketjs_net_http_client_transport_result_t cancel_failure;
   pocketjs_net_http_client_transport_result_t pump_failure;
@@ -158,6 +160,7 @@ fake_pump(void *context, uint64_t now_us, size_t max_native_steps) {
   fake_transport_t *fake = context;
   assert(now_us != 0U);
   assert(max_native_steps != 0U);
+  ++fake->pump_calls;
   return fake->pump_failure;
 }
 
@@ -165,6 +168,7 @@ static pocketjs_net_http_client_transport_result_t fake_take_completion(
     void *context,
     pocketjs_net_http_client_transport_completion_t *out_completion) {
   fake_transport_t *fake = context;
+  ++fake->take_attempts;
   if (fake->take_failure != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
     return fake->take_failure;
   }
@@ -423,7 +427,8 @@ typedef struct {
   uint64_t now;
 } fixture_t;
 
-static void fixture_init(fixture_t *fixture) {
+static void fixture_init_with_response_header_limit(fixture_t *fixture,
+                                                    size_t limit) {
   memset(fixture, 0, sizeof(*fixture));
   fixture->now = 1000000U;
   fixture->permissions.allow_hostname = true;
@@ -439,14 +444,18 @@ static void fixture_init(fixture_t *fixture) {
       .headers_timeout_us = 100000U,
       .idle_timeout_us = 100000U,
       .total_timeout_us = 1000000U,
+      .response_header_bytes_limit = limit,
   };
-  assert(pocketjs_net_http_client_core_init(&fixture->storage,
-                                            &fixture->config,
+  assert(pocketjs_net_http_client_core_init(&fixture->storage, &fixture->config,
                                             &fixture->core) ==
          POCKETJS_NET_HTTP_CLIENT_START_OK);
   fixture->permissions.core = fixture->core;
   fixture->permissions.storage = &fixture->storage;
   fixture->permissions.config = &fixture->config;
+}
+
+static void fixture_init(fixture_t *fixture) {
+  fixture_init_with_response_header_limit(fixture, 0U);
 }
 
 static void pump(fixture_t *fixture) {
@@ -676,6 +685,70 @@ static void test_headers_body_and_status_success(void) {
   retire_event(&fixture, complete);
   assert(!pocketjs_net_http_client_core_take_event(fixture.core, &complete));
   assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+}
+
+static void test_response_header_limit_configuration_boundaries(void) {
+  fixture_t maximum;
+  fixture_init_with_response_header_limit(
+      &maximum, POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES);
+  assert(
+      pocketjs_net_http_client_core_begin_shutdown(maximum.core, maximum.now));
+  assert(pocketjs_net_http_client_core_deinit(maximum.core));
+
+  pocketjs_net_http_client_core_storage_t invalid_storage = {0};
+  pocketjs_net_http_client_core_t *invalid_core = maximum.core;
+  maximum.config.response_header_bytes_limit =
+      POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES + 1U;
+  assert(pocketjs_net_http_client_core_init(&invalid_storage, &maximum.config,
+                                            &invalid_core) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  assert(invalid_core == NULL);
+
+  fixture_t zero_uses_maximum;
+  fixture_init_with_response_header_limit(&zero_uses_maximum, 0U);
+  assert(pocketjs_net_http_client_core_begin_shutdown(zero_uses_maximum.core,
+                                                      zero_uses_maximum.now));
+  assert(pocketjs_net_http_client_core_deinit(zero_uses_maximum.core));
+}
+
+static void test_selected_response_header_limit(void) {
+  enum { SELECTED_HEADER_BYTES = 19U };
+
+  fixture_t exact;
+  fixture_init_with_response_header_limit(&exact, SELECTED_HEADER_BYTES);
+  connect_and_write_get(&exact, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&exact.fake,
+                     "HTTP/1.1 204 No Content\r\nX-Test: yes\r\nY: 1\r\n\r\n",
+                     false);
+  pump(&exact);
+  pocketjs_net_http_client_event_t headers =
+      take_event(&exact, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  assert(headers.detail.response.header_count == 2U);
+  retire_event(&exact, headers);
+  assert(exact.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&exact.fake);
+  pump(&exact);
+  pocketjs_net_http_client_event_t complete =
+      take_event(&exact, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  retire_event(&exact, complete);
+
+  fixture_t exceeded;
+  fixture_init_with_response_header_limit(&exceeded, SELECTED_HEADER_BYTES);
+  connect_and_write_get(&exceeded, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&exceeded.fake,
+                     "HTTP/1.1 204 No Content\r\nX-Test: yes\r\nY: 12\r\n\r\n",
+                     false);
+  pump(&exceeded);
+  pocketjs_net_http_client_event_t event;
+  assert(!pocketjs_net_http_client_core_take_event(exceeded.core, &event));
+  assert(exceeded.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&exceeded.fake);
+  pump(&exceeded);
+  event = take_event(&exceeded, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(event.detail.error.code ==
+         POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT);
+  retire_event(&exceeded, event);
+  assert(!pocketjs_net_http_client_core_take_event(exceeded.core, &event));
 }
 
 static void test_https_and_permissions_fail_before_io(void) {
@@ -1939,6 +2012,61 @@ static void test_idle_transport_faults_do_not_publish(void) {
   assert(status.operation_token == 0U && !status.event_outstanding);
 }
 
+static void test_native_only_pump_budget(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&fixture.fake, &address, 1U);
+
+  ++fixture.now;
+  assert(pocketjs_net_http_client_core_pump(fixture.core, fixture.now, 1U, 0U));
+  assert(fixture.fake.pump_calls == 1U);
+  assert(fixture.fake.take_attempts == 0U);
+  assert(fixture.fake.completion_queued);
+  pocketjs_net_http_client_core_status_t status = get_status(&fixture);
+  assert(!status.poisoned && status.poison_flags == 0U);
+}
+
+static void test_completion_only_pump_budget(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&fixture.fake, &address, 1U);
+
+  ++fixture.now;
+  assert(pocketjs_net_http_client_core_pump(fixture.core, fixture.now, 0U, 1U));
+  assert(fixture.fake.pump_calls == 0U);
+  assert(fixture.fake.take_attempts == 1U);
+  assert(!fixture.fake.completion_queued);
+  assert(fixture.fake.active_kind == FAKE_CONNECT);
+  pocketjs_net_http_client_core_status_t status = get_status(&fixture);
+  assert(!status.poisoned && status.poison_flags == 0U);
+}
+
+static void test_empty_pump_budget_is_rejected_without_poison(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  fixture.fake.pump_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
+  fixture.fake.take_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
+
+  assert(
+      !pocketjs_net_http_client_core_pump(fixture.core, fixture.now, 0U, 0U));
+  assert(fixture.fake.pump_calls == 0U);
+  assert(fixture.fake.take_attempts == 0U);
+  pocketjs_net_http_client_core_status_t status = get_status(&fixture);
+  assert(!status.poisoned && status.poison_flags == 0U);
+}
+
 static void test_invalid_inputs(void) {
   fixture_t fixture;
   fixture_init(&fixture);
@@ -1964,6 +2092,8 @@ static void test_invalid_inputs(void) {
 
 int main(void) {
   test_headers_body_and_status_success();
+  test_response_header_limit_configuration_boundaries();
+  test_selected_response_header_limit();
   test_https_and_permissions_fail_before_io();
   test_all_candidates_checked_before_denial();
   test_protocol_error_closes_before_terminal();
@@ -1994,6 +2124,9 @@ int main(void) {
   test_malformed_read_releases_and_view_failure_retains();
   test_completion_retire_failure_is_poisoned_and_retried();
   test_idle_transport_faults_do_not_publish();
+  test_native_only_pump_budget();
+  test_completion_only_pump_budget();
+  test_empty_pump_budget_is_rejected_without_poison();
   test_invalid_inputs();
   puts("http client core host tests passed");
   return 0;
