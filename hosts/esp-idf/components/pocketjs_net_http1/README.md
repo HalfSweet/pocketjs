@@ -18,6 +18,8 @@ will not consume body bytes without explicit credit. A `PAUSED` result leaves
 the same bytes after downstream capacity returns.
 
 The request encoder validates the entire request head before emitting bytes.
+It rejects the Fetch-forbidden `CONNECT`, `TRACE`, and `TRACK` methods without
+regard to ASCII case.
 It owns no request data: all method, target, host, and header slices must remain
 valid until the encoder reports `DONE`. The caller remains responsible for
 writing exactly the declared fixed-length body or valid chunked coding.

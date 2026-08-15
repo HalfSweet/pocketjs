@@ -1,7 +1,9 @@
 # Bounded HTTP/1.1 wire corpus app
 
-This app runs request encoder, response fragmentation, framing, body-credit,
-chunk, and trailer assertions in `app_main`. A successful boot prints:
+This app runs request encoder (including case-insensitive rejection of the
+Fetch-forbidden `CONNECT`, `TRACE`, and `TRACK` methods), response
+fragmentation, framing, body-credit, chunk, and trailer assertions in
+`app_main`. A successful boot prints:
 
 ```text
 pocketjs_net_http1: corpus passed
