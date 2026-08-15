@@ -109,6 +109,7 @@ describe("net package namespace", () => {
       expect(exports[`./vue-vapor/${name}`]).toBeUndefined();
       expect(exports[`./octane/${name}`]).toBeUndefined();
     }
+    expect(JSON.stringify(exports)).not.toContain("framework/src/net-api.ts");
     expect(packagePath("@pocketjs/framework/vue-vapor/net", "vue-vapor")).toBeNull();
     expect(packagePath("@pocketjs/framework/octane/net/http", "octane")).toBeNull();
     expect(packagePath("@pocketjs/framework/net/http", "vue-vapor")).toBe(

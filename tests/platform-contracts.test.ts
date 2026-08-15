@@ -140,6 +140,10 @@ describe("pocket.json v2 schema", () => {
 });
 
 describe("platform registry", () => {
+  test("does not publish the retired NET v1 capability", () => {
+    expect(POCKET_CAPABILITIES).not.toContain("net.http");
+  });
+
   test("production advertises only the truthful stock-host profiles", () => {
     expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
     expect(validatePlatformContractRegistry(POCKET_PLATFORM_CONTRACTS)).toEqual([]);
