@@ -11,6 +11,7 @@ const HTTP_BUFFERED_BODY_INPUT_BYTES = 8 * 1024 * 1024;
 const HTTP_BODY_EMPTY_CHUNK_LIMIT = 1024;
 const HTTP_BODY_CLONE_BRANCHES = 8;
 const HTTP_BODY_TEE_SEGMENT_BYTES = HTTP_BODY_CHUNK_BYTES;
+const HTTP_BODY_TEE_SEGMENT_SLOTS = 5;
 
 export interface BodyStream extends AsyncIterable<Uint8Array> {
   readInto(destination: Uint8Array): Promise<{ bytes: number; done: boolean }>;
@@ -33,7 +34,19 @@ interface BodySource {
   cancel(reason?: unknown): Promise<void>;
 }
 
-const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const Uint8ArrayIntrinsic = Uint8Array;
+const PromiseIntrinsic = Promise;
+const SetIntrinsic = Set;
+const ArrayBufferIntrinsic = ArrayBuffer;
+const TypeErrorIntrinsic = TypeError;
+const reflectApply = Reflect.apply;
+const mathMin = Math.min;
+const mathMax = Math.max;
+const numberIsSafeInteger = Number.isSafeInteger;
+const objectFreeze = Object.freeze;
+const stringCharCodeAt = String.prototype.charCodeAt;
+const asyncIteratorSymbol = Symbol.asyncIterator;
+const typedArrayPrototype = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype) as object;
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   "byteLength",
@@ -63,13 +76,74 @@ const dataViewBuffer = Object.getOwnPropertyDescriptor(
   "buffer",
 )!.get!;
 const arrayBufferByteLength = Object.getOwnPropertyDescriptor(
-  ArrayBuffer.prototype,
+  ArrayBufferIntrinsic.prototype,
   "byteLength",
 )!.get!;
-const uint8ArraySet = Uint8Array.prototype.set;
-const arrayBufferIsView = ArrayBuffer.isView;
+const uint8ArraySet = Uint8ArrayIntrinsic.prototype.set;
+const uint8ArraySubarray = Uint8ArrayIntrinsic.prototype.subarray;
+const uint8ArraySlice = Uint8ArrayIntrinsic.prototype.slice;
+const arrayBufferIsView = ArrayBufferIntrinsic.isView;
+const setAdd = SetIntrinsic.prototype.add;
+const setDelete = SetIntrinsic.prototype.delete;
+const setClear = SetIntrinsic.prototype.clear;
+const setForEach = SetIntrinsic.prototype.forEach;
+const setSize = Object.getOwnPropertyDescriptor(SetIntrinsic.prototype, "size")!.get!;
 const textEncoder = new TextEncoder();
 const textEncoderEncode = TextEncoder.prototype.encode;
+const promiseResolve = PromiseIntrinsic.resolve;
+const promiseThen = PromiseIntrinsic.prototype.then;
+const promiseAllSettled = PromiseIntrinsic.allSettled;
+
+function ignoreBodyRejection(value: unknown): void {
+  const promise = reflectApply(promiseResolve, PromiseIntrinsic, [value]);
+  void reflectApply(promiseThen, promise, [undefined, () => undefined]);
+}
+
+function byteLengthOf(value: Uint8Array): number {
+  return reflectApply(typedArrayByteLength, value, []) as number;
+}
+
+function subarrayOf(value: Uint8Array, start: number, end?: number): Uint8Array {
+  return reflectApply(
+    uint8ArraySubarray,
+    value,
+    end === undefined ? [start] : [start, end],
+  );
+}
+
+function sliceOf(value: Uint8Array, start: number, end?: number): Uint8Array {
+  return reflectApply(
+    uint8ArraySlice,
+    value,
+    end === undefined ? [start] : [start, end],
+  );
+}
+
+function addSetValue<T>(set: Set<T>, value: T): void {
+  reflectApply(setAdd, set, [value]);
+}
+
+function deleteSetValue<T>(set: Set<T>, value: T): boolean {
+  return reflectApply(setDelete, set, [value]) as boolean;
+}
+
+function clearSetValues<T>(set: Set<T>): void {
+  reflectApply(setClear, set, []);
+}
+
+function setValueCount<T>(set: Set<T>): number {
+  return reflectApply(setSize, set, []) as number;
+}
+
+function snapshotSetValues<T>(set: Set<T>): T[] {
+  const values: T[] = [];
+  reflectApply(setForEach, set, [
+    (value: T) => {
+      values[values.length] = value;
+    },
+  ]);
+  return values;
+}
 
 interface IntrinsicViewSnapshot {
   readonly buffer: ArrayBuffer;
@@ -84,39 +158,41 @@ function intrinsicUint8ArraySnapshot(
   let tag: unknown;
   let snapshot: IntrinsicViewSnapshot;
   try {
-    tag = typedArrayTag.call(value);
+    tag = reflectApply(typedArrayTag, value, []);
     snapshot = intrinsicViewSnapshot(value as ArrayBufferView);
   } catch {
-    throw new TypeError(`${label} must be a Uint8Array`);
+    throw new TypeErrorIntrinsic(`${label} must be a Uint8Array`);
   }
-  if (tag !== "Uint8Array") throw new TypeError(`${label} must be a Uint8Array`);
+  if (tag !== "Uint8Array") {
+    throw new TypeErrorIntrinsic(`${label} must be a Uint8Array`);
+  }
   return snapshot;
 }
 
 function intrinsicViewSnapshot(view: ArrayBufferView): IntrinsicViewSnapshot {
   try {
     return {
-      buffer: typedArrayBuffer.call(view) as ArrayBuffer,
-      byteOffset: typedArrayByteOffset.call(view) as number,
-      byteLength: typedArrayByteLength.call(view) as number,
+      buffer: reflectApply(typedArrayBuffer, view, []) as ArrayBuffer,
+      byteOffset: reflectApply(typedArrayByteOffset, view, []) as number,
+      byteLength: reflectApply(typedArrayByteLength, view, []) as number,
     };
   } catch {
     return {
-      buffer: dataViewBuffer.call(view) as ArrayBuffer,
-      byteOffset: dataViewByteOffset.call(view) as number,
-      byteLength: dataViewByteLength.call(view) as number,
+      buffer: reflectApply(dataViewBuffer, view, []) as ArrayBuffer,
+      byteOffset: reflectApply(dataViewByteOffset, view, []) as number,
+      byteLength: reflectApply(dataViewByteLength, view, []) as number,
     };
   }
 }
 
 function copyIntrinsicBytes(snapshot: IntrinsicViewSnapshot): Uint8Array {
-  const source = new Uint8Array(
+  const source = new Uint8ArrayIntrinsic(
     snapshot.buffer,
     snapshot.byteOffset,
     snapshot.byteLength,
   );
-  const copy = new Uint8Array(snapshot.byteLength);
-  uint8ArraySet.call(copy, source);
+  const copy = new Uint8ArrayIntrinsic(snapshot.byteLength);
+  reflectApply(uint8ArraySet, copy, [source]);
   return copy;
 }
 
@@ -147,7 +223,7 @@ export function snapshotUint8Array(
 
 /** Return the backing buffer of an SDK-owned, exact-length byte array. */
 export function ownedUint8ArrayBuffer(value: Uint8Array): ArrayBuffer {
-  return typedArrayBuffer.call(value) as ArrayBuffer;
+  return reflectApply(typedArrayBuffer, value, []) as ArrayBuffer;
 }
 
 type ReaderKind = "readInto" | "iterator" | "helper" | "binding";
@@ -166,7 +242,7 @@ function bodyError(
 }
 
 function assertPositiveCapacity(maxBytes: number, operation: string): void {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+  if (!numberIsSafeInteger(maxBytes) || maxBytes <= 0) {
     throw bodyError(
       "invalid_state",
       operation,
@@ -189,7 +265,7 @@ function copyView(view: ArrayBufferView): Uint8Array {
 
 function copyArrayBuffer(buffer: ArrayBuffer): Uint8Array {
   try {
-    const byteLength = arrayBufferByteLength.call(buffer) as number;
+    const byteLength = reflectApply(arrayBufferByteLength, buffer, []) as number;
     return copyIntrinsicBytes({ buffer, byteOffset: 0, byteLength });
   } catch {
     throw bodyError(
@@ -206,20 +282,21 @@ class MemoryBodySource implements BodySource {
   constructor(private readonly bytes: Uint8Array) {}
 
   async pull(maxBytes: number): Promise<Uint8Array | null> {
-    if (this.#offset === this.bytes.byteLength) return null;
-    const end = Math.min(this.bytes.byteLength, this.#offset + maxBytes);
-    const result = this.bytes.subarray(this.#offset, end);
+    const byteLength = byteLengthOf(this.bytes);
+    if (this.#offset === byteLength) return null;
+    const end = mathMin(byteLength, this.#offset + maxBytes);
+    const result = subarrayOf(this.bytes, this.#offset, end);
     this.#offset = end;
     return result;
   }
 
   async cancel(): Promise<void> {
-    this.#offset = this.bytes.byteLength;
+    this.#offset = byteLengthOf(this.bytes);
   }
 }
 
 class AsyncIterableBodySource implements BodySource {
-  #iterator: AsyncIterator<Uint8Array> | undefined;
+  #iteratorRecord: BodyAsyncIteratorRecord | undefined;
   #remainder: Uint8Array | undefined;
   #done = false;
   #returnCalled = false;
@@ -233,10 +310,13 @@ class AsyncIterableBodySource implements BodySource {
     if (this.#done) return null;
     if (this.#remainder) return this.#takeRemainder(maxBytes);
 
-    this.#iterator ??= this.iteratorFactory.call(this.iterable);
+    this.#iteratorRecord ??= snapshotBodyAsyncIterator(
+      reflectApply(this.iteratorFactory, this.iterable, []),
+    );
+    const iteratorRecord = this.#iteratorRecord;
     let emptyChunks = 0;
     for (;;) {
-      const item = await this.#iterator.next();
+      const item = await reflectApply(iteratorRecord.next, iteratorRecord.iterator, []);
       if (typeof item !== "object" || item === null) {
         throw bodyError(
           "invalid_state",
@@ -244,14 +324,14 @@ class AsyncIterableBodySource implements BodySource {
           "HTTP async body iterator returned an invalid result",
         );
       }
-      const done = Boolean(item.done);
+      const done = !!item.done;
       if (done) {
         this.#done = true;
         return null;
       }
       const value = item.value;
       const chunk = snapshotUint8Array(value, HTTP_BODY_CHUNK_BYTES, "HTTP body chunk");
-      if (chunk.byteLength === 0) {
+      if (byteLengthOf(chunk) === 0) {
         emptyChunks++;
         if (emptyChunks > HTTP_BODY_EMPTY_CHUNK_LIMIT) {
           throw bodyError(
@@ -271,13 +351,13 @@ class AsyncIterableBodySource implements BodySource {
     if (this.#done || this.#returnCalled) return;
     this.#done = true;
     this.#remainder = undefined;
-    const iterator = this.#iterator;
-    if (!iterator || typeof iterator.return !== "function") return;
+    const iteratorRecord = this.#iteratorRecord;
+    if (!iteratorRecord?.returnMethod) return;
     this.#returnCalled = true;
     // A producer return failure is diagnostic-only and never replaces the
     // cancellation or transport failure which caused it.
     try {
-      await iterator.return(reason as never);
+      await reflectApply(iteratorRecord.returnMethod, iteratorRecord.iterator, [reason]);
     } catch {
       // Deliberately ignored at this public SDK boundary.
     }
@@ -285,13 +365,49 @@ class AsyncIterableBodySource implements BodySource {
 
   #takeRemainder(maxBytes: number): Uint8Array {
     const remainder = this.#remainder!;
-    const count = Math.min(remainder.byteLength, maxBytes);
-    const result = remainder.subarray(0, count);
-    this.#remainder = count === remainder.byteLength
+    const remainderLength = byteLengthOf(remainder);
+    const count = mathMin(remainderLength, maxBytes);
+    const result = subarrayOf(remainder, 0, count);
+    this.#remainder = count === remainderLength
       ? undefined
-      : remainder.subarray(count);
+      : subarrayOf(remainder, count);
     return result;
   }
+}
+
+interface BodyAsyncIteratorRecord {
+  readonly iterator: object;
+  readonly next: () => PromiseLike<IteratorResult<Uint8Array>> | IteratorResult<Uint8Array>;
+  readonly returnMethod?: (
+    reason?: unknown,
+  ) => PromiseLike<IteratorResult<Uint8Array>> | IteratorResult<Uint8Array>;
+}
+
+function snapshotBodyAsyncIterator(iterator: unknown): BodyAsyncIteratorRecord {
+  if ((typeof iterator !== "object" && typeof iterator !== "function") || iterator === null) {
+    throw bodyError(
+      "invalid_state",
+      "http.body.pull",
+      "HTTP async body returned an invalid iterator",
+    );
+  }
+  const next = (iterator as { readonly next?: unknown }).next;
+  const returnMethod = (iterator as { readonly return?: unknown }).return;
+  if (typeof next !== "function" ||
+    (returnMethod !== undefined && returnMethod !== null && typeof returnMethod !== "function")) {
+    throw bodyError(
+      "invalid_state",
+      "http.body.pull",
+      "HTTP async body returned an invalid iterator",
+    );
+  }
+  return {
+    iterator,
+    next: next as BodyAsyncIteratorRecord["next"],
+    ...(typeof returnMethod === "function"
+      ? { returnMethod: returnMethod as NonNullable<BodyAsyncIteratorRecord["returnMethod"]> }
+      : {}),
+  };
 }
 
 class ExternalBodyStreamSource implements BodySource {
@@ -306,8 +422,8 @@ class ExternalBodyStreamSource implements BodySource {
 
   async pull(maxBytes: number): Promise<Uint8Array | null> {
     if (this.#done) return null;
-    const destination = new Uint8Array(maxBytes);
-    const result = await this.readIntoMethod.call(this.stream, destination);
+    const destination = new Uint8ArrayIntrinsic(maxBytes);
+    const result = await reflectApply(this.readIntoMethod, this.stream, [destination]);
     if (typeof result !== "object" || result === null) {
       throw bodyError(
         "invalid_state",
@@ -318,7 +434,7 @@ class ExternalBodyStreamSource implements BodySource {
     const bytes = result.bytes;
     const done = result.done;
     if (
-      !Number.isSafeInteger(bytes) ||
+      !numberIsSafeInteger(bytes) ||
       bytes < 0 ||
       bytes > maxBytes ||
       typeof done !== "boolean" ||
@@ -335,14 +451,14 @@ class ExternalBodyStreamSource implements BodySource {
       this.#done = true;
       return null;
     }
-    return destination.subarray(0, bytes);
+    return subarrayOf(destination, 0, bytes);
   }
 
   async cancel(reason?: unknown): Promise<void> {
     if (this.#cancelled || this.#done) return;
     this.#cancelled = true;
     this.#done = true;
-    await this.cancelMethod.call(this.stream, reason);
+    await reflectApply(this.cancelMethod, this.stream, [reason]);
   }
 }
 
@@ -354,6 +470,7 @@ interface TeeSegment {
 
 interface TeeBranchState {
   readonly queue: TeeSegment[];
+  spare?: Uint8Array;
   bufferedBytes: number;
   cancelled: boolean;
 }
@@ -378,56 +495,93 @@ function newTeeBranchState(): TeeBranchState {
 }
 
 function notifyTee(state: TeeState): void {
-  const waiters = [...state.waiters];
-  state.waiters.clear();
-  for (const wake of waiters) wake();
+  const waiters = snapshotSetValues(state.waiters);
+  clearSetValues(state.waiters);
+  for (let index = 0; index < waiters.length; index++) waiters[index]!();
 }
 
 function waitForTeeChange(state: TeeState): Promise<void> {
-  return new Promise((resolve) => state.waiters.add(resolve));
+  return new PromiseIntrinsic((resolve) => addSetValue(state.waiters, resolve));
 }
 
 function dequeueTee(branch: TeeBranchState, maxBytes: number): Uint8Array {
   const first = branch.queue[0]!;
   const available = first.end - first.start;
-  const count = Math.min(available, maxBytes);
-  const result = first.bytes.subarray(first.start, first.start + count);
+  const count = mathMin(available, maxBytes);
+  const result = subarrayOf(first.bytes, first.start, first.start + count);
   first.start += count;
   branch.bufferedBytes -= count;
   if (first.start === first.end) {
-    branch.queue.shift();
+    for (let index = 1; index < branch.queue.length; index++) {
+      branch.queue[index - 1] = branch.queue[index]!;
+    }
+    branch.queue.length--;
+    if (branch.queue.length === 0) branch.spare = first.bytes;
   }
   return result;
 }
 
 function enqueueTee(branch: TeeBranchState, chunk: Uint8Array): void {
   let offset = 0;
-  while (offset < chunk.byteLength) {
+  const chunkLength = byteLengthOf(chunk);
+  while (offset < chunkLength) {
     let tail = branch.queue[branch.queue.length - 1];
-    if (!tail || tail.end === tail.bytes.byteLength) {
+    if (!tail || tail.end === byteLengthOf(tail.bytes)) {
+      if (branch.queue.length >= HTTP_BODY_TEE_SEGMENT_SLOTS) {
+        throw bodyError(
+          "resource_limit",
+          "http.body.tee",
+          "HTTP body tee exceeded its fixed segment slots",
+        );
+      }
       tail = {
-        bytes: new Uint8Array(HTTP_BODY_TEE_SEGMENT_BYTES),
+        bytes: branch.spare ?? new Uint8ArrayIntrinsic(HTTP_BODY_TEE_SEGMENT_BYTES),
         start: 0,
         end: 0,
       };
-      branch.queue.push(tail);
+      branch.spare = undefined;
+      branch.queue[branch.queue.length] = tail;
     }
-    const count = Math.min(tail.bytes.byteLength - tail.end, chunk.byteLength - offset);
-    uint8ArraySet.call(tail.bytes, chunk.subarray(offset, offset + count), tail.end);
+    const count = mathMin(byteLengthOf(tail.bytes) - tail.end, chunkLength - offset);
+    reflectApply(uint8ArraySet, tail.bytes, [
+      subarrayOf(chunk, offset, offset + count),
+      tail.end,
+    ]);
     tail.end += count;
     offset += count;
   }
-  branch.bufferedBytes += chunk.byteLength;
+  branch.bufferedBytes += chunkLength;
 }
 
-async function fillTee(state: TeeState): Promise<void> {
+function recordTeeFault(state: TeeState, error: unknown): void {
+  if (!state.hasError) {
+    state.hasError = true;
+    state.error = error;
+  }
+  if (state.sourceCancelCalled) return;
+  state.sourceCancelCalled = true;
+  try {
+    ignoreBodyRejection(reflectApply(state.source.cancel, state.source, [state.error]));
+  } catch {
+    // The source contract fault remains authoritative.
+  }
+}
+
+function fillTee(state: TeeState): Promise<void> | undefined {
   if (state.readPromise) return state.readPromise;
-  const active = state.branches.filter((branch) => !branch.cancelled);
+  const active: TeeBranchState[] = [];
+  for (let index = 0; index < state.branches.length; index++) {
+    const branch = state.branches[index]!;
+    if (!branch.cancelled) active[active.length] = branch;
+  }
   if (active.length === 0 || state.done || state.hasError) return;
-  const credit = Math.min(
-    HTTP_BODY_CHUNK_BYTES,
-    ...active.map((branch) => HTTP_BODY_TEE_BRANCH_BYTES - branch.bufferedBytes),
-  );
+  let credit = HTTP_BODY_CHUNK_BYTES;
+  for (let index = 0; index < active.length; index++) {
+    credit = mathMin(
+      credit,
+      HTTP_BODY_TEE_BRANCH_BYTES - active[index]!.bufferedBytes,
+    );
+  }
   if (credit <= 0) return;
 
   state.readPromise = (async () => {
@@ -435,30 +589,24 @@ async function fillTee(state: TeeState): Promise<void> {
       const chunk = await state.source.pull(credit);
       if (chunk === null) {
         state.done = true;
-      } else if (chunk.byteLength === 0 || chunk.byteLength > credit) {
-        state.hasError = true;
-        state.error = bodyError(
-          chunk.byteLength > credit ? "resource_limit" : "invalid_state",
-          "http.body.tee",
-          "HTTP body source violated bounded tee credit",
-        );
       } else {
-        for (const branch of active) {
-          if (branch.cancelled) continue;
-          enqueueTee(branch, chunk);
+        const chunkLength = byteLengthOf(chunk);
+        if (chunkLength === 0 || chunkLength > credit) {
+          recordTeeFault(state, bodyError(
+            chunkLength > credit ? "resource_limit" : "invalid_state",
+            "http.body.tee",
+            "HTTP body source violated bounded tee credit",
+          ));
+        } else {
+          for (let index = 0; index < active.length; index++) {
+            const branch = active[index]!;
+            if (branch.cancelled) continue;
+            enqueueTee(branch, chunk);
+          }
         }
       }
     } catch (error) {
-      state.hasError = true;
-      state.error = error;
-      if (!state.sourceCancelCalled) {
-        state.sourceCancelCalled = true;
-        try {
-          void Promise.resolve(state.source.cancel(error)).catch(() => {});
-        } catch {
-          // The source error remains authoritative.
-        }
-      }
+      recordTeeFault(state, error);
     } finally {
       state.readPromise = undefined;
       notifyTee(state);
@@ -485,10 +633,15 @@ class TeeBodySource implements BodySource {
       if (this.state.hasError) throw this.state.error;
       if (this.state.done) return null;
 
-      const active = this.state.branches.filter((candidate) => !candidate.cancelled);
-      const canRead = active.length > 0 && active.every(
-        (candidate) => candidate.bufferedBytes < HTTP_BODY_TEE_BRANCH_BYTES,
-      );
+      let activeCount = 0;
+      let canRead = true;
+      for (let index = 0; index < this.state.branches.length; index++) {
+        const candidate = this.state.branches[index]!;
+        if (candidate.cancelled) continue;
+        activeCount++;
+        if (candidate.bufferedBytes >= HTTP_BODY_TEE_BRANCH_BYTES) canRead = false;
+      }
+      canRead = activeCount > 0 && canRead;
       if (this.state.readPromise || canRead) {
         await fillTee(this.state);
         continue;
@@ -504,11 +657,12 @@ class TeeBodySource implements BodySource {
     if (branch.cancelled) return;
     branch.cancelled = true;
     branch.queue.length = 0;
+    branch.spare = undefined;
     branch.bufferedBytes = 0;
     notifyTee(this.state);
     if (
       !this.state.sourceCancelCalled &&
-      this.state.branches.every((candidate) => candidate.cancelled)
+      this.state.branches[0].cancelled && this.state.branches[1].cancelled
     ) {
       this.state.sourceCancelCalled = true;
       await this.state.source.cancel(reason);
@@ -520,7 +674,7 @@ function teeBodySource(source: BodySource): readonly [BodySource, BodySource] {
   const state: TeeState = {
     source,
     branches: [newTeeBranchState(), newTeeBranchState()],
-    waiters: new Set(),
+    waiters: new SetIntrinsic(),
     done: false,
     hasError: false,
     error: undefined,
@@ -540,13 +694,13 @@ class BodyAsyncIterator implements AsyncIterableIterator<Uint8Array> {
 
   async next(): Promise<IteratorResult<Uint8Array>> {
     if (this.#closed) return { value: undefined, done: true };
-    const destination = new Uint8Array(HTTP_BODY_CHUNK_BYTES);
+    const destination = new Uint8ArrayIntrinsic(HTTP_BODY_CHUNK_BYTES);
     const result = await this.controller.readInto("iterator", destination);
     if (result.done) {
       this.#closed = true;
       return { value: undefined, done: true };
     }
-    return { value: destination.slice(0, result.bytes), done: false };
+    return { value: sliceOf(destination, 0, result.bytes), done: false };
   }
 
   async return(): Promise<IteratorResult<Uint8Array>> {
@@ -594,11 +748,11 @@ export class BodyController {
     aggregateLimit = HTTP_BODY_HELPER_BYTES,
     cloneGroup: BodyCloneGroup = {
       branches: 1,
-      controllers: new Set(),
-      terminalCallbacks: new Set(),
+      controllers: new SetIntrinsic(),
+      terminalCallbacks: new SetIntrinsic(),
     },
   ) {
-    if (!Number.isSafeInteger(aggregateLimit) || aggregateLimit <= 0) {
+    if (!numberIsSafeInteger(aggregateLimit) || aggregateLimit <= 0) {
       throw bodyError(
         "resource_limit",
         "http.body",
@@ -607,8 +761,8 @@ export class BodyController {
     }
     this.#source = source;
     this.#cloneGroup = cloneGroup;
-    this.#cloneGroup.controllers.add(this);
-    this.aggregateLimit = Math.min(aggregateLimit, HTTP_BODY_HELPER_BYTES);
+    addSetValue(this.#cloneGroup.controllers, this);
+    this.aggregateLimit = mathMin(aggregateLimit, HTTP_BODY_HELPER_BYTES);
     this.stream = new BodyStreamValue(this);
   }
 
@@ -621,23 +775,27 @@ export class BodyController {
   }
 
   onTerminal(callback: () => void): () => void {
-    if (this.#cloneGroup.controllers.size === 0) {
+    if (setValueCount(this.#cloneGroup.controllers) === 0) {
       callback();
       return () => {};
     }
-    this.#cloneGroup.terminalCallbacks.add(callback);
-    return () => this.#cloneGroup.terminalCallbacks.delete(callback);
+    addSetValue(this.#cloneGroup.terminalCallbacks, callback);
+    return () => deleteSetValue(this.#cloneGroup.terminalCallbacks, callback);
   }
 
   async cancelGraph(reason?: unknown): Promise<void> {
-    const controllers = [...this.#cloneGroup.controllers];
-    const results = await Promise.allSettled(
-      controllers.map((controller) => controller.cancel(reason)),
-    );
-    const rejected = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (rejected) throw rejected.reason;
+    const controllers = snapshotSetValues(this.#cloneGroup.controllers);
+    const cancellations: Promise<void>[] = [];
+    for (let index = 0; index < controllers.length; index++) {
+      cancellations[index] = controllers[index]!.cancel(reason);
+    }
+    const results = await reflectApply(promiseAllSettled, PromiseIntrinsic, [
+      cancellations,
+    ]);
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!;
+      if (result.status === "rejected") throw result.reason;
+    }
   }
 
   createIterator(): AsyncIterableIterator<Uint8Array> {
@@ -665,7 +823,7 @@ export class BodyController {
       );
       // Constructing an intrinsic view detects a detached backing buffer in
       // runtimes where the typed-array slot getters still report zero.
-      new Uint8Array(
+      new Uint8ArrayIntrinsic(
         destinationSnapshot.buffer,
         destinationSnapshot.byteOffset,
         destinationSnapshot.byteLength,
@@ -701,22 +859,24 @@ export class BodyController {
       let emptyChunks = 0;
       for (;;) {
         if (this.#leftover) {
-          const count = Math.min(destinationLength, this.#leftover.byteLength);
-          uint8ArraySet.call(destination, this.#leftover.subarray(0, count), 0);
-          this.#leftover = count === this.#leftover.byteLength
+          const leftoverLength = byteLengthOf(this.#leftover);
+          const count = mathMin(destinationLength, leftoverLength);
+          reflectApply(uint8ArraySet, destination, [subarrayOf(this.#leftover, 0, count), 0]);
+          this.#leftover = count === leftoverLength
             ? undefined
-            : this.#leftover.subarray(count);
+            : subarrayOf(this.#leftover, count);
           return { bytes: count, done: false };
         }
         const chunk = await this.#source.pull(
-          Math.min(destinationLength, HTTP_BODY_CHUNK_BYTES),
+          mathMin(destinationLength, HTTP_BODY_CHUNK_BYTES),
         );
         if (this.#cancelled) return { bytes: 0, done: true };
         if (chunk === null) {
           this.#markTerminal();
           return { bytes: 0, done: true };
         }
-        if (chunk.byteLength === 0) {
+        const chunkLength = byteLengthOf(chunk);
+        if (chunkLength === 0) {
           emptyChunks++;
           if (emptyChunks > HTTP_BODY_EMPTY_CHUNK_LIMIT) {
             throw bodyError(
@@ -727,22 +887,22 @@ export class BodyController {
           }
           continue;
         }
-        if (chunk.byteLength > HTTP_BODY_CHUNK_BYTES) {
+        if (chunkLength > HTTP_BODY_CHUNK_BYTES) {
           throw bodyError(
             "resource_limit",
             "http.body.readInto",
             `HTTP body chunk exceeds ${HTTP_BODY_CHUNK_BYTES} bytes`,
           );
         }
-        const count = Math.min(destinationLength, chunk.byteLength);
-        uint8ArraySet.call(destination, chunk.subarray(0, count), 0);
-        if (count < chunk.byteLength) this.#leftover = chunk.subarray(count);
+        const count = mathMin(destinationLength, chunkLength);
+        reflectApply(uint8ArraySet, destination, [subarrayOf(chunk, 0, count), 0]);
+        if (count < chunkLength) this.#leftover = subarrayOf(chunk, count);
         return { bytes: count, done: false };
       }
     } catch (error) {
       this.#markTerminal();
       try {
-        void Promise.resolve(this.#source.cancel(error)).catch(() => {});
+        ignoreBodyRejection(reflectApply(this.#source.cancel, this.#source, [error]));
       } catch {
         // The source error remains authoritative.
       }
@@ -774,13 +934,13 @@ export class BodyController {
     }
     this.#producerCreated = true;
     this.#claim("binding");
-    return Object.freeze({
+    return objectFreeze({
       pull: async (maxBytes: number) => {
         assertPositiveCapacity(maxBytes, "http.body.pull");
-        const capacity = Math.min(maxBytes, HTTP_BODY_CHUNK_BYTES);
-        const destination = new Uint8Array(capacity);
+        const capacity = mathMin(maxBytes, HTTP_BODY_CHUNK_BYTES);
+        const destination = new Uint8ArrayIntrinsic(capacity);
         const result = await this.readInto("binding", destination);
-        return result.done ? null : destination.slice(0, result.bytes);
+        return result.done ? null : sliceOf(destination, 0, result.bytes);
       },
       cancel: (reason?: unknown) => this.cancel(reason),
     });
@@ -823,7 +983,7 @@ export class BodyController {
     );
     this.#readerKind = "binding";
     this.#used = true;
-    this.#source = new MemoryBodySource(new Uint8Array());
+    this.#source = new MemoryBodySource(new Uint8ArrayIntrinsic());
     this.#markTerminal();
     return transferred;
   }
@@ -839,21 +999,23 @@ export class BodyController {
     this.#helperCreated = true;
     this.#claim("helper");
     const maximum = this.aggregateLimit;
-    let output = new Uint8Array(Math.min(HTTP_BODY_CHUNK_BYTES, maximum + 1));
+    let output = new Uint8ArrayIntrinsic(mathMin(HTTP_BODY_CHUNK_BYTES, maximum + 1));
     let total = 0;
     for (;;) {
-      if (total === output.byteLength) {
-        const nextLength = Math.min(
+      const outputLength = byteLengthOf(output);
+      if (total === outputLength) {
+        const nextLength = mathMin(
           maximum + 1,
-          Math.max(output.byteLength + 1, output.byteLength * 2),
+          mathMax(outputLength + 1, outputLength * 2),
         );
-        const grown = new Uint8Array(nextLength);
-        uint8ArraySet.call(grown, output);
+        const grown = new Uint8ArrayIntrinsic(nextLength);
+        reflectApply(uint8ArraySet, grown, [output]);
         output = grown;
       }
-      const destination = output.subarray(
+      const destination = subarrayOf(
+        output,
         total,
-        Math.min(output.byteLength, total + HTTP_BODY_CHUNK_BYTES),
+        mathMin(byteLengthOf(output), total + HTTP_BODY_CHUNK_BYTES),
       );
       const result = await this.readInto("helper", destination);
       if (result.done) break;
@@ -867,9 +1029,9 @@ export class BodyController {
         );
       }
     }
-    if (total === output.byteLength) return output;
-    const exact = new Uint8Array(total);
-    uint8ArraySet.call(exact, output.subarray(0, total));
+    if (total === byteLengthOf(output)) return output;
+    const exact = new Uint8ArrayIntrinsic(total);
+    reflectApply(uint8ArraySet, exact, [subarrayOf(output, 0, total)]);
     return exact;
   }
 
@@ -890,11 +1052,11 @@ export class BodyController {
   #markTerminal(): void {
     if (this.#terminal) return;
     this.#terminal = true;
-    this.#cloneGroup.controllers.delete(this);
-    if (this.#cloneGroup.controllers.size !== 0) return;
-    const callbacks = [...this.#cloneGroup.terminalCallbacks];
-    this.#cloneGroup.terminalCallbacks.clear();
-    for (const callback of callbacks) callback();
+    deleteSetValue(this.#cloneGroup.controllers, this);
+    if (setValueCount(this.#cloneGroup.controllers) !== 0) return;
+    const callbacks = snapshotSetValues(this.#cloneGroup.terminalCallbacks);
+    clearSetValues(this.#cloneGroup.terminalCallbacks);
+    for (let index = 0; index < callbacks.length; index++) callbacks[index]!();
   }
 }
 
@@ -904,7 +1066,7 @@ export interface ExtractedBody {
 }
 
 function bufferedBodySource(bytes: Uint8Array, aggregateLimit: number): BodyController {
-  if (bytes.byteLength > HTTP_BUFFERED_BODY_INPUT_BYTES) {
+  if (byteLengthOf(bytes) > HTTP_BUFFERED_BODY_INPUT_BYTES) {
     throw bodyError(
       "resource_limit",
       "http.body",
@@ -927,11 +1089,11 @@ function assertBufferedBodySize(byteLength: number): void {
 function assertEncodedStringSize(value: string): void {
   let bytes = 0;
   for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
+    const code = reflectApply(stringCharCodeAt, value, [index]) as number;
     if (code <= 0x7f) bytes += 1;
     else if (code <= 0x7ff) bytes += 2;
     else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-      const low = value.charCodeAt(index + 1);
+      const low = reflectApply(stringCharCodeAt, value, [index + 1]) as number;
       if (low >= 0xdc00 && low <= 0xdfff) {
         bytes += 4;
         index++;
@@ -952,14 +1114,28 @@ interface BodyStreamMethods {
   readonly cancel: BodyStream["cancel"];
 }
 
-function bodyStreamMethods(value: object): BodyStreamMethods | null {
-  const readInto = (value as Partial<BodyStream>).readInto;
-  const cancel = (value as Partial<BodyStream>).cancel;
-  const iterator = (value as Partial<BodyStream>)[Symbol.asyncIterator];
-  return typeof readInto === "function" &&
-      typeof cancel === "function" &&
-      typeof iterator === "function"
-    ? { readInto, cancel }
+interface BodyObjectMethodsSnapshot {
+  readonly readInto: unknown;
+  readonly cancel: unknown;
+  readonly iteratorFactory: unknown;
+}
+
+function snapshotBodyObjectMethods(value: object): BodyObjectMethodsSnapshot {
+  return {
+    readInto: (value as Partial<BodyStream>).readInto,
+    cancel: (value as Partial<BodyStream>).cancel,
+    iteratorFactory: (value as Record<PropertyKey, unknown>)[asyncIteratorSymbol],
+  };
+}
+
+function bodyStreamMethods(snapshot: BodyObjectMethodsSnapshot): BodyStreamMethods | null {
+  return typeof snapshot.readInto === "function" &&
+      typeof snapshot.cancel === "function" &&
+      typeof snapshot.iteratorFactory === "function"
+    ? {
+        readInto: snapshot.readInto as BodyStream["readInto"],
+        cancel: snapshot.cancel as BodyStream["cancel"],
+      }
     : null;
 }
 
@@ -970,13 +1146,16 @@ export function extractBody(
   if (typeof input === "string") {
     assertEncodedStringSize(input);
     return {
-      controller: bufferedBodySource(textEncoderEncode.call(textEncoder, input), aggregateLimit),
+      controller: bufferedBodySource(
+        reflectApply(textEncoderEncode, textEncoder, [input]),
+        aggregateLimit,
+      ),
       contentType: "text/plain;charset=UTF-8",
     };
   }
   let arrayBufferLength: number | undefined;
   try {
-    arrayBufferLength = arrayBufferByteLength.call(input) as number;
+    arrayBufferLength = reflectApply(arrayBufferByteLength, input, []) as number;
   } catch {
     arrayBufferLength = undefined;
   }
@@ -988,7 +1167,7 @@ export function extractBody(
       controller: bufferedBodySource(copyArrayBuffer(buffer), aggregateLimit),
     };
   }
-  if (arrayBufferIsView.call(ArrayBuffer, input)) {
+  if (reflectApply(arrayBufferIsView, ArrayBufferIntrinsic, [input])) {
     const snapshot = intrinsicViewSnapshot(input as ArrayBufferView);
     assertBufferedBodySize(snapshot.byteLength);
     return {
@@ -996,7 +1175,8 @@ export function extractBody(
     };
   }
   if (typeof input === "object" && input !== null) {
-    const methods = bodyStreamMethods(input);
+    const methodSnapshot = snapshotBodyObjectMethods(input);
+    const methods = bodyStreamMethods(methodSnapshot);
     if (methods) {
       return {
         controller: new BodyController(
@@ -1009,9 +1189,9 @@ export function extractBody(
         ),
       };
     }
-    const iteratorFactory = (input as Partial<AsyncIterable<Uint8Array>>)[Symbol.asyncIterator];
+    const iteratorFactory = methodSnapshot.iteratorFactory;
     if (typeof iteratorFactory !== "function") {
-      throw new TypeError(
+      throw new TypeErrorIntrinsic(
         "HTTP body must be a string, ArrayBuffer, ArrayBufferView, BodyStream, or AsyncIterable",
       );
     }
@@ -1025,7 +1205,7 @@ export function extractBody(
       ),
     };
   }
-  throw new TypeError(
+  throw new TypeErrorIntrinsic(
     "HTTP body must be a string, ArrayBuffer, ArrayBufferView, BodyStream, or AsyncIterable",
   );
 }
@@ -1035,10 +1215,12 @@ export function bodyFromBinding(
   aggregateLimit?: number,
 ): BodyController {
   if (typeof input !== "object" || input === null) {
-    throw new TypeError("Private HTTP binding response body must be a BodyStream");
+    throw new TypeErrorIntrinsic("Private HTTP binding response body must be a BodyStream");
   }
-  const methods = bodyStreamMethods(input);
-  if (!methods) throw new TypeError("Private HTTP binding response body must be a BodyStream");
+  const methods = bodyStreamMethods(snapshotBodyObjectMethods(input));
+  if (!methods) {
+    throw new TypeErrorIntrinsic("Private HTTP binding response body must be a BodyStream");
+  }
   return new BodyController(
     new ExternalBodyStreamSource(input, methods.readInto, methods.cancel),
     aggregateLimit,
