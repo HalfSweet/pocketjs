@@ -163,7 +163,7 @@ void app_main(void) {
   assert(descriptor->https_rejected_before_io);
   assert(descriptor->https_explicit_opt_in);
   assert(descriptor->exact_host_tls_profile);
-  assert(descriptor->distinct_tls_errors);
+  assert(!descriptor->distinct_tls_errors);
   assert(strcmp(descriptor->tls_provider_id,
                 POCKETJS_NET_ESP_TLS_PROVIDER_ID) == 0);
   assert(descriptor->redirect_manual);

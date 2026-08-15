@@ -549,25 +549,36 @@ static pocketjs_net_esp_error_t map_errno(int code) {
 
 static pocketjs_net_esp_error_t map_tls_error(int tls_code,
                                               uint32_t certificate_flags) {
-  if ((certificate_flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) != 0U) {
+  static const pocketjs_net_tls_error_symbols_t symbols = {
+      .certificate_verify_failed = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED,
+      .bad_certificate = MBEDTLS_ERR_SSL_BAD_CERTIFICATE,
+      .ca_chain_required = MBEDTLS_ERR_SSL_CA_CHAIN_REQUIRED,
+      .bad_protocol_version = MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION,
+      .fatal_alert_message = MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE,
+      .allocation_failed = MBEDTLS_ERR_SSL_ALLOC_FAILED,
+      .hostname_mismatch_flag = MBEDTLS_X509_BADCERT_CN_MISMATCH,
+  };
+  switch (
+      pocketjs_net_classify_tls_error(tls_code, certificate_flags, &symbols)) {
+  case POCKETJS_NET_TLS_ERROR_CLASS_HOSTNAME_MISMATCH:
     return POCKETJS_NET_ESP_ERROR_TLS_HOSTNAME_MISMATCH;
-  }
-  if (certificate_flags != 0U) {
+  case POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID:
     return POCKETJS_NET_ESP_ERROR_TLS_CERTIFICATE_INVALID;
-  }
-  if (tls_code == MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION ||
-      tls_code == -MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION) {
+  case POCKETJS_NET_TLS_ERROR_CLASS_VERSION_UNSUPPORTED:
     return POCKETJS_NET_ESP_ERROR_TLS_VERSION_UNSUPPORTED;
-  }
-  if (tls_code == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE ||
-      tls_code == -MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE) {
+  case POCKETJS_NET_TLS_ERROR_CLASS_ALERT:
     return POCKETJS_NET_ESP_ERROR_TLS_ALERT;
-  }
-  if (tls_code == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
-      tls_code == -MBEDTLS_ERR_SSL_ALLOC_FAILED) {
+  case POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT:
     return POCKETJS_NET_ESP_ERROR_RESOURCE_LIMIT;
+  case POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED:
+  default:
+    return POCKETJS_NET_ESP_ERROR_TLS_HANDSHAKE_FAILED;
   }
-  return POCKETJS_NET_ESP_ERROR_TLS_HANDSHAKE_FAILED;
+}
+
+pocketjs_net_esp_error_t pocketjs_net_esp_transport_map_tls_error_for_test(
+    int tls_code, uint32_t certificate_flags) {
+  return map_tls_error(tls_code, certificate_flags);
 }
 
 static void read_tls_error(esp_tls_t *tls, int *cause, int *system_error,

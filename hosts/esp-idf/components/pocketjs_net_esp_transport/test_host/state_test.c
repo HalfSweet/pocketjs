@@ -6,6 +6,40 @@
 #include "transport_state.h"
 
 int main(void) {
+  static const pocketjs_net_tls_error_symbols_t tls_symbols = {
+      .certificate_verify_failed = -0x2700,
+      .bad_certificate = -0x7a00,
+      .ca_chain_required = -0x7680,
+      .bad_protocol_version = -0x6e80,
+      .fatal_alert_message = -0x7780,
+      .allocation_failed = -0x007f,
+      .hostname_mismatch_flag = 0x04U,
+  };
+  assert(pocketjs_net_classify_tls_error(-0x2700, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_classify_tls_error(0x2700, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_classify_tls_error(-0x1234, 0x04U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_HOSTNAME_MISMATCH);
+  assert(pocketjs_net_classify_tls_error(-0x1234, 0x08U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_classify_tls_error(-0x1234, UINT32_MAX, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED);
+  assert(pocketjs_net_classify_tls_error(0x7a00, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_classify_tls_error(-0x7680, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_classify_tls_error(0x6e80, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_VERSION_UNSUPPORTED);
+  assert(pocketjs_net_classify_tls_error(-0x7780, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_ALERT);
+  assert(pocketjs_net_classify_tls_error(0x007f, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT);
+  assert(pocketjs_net_classify_tls_error(-0x1234, 0U, &tls_symbols) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED);
+  assert(pocketjs_net_classify_tls_error(-0x2700, 0U, NULL) ==
+         POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED);
+
   pocketjs_net_token_gate_t gate = {0};
   assert(!pocketjs_net_token_gate_can_accept(&gate, 0));
   assert(pocketjs_net_token_gate_can_accept(&gate, 1));

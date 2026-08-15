@@ -156,6 +156,43 @@ bool pocketjs_net_operation_cancel_closes_connection(
          kind == POCKETJS_NET_TRANSPORT_OPERATION_WRITE;
 }
 
+static bool tls_code_matches(int actual, int expected) {
+  return expected != 0 &&
+         (actual == expected || (expected != INT_MIN && actual == -expected));
+}
+
+pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
+    int tls_code, uint32_t certificate_flags,
+    const pocketjs_net_tls_error_symbols_t *symbols) {
+  if (symbols == NULL) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED;
+  }
+
+  /* Mbed TLS uses UINT32_MAX when a verification result is unavailable. It is
+   * not a set of certificate-reason flags and must not imply CN mismatch. */
+  bool certificate_flags_available = certificate_flags != UINT32_MAX;
+  if (certificate_flags_available &&
+      (certificate_flags & symbols->hostname_mismatch_flag) != 0U) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_HOSTNAME_MISMATCH;
+  }
+  if ((certificate_flags_available && certificate_flags != 0U) ||
+      tls_code_matches(tls_code, symbols->certificate_verify_failed) ||
+      tls_code_matches(tls_code, symbols->bad_certificate) ||
+      tls_code_matches(tls_code, symbols->ca_chain_required)) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID;
+  }
+  if (tls_code_matches(tls_code, symbols->bad_protocol_version)) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_VERSION_UNSUPPORTED;
+  }
+  if (tls_code_matches(tls_code, symbols->fatal_alert_message)) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_ALERT;
+  }
+  if (tls_code_matches(tls_code, symbols->allocation_failed)) {
+    return POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT;
+  }
+  return POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED;
+}
+
 size_t pocketjs_net_round_robin_next(size_t current, size_t capacity) {
   return capacity == 0U || current >= capacity - 1U ? 0U : current + 1U;
 }

@@ -47,6 +47,29 @@ typedef enum {
   POCKETJS_NET_OPERATION_TERMINAL_TIMED_OUT,
 } pocketjs_net_operation_terminal_reason_t;
 
+typedef enum {
+  POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED = 0,
+  POCKETJS_NET_TLS_ERROR_CLASS_CERTIFICATE_INVALID,
+  POCKETJS_NET_TLS_ERROR_CLASS_HOSTNAME_MISMATCH,
+  POCKETJS_NET_TLS_ERROR_CLASS_VERSION_UNSUPPORTED,
+  POCKETJS_NET_TLS_ERROR_CLASS_ALERT,
+  POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT,
+} pocketjs_net_tls_error_class_t;
+
+/**
+ * Native TLS constants are supplied by the pinned platform build. Keeping the
+ * classifier independent of those headers makes the mapping host-testable.
+ */
+typedef struct {
+  int certificate_verify_failed;
+  int bad_certificate;
+  int ca_chain_required;
+  int bad_protocol_version;
+  int fatal_alert_message;
+  int allocation_failed;
+  uint32_t hostname_mismatch_flag;
+} pocketjs_net_tls_error_symbols_t;
+
 bool pocketjs_net_token_gate_can_accept(const pocketjs_net_token_gate_t *gate,
                                         uint64_t token);
 void pocketjs_net_token_gate_consume(pocketjs_net_token_gate_t *gate,
@@ -89,6 +112,10 @@ bool pocketjs_net_operation_ticket_matches(
     uint64_t requested_token);
 bool pocketjs_net_operation_cancel_closes_connection(
     pocketjs_net_transport_operation_kind_t kind);
+
+pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
+    int tls_code, uint32_t certificate_flags,
+    const pocketjs_net_tls_error_symbols_t *symbols);
 
 size_t pocketjs_net_round_robin_next(size_t current, size_t capacity);
 

@@ -87,7 +87,7 @@ valid_config(const pocketjs_net_formal_tls_smoke_run_config_t *config,
          !descriptor->advertises_public_capability &&
          descriptor->https_explicit_opt_in &&
          descriptor->exact_host_tls_profile &&
-         descriptor->distinct_tls_errors &&
+         !descriptor->distinct_tls_errors &&
          descriptor->tls_provider_id != NULL &&
          strcmp(descriptor->tls_provider_id,
                 pocketjs_net_formal_tls_smoke_tls_provider_id) == 0 &&

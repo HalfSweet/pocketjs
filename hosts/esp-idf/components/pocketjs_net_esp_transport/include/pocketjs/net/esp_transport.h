@@ -359,6 +359,12 @@ esp_err_t pocketjs_net_esp_transport_release_read_lease(
 
 const char *pocketjs_net_esp_error_name(pocketjs_net_esp_error_t error);
 
+#if defined(POCKETJS_NET_ESP_TRANSPORT_TEST_INTERNALS)
+/** Build-smoke seam for deterministic native TLS error mapping checks. */
+pocketjs_net_esp_error_t pocketjs_net_esp_transport_map_tls_error_for_test(
+    int tls_code, uint32_t certificate_flags);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

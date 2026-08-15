@@ -4,9 +4,26 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509.h"
 #include "pocketjs/net/esp_transport.h"
 
 void app_main(void) {
+  assert(pocketjs_net_esp_transport_map_tls_error_for_test(
+             MBEDTLS_ERR_X509_CERT_VERIFY_FAILED, 0U) ==
+         POCKETJS_NET_ESP_ERROR_TLS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_esp_transport_map_tls_error_for_test(
+             -MBEDTLS_ERR_X509_CERT_VERIFY_FAILED, 0U) ==
+         POCKETJS_NET_ESP_ERROR_TLS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_esp_transport_map_tls_error_for_test(
+             0, MBEDTLS_X509_BADCERT_CN_MISMATCH) ==
+         POCKETJS_NET_ESP_ERROR_TLS_HOSTNAME_MISMATCH);
+  assert(pocketjs_net_esp_transport_map_tls_error_for_test(
+             0, MBEDTLS_X509_BADCERT_NOT_TRUSTED) ==
+         POCKETJS_NET_ESP_ERROR_TLS_CERTIFICATE_INVALID);
+  assert(pocketjs_net_esp_transport_map_tls_error_for_test(-0x1234, 0U) ==
+         POCKETJS_NET_ESP_ERROR_TLS_HANDSHAKE_FAILED);
+
   const pocketjs_net_esp_transport_descriptor_t *descriptor =
       pocketjs_net_esp_transport_descriptor();
   assert(descriptor != NULL);
