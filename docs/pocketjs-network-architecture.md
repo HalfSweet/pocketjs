@@ -659,7 +659,11 @@ resources:
       udp: { datagramBytes: 1472 }
 ```
 
-每个 endpoint rule 是一个不可拆分的 `(protocol, host/address, port-or-range)` tuple，不对多个 protocol、host 和 port 做笛卡尔积。format 3 schema 对未知字段、非法 protocol、空 host、越界 port、反向 range 和重复 rule 报错。
+仓库中的 manifest validator 同时接受 format 2 和 format 3。format 3 resolver 按 manifest 顺序选择每个 `requiresOneOf` provider option，规范化 endpoint tuple，并把 `ResolvedNetworkPolicy`、`ResolvedNetworkProviders` 和 resource minimum 写入 `ResolvedBuildPlan` 的 `planHash` 输入。网络 plan 经 `extractHostBuildInputs()` 投影为深度冻结的 `HostNetworkBuildInputs`；自定义 native Host 的环境投影包含同一 `planHash` 和 canonical network JSON。
+
+**format 3 admission 基础不会自行发布网络 capability。** Stock target registry 仍不声明 `network.http.client`，compiler 的 HTTP value surface 仍保持 staged；只有公共 Guest Binding、descriptor 聚合和本节 conformance gate 完成后才移除该 gate。
+
+每个 endpoint rule 是一个不可拆分的 `(protocol, host/address, port-or-range)` tuple，不对多个 protocol、host 和 port 做笛卡尔积。format 3 schema 对未知字段、非法 protocol、空 host 和越界 port 报错；resolver 在规范化后拒绝反向 range 和重复 rule。
 
 v1 protocol token 固定为 `http`、`https`、`ws`、`wss`、`mqtt`、`mqtts`、`tcp`、`tcp-tls` 和 `udp`；Client 使用 host rule，Server/bind 使用 address rule。一个 rule 的 `port` 可以是单个整数、显式 `{ min, max }` 或 listen-only 的 `ephemeral`，不能是与其他字段组合的数组。
 
