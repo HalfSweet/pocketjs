@@ -1,6 +1,8 @@
 import { canonicalizeHttpUrl } from "./http-url.ts";
 
 const freezeNetworkValue = Object.freeze;
+const createNetworkValue = Object.create;
+const defineNetworkProperty = Object.defineProperty;
 const networkString = String;
 
 /** Shared support values and types for the PocketJS network package namespace.
@@ -184,34 +186,77 @@ export function getNetworkLimits(
     });
   }
 
-  const values = Object.create(null) as Record<string, Readonly<NetworkLimit>>;
-  for (const entry of snapshot.values) {
-    const limit = Object.create(null) as NetworkLimit;
-    Object.defineProperties(limit, {
-      default: { enumerable: true, value: entry.default },
-      hard: { enumerable: true, value: entry.hard },
-      minimum: { enumerable: true, value: entry.minimum },
-    });
-    Object.defineProperty(values, entry.name, {
+  const snapshotValues = snapshot.values;
+  const snapshotFeatures = snapshot.features;
+  const valueCount = snapshotValues.length;
+  const featureCount = snapshotFeatures.length;
+  const values = createNetworkValue(null) as Record<string, Readonly<NetworkLimit>>;
+  for (let index = 0; index < valueCount; index++) {
+    const entry = snapshotValues[index]!;
+    const limit = createNetworkValue(null) as NetworkLimit;
+    defineNetworkProperty(limit, "default", {
       configurable: false,
       enumerable: true,
       writable: false,
-      value: Object.freeze(limit),
+      value: entry.default,
+    });
+    defineNetworkProperty(limit, "hard", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: entry.hard,
+    });
+    defineNetworkProperty(limit, "minimum", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: entry.minimum,
+    });
+    defineNetworkProperty(values, entry.name, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: freezeNetworkValue(limit),
     });
   }
-  const features = Object.create(null) as Record<string, boolean>;
-  for (const feature of snapshot.features) {
-    Object.defineProperty(features, feature, {
+  const features = createNetworkValue(null) as Record<string, boolean>;
+  for (let index = 0; index < featureCount; index++) {
+    const feature = snapshotFeatures[index]!;
+    defineNetworkProperty(features, feature, {
       configurable: false,
       enumerable: true,
       writable: false,
       value: true,
     });
   }
-  return Object.freeze({
-    ...(protocol === undefined ? {} : { protocol }),
-    ...(role === undefined ? {} : { role }),
-    values: Object.freeze(values),
-    features: Object.freeze(features),
+  const result = createNetworkValue(null) as NetworkLimits;
+  if (protocol !== undefined) {
+    defineNetworkProperty(result, "protocol", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: protocol,
+    });
+  }
+  if (role !== undefined) {
+    defineNetworkProperty(result, "role", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: role,
+    });
+  }
+  defineNetworkProperty(result, "values", {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value: freezeNetworkValue(values),
   });
+  defineNetworkProperty(result, "features", {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value: freezeNetworkValue(features),
+  });
+  return freezeNetworkValue(result);
 }
