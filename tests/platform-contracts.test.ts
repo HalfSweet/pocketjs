@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   generatePocketManifestV2Schema,
   POCKET_MANIFEST_SCHEMA_ID,
-  type PocketManifestV2,
+  type PocketManifest,
 } from "../contracts/spec/pocket-manifest.ts";
 import {
   POCKET_CAPABILITIES,
@@ -28,7 +28,7 @@ const portableInput: unknown = await Bun.file(fixtureUrl("portable-psp")).json()
 const invalidExtraInput: unknown = await Bun.file(fixtureUrl("invalid-extra-field")).json();
 const touchInput: unknown = await Bun.file(fixtureUrl("requires-touch")).json();
 
-function manifest(input: unknown): PocketManifestV2 {
+function manifest(input: unknown): PocketManifest {
   const result = validatePocketManifest(input);
   if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
   return result.value;
