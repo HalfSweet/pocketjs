@@ -64,8 +64,8 @@ import {
   type PakBlob,
 } from "../framework/compiler/pak.ts";
 import {
+  createNetworkFactoryBuildContext,
   finalizeBundleArtifact,
-  networkFactoryDefines,
   selectBundleArtifactMode,
 } from "./network-bundle-factory.ts";
 
@@ -128,6 +128,9 @@ const bundleArtifactMode = selectBundleArtifactMode(
   buildPlan,
   networkFactoryRequested,
 );
+const networkPrivate = bundleArtifactMode === "network-factory"
+  ? createNetworkFactoryBuildContext(buildPlan!)
+  : undefined;
 
 if (!appArg) {
   console.error("usage: bun tools/build.ts <app.tsx | app name> [--plan=<resolved-plan.json>] [--network-factory] [--framework=solid|vue-vapor|octane] [--extra-chars=...] [--density=N]");
@@ -271,7 +274,10 @@ async function walk(file: string): Promise<void> {
   if (file.endsWith("/styles.generated.ts")) return;
   const src = await Bun.file(file).text();
   // Throws with a code frame on lint errors.
-  const res = await transformFile(file, src, framework, { features: buildPlan?.features });
+  const res = await transformFile(file, src, framework, {
+    features: buildPlan?.features,
+    networkPrivate,
+  });
   for (const s of res.classStrings) {
     if (!seenClass.has(s)) {
       seenClass.add(s);
@@ -466,7 +472,7 @@ if (!existsSync(frameworkConfig.rendererPath)) {
 // particular, external apps and renderer-solid.ts must share PocketJS's
 // browser-mode Solid runtime even when the app has its own node_modules.
 const result = await Bun.build({
-  entrypoints: [entry],
+  entrypoints: [networkPrivate?.bootstrapSpecifier ?? entry],
   outdir: DIST,
   naming: `${outName}.js`,
   format: "iife",
@@ -483,7 +489,6 @@ const result = await Bun.build({
     __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? 0),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),
     __POCKET_PIXEL_RATIO__: String(rasterDensity),
-    ...networkFactoryDefines(bundleArtifactMode),
     ...(framework === "vue-vapor"
       ? { document: "globalThis.__pocketDocument" }
       : {}),
@@ -494,6 +499,7 @@ const result = await Bun.build({
     entry,
     features: buildPlan?.features,
     generatedStyles,
+    networkPrivate,
   })],
 });
 if (!result.success) {
@@ -505,7 +511,11 @@ const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
 let bundleBytes = 0;
 if (bundle) {
   const bundledSource = await bundle.text();
-  const artifactSource = finalizeBundleArtifact(bundledSource, bundleArtifactMode);
+  const artifactSource = finalizeBundleArtifact(
+    bundledSource,
+    bundleArtifactMode,
+    networkPrivate,
+  );
   if (artifactSource !== bundledSource) {
     await Bun.write(bundle.path, artifactSource);
   }

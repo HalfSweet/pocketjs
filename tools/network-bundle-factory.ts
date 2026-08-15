@@ -2,13 +2,8 @@ import {
   verifyPlanHash,
   type ResolvedBuildPlan,
 } from "../framework/src/manifest/plan.ts";
-
-/** Private framework identifier replaced by Bun only for network factories. */
-export const NETWORK_BINDING_DEFINE = "__POCKET_NETWORK_BINDING_V1__";
-
-/** Lexical name introduced by the post-bundle factory wrapper. */
-export const NETWORK_BINDING_FACTORY_PARAMETER =
-  "__pocketNetworkBindingV1FactoryParameter";
+import type { NetworkPrivateBuildContext } from
+  "../framework/compiler/network-private.ts";
 
 export type BundleArtifactMode = "iife" | "network-factory";
 
@@ -40,35 +35,72 @@ export function selectBundleArtifactMode(
   return hasNetworkPlan ? "network-factory" : "iife";
 }
 
-/** Bun define entries required by the private lexical binding. */
-export function networkFactoryDefines(
-  mode: BundleArtifactMode,
-): Readonly<Record<string, string>> {
-  return mode === "network-factory"
-    ? { [NETWORK_BINDING_DEFINE]: NETWORK_BINDING_FACTORY_PARAMETER }
-    : {};
+/**
+ * Derive identifiers from the verified plan so they are artifact-specific but
+ * reproducible. They are transport names between the compiler and finalizer,
+ * never an application-facing ABI.
+ */
+export function createNetworkFactoryBuildContext(
+  plan: ResolvedBuildPlan,
+): NetworkPrivateBuildContext {
+  if (!verifyPlanHash(plan) || plan.network === undefined) {
+    throw new TypeError(
+      "PocketJS network factory: private context requires a verified network plan",
+    );
+  }
+  const digest = /^sha256:([0-9a-f]{64})$/.exec(plan.planHash)?.[1];
+  if (!digest) {
+    throw new TypeError("PocketJS network factory: unsupported plan checksum");
+  }
+  const token = digest.slice(0, 24);
+  return Object.freeze({
+    token,
+    bootstrapSpecifier: `pocketjs:network-bootstrap-v1-${token}`,
+    takeIdentifier: `__pocket_take_${token}`,
+    bindingIdentifier: `__pocket_binding_${token}`,
+    pendingIdentifier: `__pocket_pending_${token}`,
+    argumentsIdentifier: `__pocket_arguments_${token}`,
+  });
+}
+
+function assertContext(context: NetworkPrivateBuildContext): void {
+  if (
+    !/^[0-9a-f]{24}$/.test(context.token) ||
+    context.bootstrapSpecifier !==
+      `pocketjs:network-bootstrap-v1-${context.token}` ||
+    context.takeIdentifier !== `__pocket_take_${context.token}` ||
+    context.bindingIdentifier !== `__pocket_binding_${context.token}` ||
+    context.pendingIdentifier !== `__pocket_pending_${context.token}` ||
+    context.argumentsIdentifier !== `__pocket_arguments_${context.token}`
+  ) {
+    throw new TypeError("PocketJS network factory: invalid private build context");
+  }
 }
 
 /**
- * Wrap Bun's IIFE without evaluating it. The returned factory is deliberately
- * one-shot: its first call consumes the artifact before validation or app
- * initialization, so an exception can never be retried against altered Host
- * state. Re-evaluation is required to obtain a fresh factory.
+ * Wrap Bun's deferred bootstrap IIFE. The public factory deliberately has no
+ * formal binding parameter. A per-artifact one-shot capture function transfers
+ * the frozen Host table into the compiler-only framework module, clears both
+ * its pending slot and the factory argument, and then deletes itself before
+ * application initialization begins.
  */
-export function wrapNetworkBundleFactory(bundle: string): string {
+export function wrapNetworkBundleFactory(
+  bundle: string,
+  context: NetworkPrivateBuildContext,
+): string {
   if (typeof bundle !== "string" || bundle.length === 0) {
     throw new TypeError("PocketJS network factory: bundle source must not be empty");
   }
+  assertContext(context);
 
   const body = bundle
     .split("\n")
-    .map((line) => `    ${line}`)
+    .map((line) => `      ${line}`)
     .join("\n");
-
   return `(function () {
   "use strict";
   let __pocketNetworkFactoryConsumedV1 = false;
-  return function pocketNetworkBundleFactory(${NETWORK_BINDING_FACTORY_PARAMETER}) {
+  return function () {
     if (__pocketNetworkFactoryConsumedV1) {
       throw new TypeError("PocketJS network bundle factory was already invoked");
     }
@@ -77,14 +109,28 @@ export function wrapNetworkBundleFactory(bundle: string): string {
       throw new TypeError("PocketJS network bundle factory requires exactly one binding argument");
     }
     if (
-      ${NETWORK_BINDING_FACTORY_PARAMETER} === null ||
-      typeof ${NETWORK_BINDING_FACTORY_PARAMETER} !== "object" ||
-      !Object.isFrozen(${NETWORK_BINDING_FACTORY_PARAMETER})
+      arguments[0] === null ||
+      typeof arguments[0] !== "object" ||
+      !Object.isFrozen(arguments[0])
     ) {
       throw new TypeError("PocketJS network bundle factory requires a frozen binding table");
     }
+    let ${context.pendingIdentifier} = arguments[0];
+    let ${context.argumentsIdentifier} = arguments;
+    let ${context.takeIdentifier} = function () {
+      if (${context.pendingIdentifier} === undefined) {
+        throw new TypeError("PocketJS private network binding was already captured");
+      }
+      const value = ${context.pendingIdentifier};
+      ${context.pendingIdentifier} = undefined;
+      ${context.argumentsIdentifier}[0] = undefined;
+      ${context.argumentsIdentifier} = undefined;
+      ${context.takeIdentifier} = undefined;
+      return value;
+    };
+    return (function () {
 ${body}
-    return undefined;
+    }).call(undefined);
   };
 })()`;
 }
@@ -93,6 +139,11 @@ ${body}
 export function finalizeBundleArtifact(
   bundle: string,
   mode: BundleArtifactMode,
+  context?: NetworkPrivateBuildContext,
 ): string {
-  return mode === "network-factory" ? wrapNetworkBundleFactory(bundle) : bundle;
+  if (mode === "iife") return bundle;
+  if (context === undefined) {
+    throw new TypeError("PocketJS network factory: missing private build context");
+  }
+  return wrapNetworkBundleFactory(bundle, context);
 }

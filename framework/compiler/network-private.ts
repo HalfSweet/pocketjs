@@ -1,0 +1,23 @@
+/** Compiler-only module id. It is never a package export or a disk module. */
+export const NETWORK_PRIVATE_SPECIFIER = "pocketjs:internal/network-v1";
+
+/** All specifiers in this namespace are reserved to the PocketJS compiler. */
+export const NETWORK_PRIVATE_PREFIX = "pocketjs:internal/";
+
+/** Legacy source sentinel rewritten only while compiling engine-owned code. */
+export const NETWORK_BINDING_RESERVED_IDENTIFIER =
+  "__POCKET_NETWORK_BINDING_V1__";
+
+/** Name used by the unsafe first factory spike; retained only as an attack probe. */
+export const LEGACY_NETWORK_FACTORY_PARAMETER =
+  "__pocketNetworkBindingV1FactoryParameter";
+
+/** Per-artifact names shared by the compiler plugin and factory finalizer. */
+export interface NetworkPrivateBuildContext {
+  readonly token: string;
+  readonly bootstrapSpecifier: string;
+  readonly takeIdentifier: string;
+  readonly bindingIdentifier: string;
+  readonly pendingIdentifier: string;
+  readonly argumentsIdentifier: string;
+}
