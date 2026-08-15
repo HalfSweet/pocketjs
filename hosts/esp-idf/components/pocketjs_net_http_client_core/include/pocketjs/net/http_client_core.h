@@ -176,6 +176,8 @@ typedef struct {
   uint64_t headers_timeout_us;
   uint64_t idle_timeout_us;
   uint64_t total_timeout_us;
+  /** Final response fields as name + value + ": " + CRLF; zero uses max. */
+  size_t response_header_bytes_limit;
 } pocketjs_net_http_client_core_config_t;
 
 typedef struct {
@@ -380,7 +382,10 @@ bool pocketjs_net_http_client_core_abort(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token);
 
-/* At most max_transport_completions are delivered into the state machine. */
+/*
+ * At most max_transport_completions are delivered into the state machine.
+ * Either independent budget may be zero; both zero is an invalid no-op.
+ */
 bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
                                         uint64_t now_us,
                                         size_t max_native_steps,

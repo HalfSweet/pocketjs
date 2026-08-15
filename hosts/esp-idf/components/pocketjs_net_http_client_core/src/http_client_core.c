@@ -112,6 +112,7 @@ struct pocketjs_net_http_client_core {
   uint8_t response_header_storage
       [POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES];
   size_t response_header_storage_used;
+  size_t response_header_field_bytes;
   pocketjs_net_http_client_header_t
       response_headers[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADERS];
   size_t response_header_count;
@@ -280,7 +281,9 @@ static bool valid_config(const pocketjs_net_http_client_core_config_t *config) {
   if (config == NULL || config->transport_ops == NULL ||
       config->allow_endpoint == NULL || config->connect_timeout_us == 0U ||
       config->headers_timeout_us == 0U || config->idle_timeout_us == 0U ||
-      config->total_timeout_us == 0U) {
+      config->total_timeout_us == 0U ||
+      config->response_header_bytes_limit >
+          POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES) {
     return false;
   }
   const pocketjs_net_http_client_transport_ops_t *ops = config->transport_ops;
@@ -797,6 +800,7 @@ static bool response_on_status(void *context, unsigned http_minor,
   core->callback_error = 0;
   core->force_no_body = false;
   core->response_header_storage_used = 0U;
+  core->response_header_field_bytes = 0U;
   core->response_header_count = 0U;
   core->response_status = status_code;
   if (status_text_length > sizeof(core->response_header_storage)) {
@@ -827,6 +831,21 @@ static bool response_on_header(void *context, const uint8_t *name,
     core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL;
     return false;
   }
+  const size_t header_limit =
+      core->config.response_header_bytes_limit == 0U
+          ? POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES
+          : core->config.response_header_bytes_limit;
+  if (value_length > SIZE_MAX - 4U ||
+      name_length > SIZE_MAX - value_length - 4U) {
+    core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT;
+    return false;
+  }
+  const size_t field_bytes = name_length + value_length + 4U;
+  if (field_bytes > header_limit ||
+      core->response_header_field_bytes > header_limit - field_bytes) {
+    core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT;
+    return false;
+  }
   if (core->response_header_count >=
           POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADERS ||
       name_length > sizeof(core->response_header_storage) -
@@ -846,6 +865,7 @@ static bool response_on_header(void *context, const uint8_t *name,
     memcpy(value_copy, value, value_length);
   }
   core->response_header_storage_used += value_length;
+  core->response_header_field_bytes += field_bytes;
   core->response_headers[core->response_header_count++] =
       (pocketjs_net_http_client_header_t){
           .name = {.data = name_copy, .length = name_length},
@@ -1731,6 +1751,10 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_init(
   memset(storage->bytes, 0, sizeof(storage->bytes));
   pocketjs_net_http_client_core_t *core = (void *)storage->bytes;
   core->config = *config;
+  if (core->config.response_header_bytes_limit == 0U) {
+    core->config.response_header_bytes_limit =
+        POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES;
+  }
   core->lifecycle_generation = 1U;
   core->magic = CORE_MAGIC;
   *out_core = core;
@@ -1866,8 +1890,7 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
                                         size_t max_native_steps,
                                         size_t max_transport_completions) {
   if (!core_public_entry_allowed(core) || now_us == 0U ||
-      max_native_steps == 0U ||
-      max_transport_completions == 0U) {
+      (max_native_steps == 0U && max_transport_completions == 0U)) {
     return false;
   }
   core->now_us = now_us;
@@ -1918,15 +1941,17 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
     progress_terminal(core);
   }
 
-  pocketjs_net_http_client_transport_result_t pump_result =
-      core->config.transport_ops->pump(core->config.transport_context, now_us,
-                                       max_native_steps);
-  if (pump_result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
-    poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_TRANSPORT_PUMP,
-                (int32_t)pump_result);
-    if (core->state != CORE_IDLE && !core->terminal_selected) {
-      select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
-                     (int32_t)pump_result);
+  if (max_native_steps != 0U) {
+    pocketjs_net_http_client_transport_result_t pump_result =
+        core->config.transport_ops->pump(core->config.transport_context, now_us,
+                                         max_native_steps);
+    if (pump_result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+      poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_TRANSPORT_PUMP,
+                  (int32_t)pump_result);
+      if (core->state != CORE_IDLE && !core->terminal_selected) {
+        select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                       (int32_t)pump_result);
+      }
     }
   }
 
