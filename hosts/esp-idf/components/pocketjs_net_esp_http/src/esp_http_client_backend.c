@@ -129,6 +129,7 @@ struct pocketjs_net_esp_http_client {
 
   client_state_t state;
   request_snapshot_t request;
+  uint32_t last_operation_id;
   atomic_bool cancel_requested;
   atomic_bool closing;
   atomic_uint_fast32_t active_operation_id;
@@ -828,6 +829,11 @@ execute_request(pocketjs_net_esp_http_client_t *client, esp_err_t *out_cause,
     context.cause = ESP_ERR_INVALID_RESPONSE;
     goto finish;
   }
+  if (content_length < -1) {
+    context.failure = POCKETJS_NET_ERROR_HTTP_PROTOCOL_ERROR;
+    context.cause = ESP_ERR_INVALID_RESPONSE;
+    goto finish;
+  }
   if (status < 200) {
     context.failure = POCKETJS_NET_ERROR_UNSUPPORTED;
     context.cause = ESP_ERR_NOT_SUPPORTED;
@@ -1068,6 +1074,7 @@ esp_err_t pocketjs_net_esp_http_client_create(
   BaseType_t core = config == NULL ? tskNO_AFFINITY : config->worker_core;
   if (stack_bytes < POCKETJS_NET_ESP_HTTP_MIN_WORKER_STACK_BYTES ||
       stack_bytes > POCKETJS_NET_ESP_HTTP_MAX_WORKER_STACK_BYTES ||
+      priority >= (UBaseType_t)configMAX_PRIORITIES ||
       (core != tskNO_AFFINITY && (core < 0 || core >= portNUM_PROCESSORS))) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -1237,6 +1244,10 @@ esp_err_t pocketjs_net_esp_http_client_start(
     xSemaphoreGive(client->mutex);
     return ESP_ERR_INVALID_STATE;
   }
+  if (request->operation_id <= client->last_operation_id) {
+    xSemaphoreGive(client->mutex);
+    return ESP_ERR_INVALID_ARG;
+  }
 
   request_snapshot_t *snapshot = &client->request;
   snapshot->operation_id = request->operation_id;
@@ -1262,26 +1273,20 @@ esp_err_t pocketjs_net_esp_http_client_start(
           ? POCKETJS_NET_ESP_HTTP_MAX_RESPONSE_BODY_BYTES
           : request->max_response_body_bytes;
   snapshot->https = https;
+
+  command_t command = COMMAND_START;
+  if (xQueueSend(client->commands, &command, 0) != pdTRUE) {
+    xSemaphoreGive(client->mutex);
+    return ESP_ERR_NO_MEM;
+  }
+
   client->state = CLIENT_STATE_QUEUED;
+  client->last_operation_id = request->operation_id;
   atomic_store_explicit(&client->active_operation_id, request->operation_id,
                         memory_order_release);
   atomic_store_explicit(&client->cancel_requested, false, memory_order_release);
   ++client->stats.submitted_requests;
   xSemaphoreGive(client->mutex);
-
-  command_t command = COMMAND_START;
-  if (xQueueSend(client->commands, &command, 0) != pdTRUE) {
-    if (xSemaphoreTake(client->mutex, portMAX_DELAY) == pdTRUE) {
-      client->state = CLIENT_STATE_IDLE;
-      --client->stats.submitted_requests;
-      atomic_store_explicit(&client->active_operation_id, 0,
-                            memory_order_release);
-      atomic_store_explicit(&client->cancel_requested, false,
-                            memory_order_release);
-      xSemaphoreGive(client->mutex);
-    }
-    return ESP_ERR_NO_MEM;
-  }
   return ESP_OK;
 }
 

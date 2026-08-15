@@ -69,6 +69,12 @@ typedef struct {
 } pocketjs_net_http_header_t;
 
 typedef struct {
+  /**
+   * Non-zero cancellation token chosen by the owner. Successfully accepted
+   * requests must use values that strictly increase for this client lifetime.
+   * A failed start does not consume its value. UINT32_MAX may be accepted once;
+   * after that, no further request can be accepted by the same client.
+   */
   uint32_t operation_id;
   const char *url;
   const char *method;
@@ -80,6 +86,12 @@ typedef struct {
   size_t max_response_body_bytes;
 } pocketjs_net_esp_http_request_t;
 
+/**
+ * Notification hook called synchronously by the fixed worker after it queues
+ * an event. It must return promptly, must not block or re-enter this client
+ * through any API, and must not destroy the client. It should only signal the
+ * product-owned scheduler that receive work is available.
+ */
 typedef void (*pocketjs_net_wake_fn)(void *context);
 typedef bool (*pocketjs_net_wall_clock_trusted_fn)(void *context);
 
@@ -91,6 +103,8 @@ typedef struct {
   void *wall_clock_context;
   const char *worker_task_name;
   uint32_t worker_stack_bytes;
+  /** Zero selects the backend default; explicit values must be lower than
+   * configMAX_PRIORITIES. */
   UBaseType_t worker_priority;
   BaseType_t worker_core;
 } pocketjs_net_esp_http_client_config_t;
@@ -184,6 +198,12 @@ esp_err_t pocketjs_net_esp_http_client_create(
 /**
  * Snapshot the request synchronously and queue it for the native worker. At
  * most one request is accepted until its terminal event has been received.
+ * Admission and the non-blocking COMMAND_START enqueue share the owner-state
+ * mutex. ESP_OK consumes operation_id; every failure leaves it available for a
+ * retry. Each consumed ID must be strictly greater than every previously
+ * consumed ID for this client. Consuming UINT32_MAX permanently exhausts the
+ * client's ID space, so the owner must destroy and create a new client before
+ * starting another request.
  */
 esp_err_t pocketjs_net_esp_http_client_start(
     pocketjs_net_esp_http_client_t *client,
@@ -195,8 +215,13 @@ esp_err_t pocketjs_net_esp_http_client_start(
  * with terminal receipt and the next start. It never touches the ESP HTTP
  * Client handle or performs I/O. An in-progress DNS, connect, TLS, read or
  * write call cannot be interrupted; in particular, synchronous DNS may not
- * honor io_timeout_ms. ESP_OK means cancellation won the terminal claim and
- * the exactly-once terminal event will report ABORTED.
+ * honor io_timeout_ms. operation_id is the token of a request whose start
+ * returned ESP_OK. The token can cancel only that request while it is queued or
+ * running; it is invalid for cancellation after the worker claims the terminal
+ * event. Strictly increasing IDs prevent an old token from naming a future
+ * request. ESP_OK means cancellation won the terminal claim and the exactly-
+ * once terminal event will report ABORTED. ESP_ERR_NOT_FOUND means the token is
+ * not the cancellable active request or the terminal claim already won.
  */
 esp_err_t
 pocketjs_net_esp_http_client_cancel(pocketjs_net_esp_http_client_t *client,

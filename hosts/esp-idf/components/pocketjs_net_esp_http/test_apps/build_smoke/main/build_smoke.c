@@ -25,7 +25,24 @@ void app_main(void) {
       .worker_core = tskNO_AFFINITY,
   };
   pocketjs_net_esp_http_client_t *client = NULL;
+
+  config.worker_priority = (UBaseType_t)configMAX_PRIORITIES;
+  assert(pocketjs_net_esp_http_client_create(&config, &client) ==
+         ESP_ERR_INVALID_ARG);
+  assert(client == NULL);
+
+  /* Zero retains its documented default-priority meaning. */
+  config.worker_priority = 0;
   ESP_ERROR_CHECK(pocketjs_net_esp_http_client_create(&config, &client));
   assert(client != NULL);
+
+  pocketjs_net_esp_http_request_t zero_token_request = {
+      .operation_id = 0,
+      .url = "http://127.0.0.1/",
+      .method = "GET",
+  };
+  assert(pocketjs_net_esp_http_client_start(client, &zero_token_request) ==
+         ESP_ERR_INVALID_ARG);
+
   pocketjs_net_esp_http_client_destroy(client);
 }
