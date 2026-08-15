@@ -11,6 +11,7 @@ void app_main(void) {
       pocketjs_net_esp_transport_descriptor();
   assert(descriptor != NULL);
   assert(strcmp(descriptor->id, POCKETJS_NET_ESP_TRANSPORT_ID) == 0);
+  assert(strlen(POCKETJS_NET_ESP_TLS_PROVIDER_ID) != 0U);
   assert(descriptor->experimental);
   assert(!descriptor->advertises_public_capability);
   assert(descriptor->ipv4);
@@ -49,6 +50,15 @@ void app_main(void) {
   assert(descriptor->pocketjs_owned_instance_bytes > 0U);
   assert(descriptor->lwip_static_callback_messages == 8U);
   assert(descriptor->max_dns_candidates == 4U);
+
+  const pocketjs_net_esp_transport_config_t disabled = {
+      .tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_DISABLED,
+  };
+  assert(pocketjs_net_esp_transport_validate_config(&disabled) == ESP_OK);
+  pocketjs_net_esp_transport_config_t invalid = disabled;
+  invalid.tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA;
+  assert(pocketjs_net_esp_transport_validate_config(&invalid) ==
+         ESP_ERR_INVALID_ARG);
 
   assert(strcmp(pocketjs_net_esp_error_name(
                     POCKETJS_NET_ESP_ERROR_TLS_CERTIFICATE_INVALID),

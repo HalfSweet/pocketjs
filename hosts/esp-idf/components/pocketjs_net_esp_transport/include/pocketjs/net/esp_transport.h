@@ -14,6 +14,8 @@ extern "C" {
 
 #define POCKETJS_NET_ESP_TRANSPORT_ID                                          \
   "pocketjs.net.esp-idf.transport.v1.experimental"
+#define POCKETJS_NET_ESP_TLS_PROVIDER_ID                                       \
+  "pocketjs.net.esp-idf.esp-tls.v1.experimental"
 
 #define POCKETJS_NET_ESP_TRANSPORT_MAX_CONNECTIONS 4U
 #define POCKETJS_NET_ESP_TRANSPORT_MAX_OPERATIONS 8U
@@ -238,6 +240,10 @@ typedef struct {
 
 const pocketjs_net_esp_transport_descriptor_t *
 pocketjs_net_esp_transport_descriptor(void);
+
+/** Validate and parse a Host TLS profile without creating transport state. */
+esp_err_t pocketjs_net_esp_transport_validate_config(
+    const pocketjs_net_esp_transport_config_t *config);
 
 /**
  * create fixes the calling task as owner. The owner must be a product task,

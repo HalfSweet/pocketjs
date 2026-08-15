@@ -802,11 +802,25 @@ pocketjs_net_esp_transport_descriptor(void) {
   return &s_descriptor;
 }
 
+esp_err_t pocketjs_net_esp_transport_validate_config(
+    const pocketjs_net_esp_transport_config_t *config) {
+  if (config == NULL || !tls_config_shape_valid(config)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (config->tls_trust_source ==
+          POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA &&
+      !validate_pinned_ca(config->host_pinned_ca_pem,
+                          config->host_pinned_ca_pem_bytes)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  return ESP_OK;
+}
+
 esp_err_t pocketjs_net_esp_transport_create(
     const pocketjs_net_esp_transport_config_t *config,
     pocketjs_net_esp_transport_t **out_transport) {
-  if (config == NULL || out_transport == NULL || *out_transport != NULL ||
-      !tls_config_shape_valid(config)) {
+  if (out_transport == NULL || *out_transport != NULL ||
+      pocketjs_net_esp_transport_validate_config(config) != ESP_OK) {
     return ESP_ERR_INVALID_ARG;
   }
 
@@ -829,11 +843,6 @@ esp_err_t pocketjs_net_esp_transport_create(
            config->host_pinned_ca_pem_bytes);
     transport->pinned_ca[config->host_pinned_ca_pem_bytes] = '\0';
     transport->pinned_ca_bytes = config->host_pinned_ca_pem_bytes;
-    if (!validate_pinned_ca(transport->pinned_ca, transport->pinned_ca_bytes)) {
-      memset(transport->pinned_ca, 0, sizeof(transport->pinned_ca));
-      free(transport);
-      return ESP_ERR_INVALID_ARG;
-    }
   }
   for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_CONNECTIONS;
        ++index) {
