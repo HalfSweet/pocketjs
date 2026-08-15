@@ -9,9 +9,9 @@ extern const uint8_t embedded_factory_start[]
 const uint8_t *const pocketjs_net_formal_smoke_factory_bytes =
     embedded_factory_start;
 const size_t pocketjs_net_formal_smoke_factory_length =
-    464962U;
+    470681U;
 const size_t pocketjs_net_formal_smoke_factory_storage_length =
-    464963U;
+    470682U;
 
 const char pocketjs_net_formal_smoke_plan_hash[] = "sha256:04856acc82e7aa31648b015e62a63a4cadf6f48a3d1d3f46f3987539520b63fd";
 const uint8_t pocketjs_net_formal_smoke_plan_hash_bytes
@@ -29,11 +29,11 @@ const uint16_t pocketjs_net_formal_smoke_feature_count =
     1U;
 
 const char pocketjs_net_formal_smoke_factory_sha256[] =
-    "sha256:2958460d6e54176aeb1d79ce5500b6611eb04c37fc3c40a12b47d0acbf12fc04";
+    "sha256:d27e21e3f6eed28679a38fb4590b0e9cb71813fc407b447446eb96163edf6421";
 const uint8_t pocketjs_net_formal_smoke_factory_sha256_bytes[32] = {
-    0x29, 0x58, 0x46, 0x0d, 0x6e, 0x54, 0x17, 0x6a, 0xeb, 0x1d, 0x79, 0xce,
-    0x55, 0x00, 0xb6, 0x61, 0x1e, 0xb0, 0x4c, 0x37, 0xfc, 0x3c, 0x40, 0xa1,
-    0x2b, 0x47, 0xd0, 0xac, 0xbf, 0x12, 0xfc, 0x04,
+    0xd2, 0x7e, 0x21, 0xe3, 0xf6, 0xee, 0xd2, 0x86, 0x79, 0xa3, 0x8f, 0xb4,
+    0x59, 0x0b, 0x0e, 0x9c, 0xb7, 0x18, 0x13, 0xfc, 0x40, 0x7b, 0x44, 0x74,
+    0x46, 0xeb, 0x96, 0x16, 0x3e, 0xdf, 0x64, 0x21,
 };
 
 const pocketjs_net_formal_smoke_endpoint_t
@@ -53,5 +53,5 @@ _Static_assert(sizeof(pocketjs_net_formal_smoke_plan_hash) ==
                    sizeof("sha256:04856acc82e7aa31648b015e62a63a4cadf6f48a3d1d3f46f3987539520b63fd"),
                "plan hash text length drifted");
 _Static_assert(sizeof(pocketjs_net_formal_smoke_factory_sha256) ==
-                   sizeof("sha256:2958460d6e54176aeb1d79ce5500b6611eb04c37fc3c40a12b47d0acbf12fc04"),
+                   sizeof("sha256:d27e21e3f6eed28679a38fb4590b0e9cb71813fc407b447446eb96163edf6421"),
                "artifact hash text length drifted");

@@ -293,9 +293,10 @@ async function buildFactory(plan: ResolvedBuildPlan): Promise<Uint8Array> {
     if (exitCode !== 0) {
       throw new Error(`formal smoke factory build failed:\n${stdout}\n${stderr}`);
     }
-    const source = new Uint8Array(await Bun.file(
+    const builtSource = await Bun.file(
       join(output, "esp-formal-network-smoke.js"),
-    ).arrayBuffer());
+    ).text();
+    const source = textBytes(builtSource.replace(/[\t ]+$/gm, ""));
     if (source.length === 0 || source.includes(0)) {
       throw new Error("formal smoke factory source is empty or contains an interior NUL");
     }
