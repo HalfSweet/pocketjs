@@ -35,6 +35,22 @@ unreported prefix, and a cancelled read cannot reuse an HTTP/1 connection at an
 unknown response boundary. Resolve cancellation retains only its quarantined
 DNS context; cancelling close leaves the connection open for an explicit retry.
 
+Poison recovery is separate from healthy shutdown. An owner may call
+`pocketjs_net_esp_transport_destroy_poisoned` only after the sole Core using the
+dedicated transport has reported poison and shutdown has stopped admission.
+The call abandons stuck completion/lease accounting and closes every native
+connection after a tcpip-thread barrier. It does not free a raw DNS lookup's
+callback context early: until lwIP delivers that lookup's late callback, poison
+teardown returns `ESP_ERR_NOT_FINISHED` and the owner retries. A successful
+poison teardown invalidates that Core's transport context, so its owner confirms
+transport shutdown before calling any other Core entry point.
+
+The transport owner is a product task, never lwIP's tcpip task, because both
+destroy paths use a synchronous tcpip callback barrier. The component accepts
+only stock tcpip-thread DNS callbacks. A build with
+`CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM` fails at compile time because an
+external resolver can deliver a late callback outside that barrier.
+
 DNS submission uses one pre-acquired lwIP static callback message per DNS
 context and `dns_gethostbyname_addrtype(..., LWIP_DNS_ADDRTYPE_IPV4)`. The
 component does not call synchronous `getaddrinfo` for a hostname. Cancellation
