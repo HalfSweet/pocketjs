@@ -9,6 +9,8 @@ const networkString = String;
  * Protocol capabilities live in the sibling protocol modules.
  */
 
+import { queryInstalledNetworkLimits } from "./network-limits.ts";
+
 export type NetworkData = string | ArrayBuffer | ArrayBufferView;
 
 export type NetworkProtocol = "http" | "websocket" | "mqtt" | "tcp" | "udp";
@@ -163,12 +165,53 @@ export {
  * The public fallback fails explicitly and never probes `globalThis.net`.
  */
 export function getNetworkLimits(
-  _protocol?: NetworkProtocol,
-  _role?: NetworkRole,
+  protocol?: NetworkProtocol,
+  role?: NetworkRole,
 ): NetworkLimits {
-  throw new NetworkError("Network limits are unavailable without an admitted network binding", {
-    category: "runtime",
-    code: "unsupported",
-    operation: "getNetworkLimits",
+  if (protocol !== undefined && protocol !== "http" && protocol !== "websocket" &&
+    protocol !== "mqtt" && protocol !== "tcp" && protocol !== "udp") {
+    throw new TypeError("PocketJS getNetworkLimits protocol is invalid");
+  }
+  if (role !== undefined && role !== "client" && role !== "server") {
+    throw new TypeError("PocketJS getNetworkLimits role is invalid");
+  }
+  const snapshot = queryInstalledNetworkLimits(protocol, role);
+  if (snapshot === undefined || snapshot.features.length === 0) {
+    throw new NetworkError("Network limits are unavailable for an unadmitted scope", {
+      category: "runtime",
+      code: "unsupported",
+      operation: "getNetworkLimits",
+    });
+  }
+
+  const values = Object.create(null) as Record<string, Readonly<NetworkLimit>>;
+  for (const entry of snapshot.values) {
+    const limit = Object.create(null) as NetworkLimit;
+    Object.defineProperties(limit, {
+      default: { enumerable: true, value: entry.default },
+      hard: { enumerable: true, value: entry.hard },
+      minimum: { enumerable: true, value: entry.minimum },
+    });
+    Object.defineProperty(values, entry.name, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: Object.freeze(limit),
+    });
+  }
+  const features = Object.create(null) as Record<string, boolean>;
+  for (const feature of snapshot.features) {
+    Object.defineProperty(features, feature, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: true,
+    });
+  }
+  return Object.freeze({
+    ...(protocol === undefined ? {} : { protocol }),
+    ...(role === undefined ? {} : { role }),
+    values: Object.freeze(values),
+    features: Object.freeze(features),
   });
 }
