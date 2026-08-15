@@ -71,10 +71,39 @@ function frozenBinding(
   features: readonly string[] = [HTTP_FEATURE],
   alpnProtocols?: readonly string[],
 ): HttpClientPrivateBinding {
+  const featureSet = Object.freeze([...features]);
+  const values = Object.freeze([
+    Object.freeze({
+      name: "http.bufferedBodyBytes",
+      default: 8 * 1024 * 1024,
+      hard: 8 * 1024 * 1024,
+      minimum: 1,
+    }),
+    Object.freeze({
+      name: "http.headerBytes",
+      default: 64 * 1024,
+      hard: 64 * 1024,
+      minimum: 1,
+    }),
+    Object.freeze({
+      name: "http.maxBodyChunkBytes",
+      default: 64 * 1024,
+      hard: 64 * 1024,
+      minimum: 1,
+    }),
+    Object.freeze({ name: "http.maxOperations", default: 8, hard: 8, minimum: 1 }),
+    Object.freeze({
+      name: "runtime.nativeBufferBytes",
+      default: 512 * 1024,
+      hard: 512 * 1024,
+      minimum: 1,
+    }),
+  ]);
   return Object.freeze({
     abiMajor: NETWORK_V1_ABI_MAJOR,
     abiMinor: NETWORK_V1_ABI_MINOR,
-    featureSet: Object.freeze([...features]),
+    featureSet,
+    httpClientLimits: Object.freeze({ values, features: featureSet }),
     ...(alpnProtocols === undefined
       ? {}
       : { alpnProtocols: Object.freeze([...alpnProtocols]) }),
@@ -832,12 +861,7 @@ describe("private lexical HTTP binding seam", () => {
   });
 
   test("requires one frozen ABI-compatible table and captures a safe snapshot", () => {
-    const mutable = {
-      abiMajor: NETWORK_V1_ABI_MAJOR,
-      abiMinor: NETWORK_V1_ABI_MINOR,
-      featureSet: Object.freeze([HTTP_FEATURE]),
-      start: () => { throw new Error("unused"); },
-    };
+    const mutable = { ...frozenBinding(() => { throw new Error("unused"); }) };
     expect(() => installHttpClientBindingForTesting(mutable)).toThrow(/frozen/);
 
     const binding = frozenBinding(() => { throw new Error("unused"); });
@@ -851,6 +875,42 @@ describe("private lexical HTTP binding seam", () => {
     expect(() => installHttpClientBindingForTesting(binding)).toThrow(/already installed/);
     cleanup();
     expect(getHttpClientBinding()).toBeUndefined();
+  });
+
+  test("rejects binding accessors without invoking them and bypasses a hostile call property", async () => {
+    const base = frozenBinding((command) => okOperation(command));
+    let limitsGetterCalls = 0;
+    const accessorBinding = { ...base } as Record<PropertyKey, unknown>;
+    Object.defineProperty(accessorBinding, "httpClientLimits", {
+      enumerable: true,
+      get() {
+        limitsGetterCalls++;
+        return base.httpClientLimits;
+      },
+    });
+    Object.freeze(accessorBinding);
+    expect(() => installHttpClientBindingForTesting(
+      accessorBinding as unknown as HttpClientPrivateBinding,
+    )).toThrow(/own data property/);
+    expect(limitsGetterCalls).toBe(0);
+
+    let callGetterCalls = 0;
+    const start = ((command: HttpRequestStartCommand) => okOperation(command)) as
+      HttpClientPrivateBinding["start"];
+    Object.defineProperty(start, "call", {
+      get() {
+        callGetterCalls++;
+        throw new Error("hostile Function.call getter must remain unreachable");
+      },
+    });
+    const cleanup = installHttpClientBindingForTesting(frozenBinding(start));
+    try {
+      const response = await http.fetch("http://example.test/");
+      expect(response.status).toBe(200);
+      expect(callGetterCalls).toBe(0);
+    } finally {
+      cleanup();
+    }
   });
 
   test("marshals a numeric request command and wraps Host values in SDK identities", async () => {

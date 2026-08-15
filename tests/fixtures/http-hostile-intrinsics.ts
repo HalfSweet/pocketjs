@@ -11,10 +11,22 @@ import {
 } from "../../framework/src/net/http-binding.ts";
 
 let starts = 0;
+const featureSet = Object.freeze(["network.http.client"]);
 const cleanup = installHttpClientBindingForTesting(Object.freeze({
   abiMajor: NETWORK_V1_ABI_MAJOR,
   abiMinor: NETWORK_V1_ABI_MINOR,
-  featureSet: Object.freeze(["network.http.client"]),
+  featureSet,
+  httpClientLimits: Object.freeze({
+    values: Object.freeze([
+      Object.freeze({
+        name: "http.maxBodyChunkBytes",
+        default: 64 * 1024,
+        hard: 64 * 1024,
+        minimum: 1,
+      }),
+    ]),
+    features: featureSet,
+  }),
   start() {
     starts++;
     throw new Error("native start must remain unreachable");
