@@ -440,6 +440,33 @@ function fail(label: string, detail: string): never {
   throw new TypeError(`PocketJS network ABI: ${label} ${detail}`);
 }
 
+const NETWORK_V1_TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
+const NETWORK_V1_TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
+  NETWORK_V1_TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+)!.get!;
+const NETWORK_V1_UINT8_ARRAY_SET = Uint8Array.prototype.set;
+
+function networkV1Uint8ArrayByteLength(value: unknown, label: string): number {
+  if (!(value instanceof Uint8Array)) fail(label, "must be a Uint8Array window");
+  try {
+    return Reflect.apply(NETWORK_V1_TYPED_ARRAY_BYTE_LENGTH, value, []);
+  } catch {
+    fail(label, "must expose valid Uint8Array intrinsic slots");
+  }
+}
+
+function networkV1CopyUint8Array(value: unknown, label: string): Uint8Array {
+  const byteLength = networkV1Uint8ArrayByteLength(value, label);
+  const copy = new Uint8Array(byteLength);
+  try {
+    Reflect.apply(NETWORK_V1_UINT8_ARRAY_SET, copy, [value]);
+  } catch {
+    fail(label, "could not be copied from Uint8Array intrinsic slots");
+  }
+  return copy;
+}
+
 function assertIntegerInRange(
   value: unknown,
   minimum: number,
@@ -635,7 +662,7 @@ export function networkV1FeatureIdsFromBuildPlan(
 }
 
 function assertPlanHash(value: Uint8Array, label: string): void {
-  if (!(value instanceof Uint8Array) || value.byteLength !== NETWORK_V1_PLAN_HASH_BYTES) {
+  if (networkV1Uint8ArrayByteLength(value, label) !== NETWORK_V1_PLAN_HASH_BYTES) {
     fail(label, `must contain exactly ${NETWORK_V1_PLAN_HASH_BYTES} bytes`);
   }
 }
@@ -665,13 +692,19 @@ function snapshotHandshake(value: NetworkV1Handshake, label: string): NetworkV1H
   assertNetworkV1RuntimeGeneration(runtimeGeneration, `${label}.runtimeGeneration`);
   assertPlanHash(rawPlanHash as Uint8Array, `${label}.planHash`);
   if (!Array.isArray(rawFeatureIds)) fail(`${label}.featureIds`, "must be an array");
-  const featureIds = Array.from(rawFeatureIds as readonly number[]);
+  if (rawFeatureIds.length > NETWORK_V1_FEATURE_IDS.length) {
+    fail(`${label}.featureIds`, "cannot exceed the known feature count");
+  }
+  const featureIds: number[] = [];
+  for (let index = 0; index < rawFeatureIds.length; index += 1) {
+    featureIds.push((rawFeatureIds as readonly number[])[index]!);
+  }
   assertFeatureIds(featureIds, `${label}.featureIds`);
   return {
     abiMajor,
     abiMinor,
     runtimeGeneration,
-    planHash: Uint8Array.from(rawPlanHash as Uint8Array),
+    planHash: networkV1CopyUint8Array(rawPlanHash, `${label}.planHash`),
     featureIds,
   };
 }
@@ -1058,18 +1091,19 @@ export function assertNetworkV1BorrowedInput(
 ): void {
   assertIntegerInRange(maxBytes, 1, NETWORK_V1_UINT32_MAX, "borrowedInput.maxBytes");
   if (input.kind !== expectedKind) fail("borrowedInput.kind", "does not match the command");
-  if (!(input.bytes instanceof Uint8Array)) {
-    fail("borrowedInput.bytes", "must be a Uint8Array window");
-  }
+  const byteLength = networkV1Uint8ArrayByteLength(
+    input.bytes,
+    "borrowedInput.bytes",
+  );
   assertIntegerInRange(
-    input.bytes.byteLength,
+    byteLength,
     1,
     maxBytes,
     "borrowedInput.byteLength",
   );
   if (exactBytes !== undefined) {
     assertIntegerInRange(exactBytes, 1, maxBytes, "borrowedInput.exactBytes");
-    if (input.bytes.byteLength !== exactBytes) {
+    if (byteLength !== exactBytes) {
       fail("borrowedInput.byteLength", "does not match normalized metadata");
     }
   }
@@ -1085,7 +1119,8 @@ export function assertNetworkV1LeaseReadInto(
   assertIntegerInRange(leaseByteLength, 1, NETWORK_V1_UINT32_MAX, "leaseByteLength");
   assertIntegerInRange(command.offset, 0, leaseByteLength, "leaseRead.offset");
   assertIntegerInRange(command.maxBytes, 1, NETWORK_V1_UINT32_MAX, "leaseRead.maxBytes");
-  if (!(destination instanceof Uint8Array) || destination.byteLength !== command.maxBytes) {
+  if (networkV1Uint8ArrayByteLength(destination, "leaseRead.destination") !==
+    command.maxBytes) {
     fail("leaseRead.destination", "must be the exact borrowed Uint8Array window");
   }
   if (command.maxBytes > leaseByteLength - command.offset) {
