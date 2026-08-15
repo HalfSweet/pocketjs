@@ -365,6 +365,14 @@ static void test_chunked_and_trailer(void) {
              "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
              "1\r\na\r\n0\r\nAuthorization: secret\r\n\r\n") ==
          POCKETJS_NET_HTTP1_WIRE_ERROR_FORBIDDEN_TRAILER);
+  assert(parse_malformed(
+             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+             "4\r\ngzip\r\n0\r\nContent-Encoding: gzip\r\n\r\n") ==
+         POCKETJS_NET_HTTP1_WIRE_ERROR_FORBIDDEN_TRAILER);
+  assert(parse_malformed(
+             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+             "Trailer: Content-Encoding\r\n\r\n0\r\n\r\n") ==
+         POCKETJS_NET_HTTP1_WIRE_ERROR_INVALID_TRAILER_DECLARATION);
 }
 
 static void test_no_body_and_eof(void) {
