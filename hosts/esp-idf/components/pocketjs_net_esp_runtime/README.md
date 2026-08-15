@@ -27,6 +27,11 @@ destroy. **The native boundary accepts only TLS 1.2, full certificate and
 hostname verification, no client certificate, no custom CA input, no ALPN,
 and the canonical DNS A-label as `serverName`.** Numeric HTTPS hosts and every
 other TLS policy are rejected before permission checks, DNS, or socket I/O.
+Stock ESP-IDF v6.0.2 exposes a generic X.509 verification failure but does not
+reliably preserve the reason flags after a failed handshake. The runtime maps
+that failure to `tls_certificate_invalid` and reports
+`distinct_tls_errors=false`; it does not promise a separate
+`tls_hostname_mismatch` result for this provider.
 
 Redirect mode `manual` is the only admitted mode. `follow` remains disabled
 because the current Core does not expose relative Location canonicalization

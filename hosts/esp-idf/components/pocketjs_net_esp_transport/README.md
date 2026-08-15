@@ -73,6 +73,10 @@ trusted wall-clock state; every handshake step fails closed with
 `tls_certificate_invalid` while that state is absent. Insecure certificate
 verification, weak certificate verification, renegotiation, DES/3DES, early
 data, and plaintext fallback are disabled or rejected at compile time.
+ESP-TLS reports `MBEDTLS_ERR_X509_CERT_VERIFY_FAILED` when certificate
+verification aborts without retained verification flags. The transport maps
+that code to `tls_certificate_invalid`; it does not relabel it as a generic
+handshake failure.
 
 ## Admission blockers
 
@@ -95,6 +99,12 @@ The descriptor deliberately reports the following gaps:
 - **Validation of the one Host-pinned CA uses Mbed TLS X.509 parsing.** Its
   transient native allocation is not caller-owned or byte-bounded even though
   the input snapshot is fixed at 4096 bytes.
+- **Stock ESP-IDF v6.0.2 does not reliably retain certificate verification
+  flags after a failed handshake.** Its error handle preserves the generic
+  X.509 verification failure, so unknown CA, validity, usage, and hostname
+  failures safely collapse to `tls_certificate_invalid`. The runtime does not
+  claim distinct TLS errors until the provider exposes the verification flags
+  and wire tests distinguish hostname mismatch from other certificate errors.
 - **The lwIP resolver retains at most `DNS_MAX_HOST_IP` records.** A larger DNS
   RRset may be truncated, so the descriptor does not claim a complete candidate
   set even though every returned candidate is preserved up to the fixed limit.
@@ -116,6 +126,8 @@ descriptor's `advertises_public_capability=false` result.
 
 The host-state test covers token monotonicity, no-wrap generations, shutdown
 admission, terminal credit conservation, cancel/deadline terminal arbitration,
-and round-robin progress without ESP-IDF. The nested ESP-IDF build-smoke app
-asserts the public descriptor and stable numeric/name mapping. Its
-`sdkconfig.defaults` fixes the candidate count and TLS policy.
+round-robin progress, and pure TLS error classification without ESP-IDF. The
+nested ESP-IDF build-smoke app repeats the TLS classification assertions with
+the pinned Mbed TLS constants and asserts the public descriptor and stable
+numeric/name mapping. Its `sdkconfig.defaults` fixes the candidate count and TLS
+policy.

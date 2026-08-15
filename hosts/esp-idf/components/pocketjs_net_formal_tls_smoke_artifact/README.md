@@ -33,3 +33,11 @@ the selected Mac peer, provision a trusted wall clock, and pass both facts to
 `pocketjs_net_formal_tls_smoke_run()`. The runner snapshots the public CA into
 the runtime as `POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA` and rejects every
 other Host profile.
+
+The exact runtime descriptor must report `distinct_tls_errors=false`. Stock
+ESP-IDF v6.0.2 can expose only the generic X.509 verification error after some
+failed handshakes, so the artifact accepts `tls_certificate_invalid` for
+hostname, trust-chain, validity, and usage failures. Negative wire evidence
+must still show the expected SNI, a failed TLS handshake, zero HTTP requests,
+and no plaintext fallback. This limitation keeps the public TLS capability gate
+closed.
