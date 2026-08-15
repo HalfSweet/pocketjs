@@ -30,9 +30,21 @@ bundle factory 捕获冻结的 `NetworkV1BindingTable` 后，在任何应用 ini
 
 **plan hash、runtime generation 和 feature id 列表必须精确一致。** feature 列表不能包含 native descriptor 能实现但 Build Plan 没有授予的能力。未知、重复或乱序 feature id 都会在应用入口执行前拒绝 mount。
 
-v1.0 的 handshake 和六个 binding method 必须是 table 自身的冻结 data property，不能使用 accessor 在验证前后返回不同值。更高 ABI minor 可以追加 property，但不能替换或删除 v1.0 property。
+v1.0 的 handshake 和六个 binding method 必须保留为 table 自身的冻结 data property；v1.1 追加同样为 own data property 的 `getLimits()`。新 Guest 要求 native minor 至少为 1，更高 ABI minor 可以继续追加 property，但不能替换或删除已有 property。table、handshake、limits snapshot 与它们的嵌套数组不能使用 accessor 在验证前后返回不同值。
 
 当前 stock target registry 仍不声明网络 capability；本 ABI 的存在不会打开 `network.http.client` 或 TLS。
+
+## ABI 1.1 limits snapshot
+
+`getLimits({ runtimeGeneration, protocol, role })` 是 owner thread 上的同步只读查询。protocol/role 的 `0` 表示 build-wide 维度；其他值使用生成文件中的固定 numeric id。它不执行运行期协商，也不能增加 Build Plan 权限。
+
+Host 返回冻结且 accessor-free 的 snapshot：
+
+- runtime generation 与 protocol/role 必须精确回显 query；
+- `values` 最多 64 项，按 bounded dotted ASCII name 严格排序且不重复；
+- 每项满足 `0 <= minimum <= default <= hard <= Number.MAX_SAFE_INTEGER`，其中零 minimum 表示 manifest 没有抬高该项的 admitted floor；
+- `featureIds` 是 mount handshake 对当前 protocol/role 的精确有序子集，不能加入 descriptor 支持但 Build Plan 未授予的 feature；
+- Guest Binding 在返回公共 `NetworkLimits` 前复制并深度冻结 snapshot，应用不能修改 Host table 或用查询扩大单次 operation limit。
 
 ## Identity 与顺序
 
