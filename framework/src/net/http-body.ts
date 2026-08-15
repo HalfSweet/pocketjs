@@ -40,6 +40,7 @@ interface BodyCloneGroup {
 interface BodySource {
   pull(maxBytes: number): Promise<Uint8Array | null>;
   cancel(reason?: unknown): Promise<void>;
+  onTerminal?(callback: () => void): () => void;
 }
 
 const Uint8ArrayIntrinsic = Uint8Array;
@@ -507,6 +508,202 @@ class ExternalBodyStreamSource implements BodySource {
   }
 }
 
+/**
+ * Eagerly advances a binding response within the admitted tee-sized window.
+ * Small ignored responses therefore reach BODY_END and retire their native
+ * operation; larger responses stop at a fixed byte/segment ceiling.
+ */
+class PrefetchBodySource implements BodySource {
+  readonly #queue: TeeSegment[] = [];
+  readonly #waiters = new SetIntrinsic<() => void>();
+  readonly #terminalCallbacks = new SetIntrinsic<() => void>();
+  readonly #chunkBytes: number;
+  readonly #bufferLimit: number;
+  #bufferedBytes = 0;
+  #pump: Promise<void> | undefined;
+  #done = false;
+  #cancelled = false;
+  #hasError = false;
+  #error: unknown;
+  #sourceTerminal = false;
+  #cancelPromise: Promise<void> | undefined;
+
+  constructor(
+    private readonly source: BodySource,
+    limits: Readonly<HttpBodyLimits>,
+  ) {
+    this.#chunkBytes = limits.chunkBytes;
+    this.#bufferLimit = limits.teeBranchBytes;
+    this.#schedulePump();
+  }
+
+  async pull(maxBytes: number): Promise<Uint8Array | null> {
+    for (;;) {
+      if (this.#queue.length > 0) {
+        const chunk = this.#dequeue(maxBytes);
+        this.#schedulePump();
+        return chunk;
+      }
+      if (this.#hasError) throw this.#error;
+      if (this.#done || this.#cancelled) return null;
+      this.#schedulePump();
+      await this.#waitForChange();
+    }
+  }
+
+  cancel(reason?: unknown): Promise<void> {
+    if (this.#cancelPromise) return this.#cancelPromise;
+    if (this.#cancelled) return PromiseIntrinsic.resolve();
+    const sourceNeedsCancel = !this.#done && !this.#hasError;
+    this.#cancelled = true;
+    this.#queue.length = 0;
+    this.#bufferedBytes = 0;
+    this.#notify();
+    if (!sourceNeedsCancel) return PromiseIntrinsic.resolve();
+    this.#cancelPromise = (async () => {
+      try {
+        await this.source.cancel(reason);
+      } finally {
+        this.#markSourceTerminal();
+        this.#notify();
+      }
+    })();
+    return this.#cancelPromise;
+  }
+
+  onTerminal(callback: () => void): () => void {
+    if (this.#sourceTerminal) {
+      callback();
+      return () => {};
+    }
+    addSetValue(this.#terminalCallbacks, callback);
+    return () => {
+      deleteSetValue(this.#terminalCallbacks, callback);
+    };
+  }
+
+  #dequeue(maxBytes: number): Uint8Array {
+    const first = this.#queue[0]!;
+    const available = first.end - first.start;
+    const count = mathMin(available, maxBytes);
+    const result = subarrayOf(first.bytes, first.start, first.start + count);
+    first.start += count;
+    this.#bufferedBytes -= count;
+    if (first.start === first.end) {
+      for (let index = 1; index < this.#queue.length; index++) {
+        this.#queue[index - 1] = this.#queue[index]!;
+      }
+      this.#queue.length--;
+    }
+    return result;
+  }
+
+  #enqueue(chunk: Uint8Array): void {
+    let offset = 0;
+    const chunkLength = byteLengthOf(chunk);
+    while (offset < chunkLength) {
+      let tail = this.#queue[this.#queue.length - 1];
+      if (!tail || tail.end === byteLengthOf(tail.bytes)) {
+        if (this.#queue.length >= HTTP_BODY_TEE_SEGMENT_SLOTS) {
+          throw bodyError(
+            "resource_limit",
+            "http.body.prefetch",
+            "HTTP response prefetch exceeded its fixed segment slots",
+          );
+        }
+        tail = {
+          bytes: new Uint8ArrayIntrinsic(this.#chunkBytes),
+          start: 0,
+          end: 0,
+        };
+        this.#queue[this.#queue.length] = tail;
+      }
+      const count = mathMin(
+        byteLengthOf(tail.bytes) - tail.end,
+        chunkLength - offset,
+      );
+      reflectApply(uint8ArraySet, tail.bytes, [
+        subarrayOf(chunk, offset, offset + count),
+        tail.end,
+      ]);
+      tail.end += count;
+      offset += count;
+    }
+    this.#bufferedBytes += chunkLength;
+  }
+
+  #schedulePump(): void {
+    if (this.#pump || this.#done || this.#cancelled || this.#hasError ||
+      this.#bufferedBytes >= this.#bufferLimit) return;
+    this.#pump = (async () => {
+      try {
+        while (!this.#done && !this.#cancelled && !this.#hasError &&
+          this.#bufferedBytes < this.#bufferLimit) {
+          const credit = mathMin(
+            this.#chunkBytes,
+            this.#bufferLimit - this.#bufferedBytes,
+          );
+          const chunk = await this.source.pull(credit);
+          if (this.#cancelled) break;
+          if (chunk === null) {
+            this.#done = true;
+            this.#markSourceTerminal();
+            break;
+          }
+          const length = byteLengthOf(chunk);
+          if (length === 0 || length > credit) {
+            throw bodyError(
+              length > credit ? "resource_limit" : "invalid_state",
+              "http.body.prefetch",
+              "HTTP response source violated prefetch credit",
+            );
+          }
+          this.#enqueue(chunk);
+        }
+      } catch (error) {
+        if (!this.#cancelled) {
+          this.#hasError = true;
+          this.#error = error;
+          this.#notify();
+          try {
+            await this.source.cancel(error);
+          } catch {
+            // The original body/credit failure remains authoritative.
+          }
+          this.#markSourceTerminal();
+        }
+      } finally {
+        this.#pump = undefined;
+        this.#notify();
+      }
+    })();
+  }
+
+  #waitForChange(): Promise<void> {
+    return new PromiseIntrinsic((resolve) => addSetValue(this.#waiters, resolve));
+  }
+
+  #notify(): void {
+    const waiters = snapshotSetValues(this.#waiters);
+    clearSetValues(this.#waiters);
+    for (let index = 0; index < waiters.length; index++) waiters[index]!();
+  }
+
+  #markSourceTerminal(): void {
+    if (this.#sourceTerminal) return;
+    this.#sourceTerminal = true;
+    const callbacks = snapshotSetValues(this.#terminalCallbacks);
+    clearSetValues(this.#terminalCallbacks);
+    for (let index = 0; index < callbacks.length; index++) {
+      try {
+        callbacks[index]!();
+      } catch {
+        // Transport retirement remains authoritative over observer diagnostics.
+      }
+    }
+  }
+}
+
 interface TeeSegment {
   readonly bytes: Uint8Array;
   start: number;
@@ -824,6 +1021,10 @@ export class BodyController {
   }
 
   onTerminal(callback: () => void): () => void {
+    const sourceTerminal = this.#source.onTerminal;
+    if (sourceTerminal) {
+      return reflectApply(sourceTerminal, this.#source, [callback]) as () => void;
+    }
     if (setValueCount(this.#cloneGroup.controllers) === 0) {
       callback();
       return () => {};
@@ -1276,7 +1477,10 @@ export function bodyFromBinding(
     throw new TypeErrorIntrinsic("Private HTTP binding response body must be a BodyStream");
   }
   return new BodyController(
-    new ExternalBodyStreamSource(input, methods.readInto, methods.cancel),
+    new PrefetchBodySource(
+      new ExternalBodyStreamSource(input, methods.readInto, methods.cancel),
+      normalizedBodyLimits(limits),
+    ),
     limits,
   );
 }
