@@ -12,6 +12,7 @@ import http.client
 import json
 import socket
 import socketserver
+import ssl
 import sys
 import threading
 import time
@@ -154,6 +155,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         socket_timeout_ms: int,
         delay_ceiling_ms: int,
         events: EventSink,
+        tls_context: ssl.SSLContext | None = None,
     ) -> None:
         self.body_limit = body_limit
         self.header_limit = header_limit
@@ -161,7 +163,50 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.delay_ceiling_ms = delay_ceiling_ms
         self.events = events
         self.state = PeerState()
+        self.tls_context = tls_context
+        if self.tls_context is not None:
+            self.tls_context.set_servername_callback(self._record_tls_server_name)
         super().__init__(address, PeerHandler)
+
+    def _record_tls_server_name(
+        self,
+        secure_request: ssl.SSLSocket,
+        server_name: str | None,
+        initial_context: ssl.SSLContext,
+    ) -> None:
+        del initial_context
+        secure_request.pocketjs_server_name = server_name  # type: ignore[attr-defined]
+        try:
+            peer_ipv4 = secure_request.getpeername()[0]
+        except OSError:
+            peer_ipv4 = None
+        self.events.emit(
+            "tls_client_hello",
+            peer_ipv4=peer_ipv4,
+            server_name=server_name,
+        )
+
+    def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
+        request, address = super().get_request()
+        if self.tls_context is None:
+            return request, address
+
+        request.settimeout(self.socket_timeout)
+        secure_request = self.tls_context.wrap_socket(
+            request,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
+        return secure_request, address
+
+    def handle_error(
+        self,
+        request: socket.socket,
+        client_address: tuple[str, int],
+    ) -> None:
+        if getattr(request, "pocketjs_handshake_failed", False):
+            return
+        super().handle_error(request, client_address)
 
 
 class PeerHandler(socketserver.BaseRequestHandler):
@@ -169,14 +214,36 @@ class PeerHandler(socketserver.BaseRequestHandler):
 
     def setup(self) -> None:
         super().setup()
+        self.request.settimeout(self.server.socket_timeout)
+        if isinstance(self.request, ssl.SSLSocket):
+            try:
+                self.request.do_handshake()
+            except OSError as error:
+                self.request.pocketjs_handshake_failed = True  # type: ignore[attr-defined]
+                self.server.events.emit(
+                    "tls_handshake_error",
+                    peer_ipv4=self.client_address[0],
+                    error=type(error).__name__,
+                )
+                raise
         self.connection_id = self.server.state.connection_opened()
         self.connection_request_index = 0
-        self.request.settimeout(self.server.socket_timeout)
-        self.server.events.emit(
-            "connection_open",
-            connection_id=self.connection_id,
-            peer_ipv4=self.client_address[0],
-        )
+        fields: dict[str, object] = {
+            "connection_id": self.connection_id,
+            "peer_ipv4": self.client_address[0],
+            "transport": "plaintext",
+        }
+        if isinstance(self.request, ssl.SSLSocket):
+            cipher = self.request.cipher()
+            fields.update(
+                transport="tls",
+                tls_version=self.request.version(),
+                tls_cipher=cipher[0] if cipher is not None else None,
+                tls_server_name=getattr(
+                    self.request, "pocketjs_server_name", None
+                ),
+            )
+        self.server.events.emit("connection_open", **fields)
 
     def finish(self) -> None:
         self.server.state.connection_closed()
@@ -631,14 +698,52 @@ def connection_identity(connection: http.client.HTTPConnection) -> tuple[str, in
     return str(address[0]), int(address[1])
 
 
+def create_server_tls_context(
+    cert_path: Path,
+    key_path: Path,
+    minimum_version: str,
+) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = tls_version(minimum_version)
+    context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    return context
+
+
+def tls_version(value: str) -> ssl.TLSVersion:
+    return {
+        "1.2": ssl.TLSVersion.TLSv1_2,
+        "1.3": ssl.TLSVersion.TLSv1_3,
+    }[value]
+
+
 def run_probe(args: argparse.Namespace) -> int:
     parsed = urlsplit(args.base_url)
-    if parsed.scheme != "http" or not parsed.hostname or parsed.query or parsed.fragment:
-        raise ValueError("--base-url must be an http:// host[:port][/prefix] URL")
-    port = parsed.port or 80
-    connection = http.client.HTTPConnection(
-        parsed.hostname, port, timeout=args.timeout_ms / 1000
-    )
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "--base-url must be an http:// or https:// host[:port][/prefix] URL"
+        )
+    if parsed.scheme == "http" and args.ca_cert:
+        raise ValueError("--ca-cert requires an https:// base URL")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if parsed.scheme == "https":
+        ca_path = Path(args.ca_cert).expanduser() if args.ca_cert else None
+        context = ssl.create_default_context(cafile=ca_path)
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            parsed.hostname,
+            port,
+            timeout=args.timeout_ms / 1000,
+            context=context,
+        )
+    else:
+        connection = http.client.HTTPConnection(
+            parsed.hostname, port, timeout=args.timeout_ms / 1000
+        )
     health_path = build_probe_path(parsed.path, "/health")
     echo_path = build_probe_path(parsed.path, "/echo")
     started = time.monotonic()
@@ -711,6 +816,22 @@ def run_probe(args: argparse.Namespace) -> int:
 
 
 def run_server(args: argparse.Namespace) -> int:
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise ValueError("--tls-cert and --tls-key must be provided together")
+    tls_context = None
+    if args.tls_cert:
+        if args.tls_max_version and tls_version(
+            args.tls_max_version
+        ) < tls_version(args.tls_min_version):
+            raise ValueError("--tls-max-version must not be below --tls-min-version")
+        tls_context = create_server_tls_context(
+            Path(args.tls_cert).expanduser(),
+            Path(args.tls_key).expanduser(),
+            args.tls_min_version,
+        )
+        if args.tls_max_version:
+            tls_context.maximum_version = tls_version(args.tls_max_version)
+
     event_path = Path(args.events).expanduser() if args.events else None
     if event_path is not None:
         event_path.parent.mkdir(parents=True, exist_ok=True)
@@ -722,12 +843,18 @@ def run_server(args: argparse.Namespace) -> int:
         socket_timeout_ms=args.socket_timeout_ms,
         delay_ceiling_ms=args.delay_ceiling_ms,
         events=events,
+        tls_context=tls_context,
     )
     host, port = server.server_address[:2]
     events.emit(
         "peer_ready",
         bind_host=host,
         port=port,
+        transport="tls" if tls_context is not None else "plaintext",
+        tls_min_version=args.tls_min_version if tls_context is not None else None,
+        tls_max_version=(
+            args.tls_max_version if tls_context is not None else None
+        ),
         max_header_bytes=args.max_header_bytes,
         max_request_body_bytes=args.max_request_body_bytes,
     )
@@ -772,6 +899,19 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--delay-ceiling-ms", type=positive_integer, default=120000)
     serve.add_argument("--events", help="append redacted NDJSON events to this path")
     serve.add_argument("--quiet-events", action="store_true")
+    serve.add_argument("--tls-cert", help="PEM server certificate chain")
+    serve.add_argument("--tls-key", help="PEM private key for --tls-cert")
+    serve.add_argument(
+        "--tls-min-version",
+        choices=("1.2", "1.3"),
+        default="1.2",
+        help="minimum accepted TLS version (default: 1.2)",
+    )
+    serve.add_argument(
+        "--tls-max-version",
+        choices=("1.2", "1.3"),
+        help="optional maximum accepted TLS version for version-specific tests",
+    )
     serve.set_defaults(entrypoint=run_server)
 
     probe = commands.add_parser(
@@ -783,6 +923,10 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--timeout-ms", type=positive_integer, default=5000)
     probe.add_argument("--response-limit-bytes", type=positive_integer, default=65536)
     probe.add_argument("--health-contains", default="")
+    probe.add_argument(
+        "--ca-cert",
+        help="PEM CA bundle for HTTPS verification; system trust is used when omitted",
+    )
     probe.set_defaults(entrypoint=run_probe)
     return parser
 

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import http.client
 import importlib.util
+import io
+import json
+import signal
 import socket
+import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -18,23 +26,61 @@ http_peer = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = http_peer
 SPEC.loader.exec_module(http_peer)
 
+PKI_MODULE_PATH = Path(__file__).with_name("generate_test_pki.py")
+PKI_SPEC = importlib.util.spec_from_file_location(
+    "pocketjs_generate_test_pki", PKI_MODULE_PATH
+)
+assert PKI_SPEC is not None and PKI_SPEC.loader is not None
+generate_test_pki = importlib.util.module_from_spec(PKI_SPEC)
+sys.modules[PKI_SPEC.name] = generate_test_pki
+PKI_SPEC.loader.exec_module(generate_test_pki)
+
 
 class QuietSink:
     def emit(self, event: str, **fields: object) -> None:
         del event, fields
 
 
+class RecordingSink:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self.records: list[tuple[str, dict[str, object]]] = []
+
+    def emit(self, event: str, **fields: object) -> None:
+        with self._condition:
+            self.records.append((event, fields))
+            self._condition.notify_all()
+
+    def wait_for(self, event: str, timeout: float = 2) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: any(name == event for name, _ in self.records), timeout
+            )
+
+    def snapshot(self) -> list[tuple[str, dict[str, object]]]:
+        with self._condition:
+            return list(self.records)
+
+
+def make_server(
+    tls_context: ssl.SSLContext | None = None,
+    events: QuietSink | RecordingSink | None = None,
+) -> http_peer.ThreadingPeerServer:
+    return http_peer.ThreadingPeerServer(
+        ("127.0.0.1", 0),
+        body_limit=16 * 1024,
+        header_limit=16 * 1024,
+        socket_timeout_ms=1000,
+        delay_ceiling_ms=2000,
+        events=events if events is not None else QuietSink(),
+        tls_context=tls_context,
+    )
+
+
 class PeerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.server = http_peer.ThreadingPeerServer(
-            ("127.0.0.1", 0),
-            body_limit=16 * 1024,
-            header_limit=16 * 1024,
-            socket_timeout_ms=1000,
-            delay_ceiling_ms=2000,
-            events=QuietSink(),
-        )
+        cls.server = make_server()
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.host, cls.port = cls.server.server_address
@@ -120,6 +166,265 @@ class PeerTest(unittest.TestCase):
                 if not chunk:
                     return b"".join(chunks)
                 chunks.append(chunk)
+
+
+class TLSPeerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory(prefix="pocketjs-peer-pki-")
+        cls.pki = generate_test_pki.generate_pki(Path(cls.temporary.name))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def start_profile(
+        self,
+        cert_name: str,
+        key_name: str,
+        *,
+        maximum_version: ssl.TLSVersion | None = None,
+        events: RecordingSink | None = None,
+    ) -> tuple[http_peer.ThreadingPeerServer, str, int]:
+        tls_context = http_peer.create_server_tls_context(
+            self.pki[cert_name], self.pki[key_name], "1.2"
+        )
+        if maximum_version is not None:
+            tls_context.maximum_version = maximum_version
+        server = make_server(tls_context, events)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.addCleanup(stop)
+        host, port = server.server_address
+        return server, host, port
+
+    def trusted_context(self) -> ssl.SSLContext:
+        return ssl.create_default_context(cafile=self.pki["ca_cert"])
+
+    def ensure_cli_stopped(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        process.send_signal(signal.SIGINT)
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=3)
+
+    def start_cli_profile(
+        self,
+        cert_name: str,
+        key_name: str,
+        *,
+        maximum_version: str | None = None,
+    ) -> tuple[subprocess.Popen[str], dict[str, object]]:
+        command = [
+            sys.executable,
+            str(MODULE_PATH),
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--tls-cert",
+            str(self.pki[cert_name]),
+            "--tls-key",
+            str(self.pki[key_name]),
+        ]
+        if maximum_version is not None:
+            command.extend(("--tls-max-version", maximum_version))
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.ensure_cli_stopped, process)
+        assert process.stdout is not None and process.stderr is not None
+        ready_line = process.stdout.readline()
+        if not ready_line:
+            _, error_output = process.communicate(timeout=3)
+            self.fail(f"TLS peer CLI did not become ready: {error_output}")
+        ready = json.loads(ready_line)
+        self.assertEqual(ready["event"], "peer_ready")
+        return process, ready
+
+    def stop_cli_profile(
+        self, process: subprocess.Popen[str]
+    ) -> list[dict[str, object]]:
+        process.send_signal(signal.SIGINT)
+        output, error_output = process.communicate(timeout=3)
+        self.assertEqual(process.returncode, 0, error_output)
+        return [json.loads(line) for line in output.splitlines()]
+
+    def run_cli_probe(self, port: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            (
+                sys.executable,
+                str(MODULE_PATH),
+                "probe",
+                "--base-url",
+                f"https://localhost:{port}",
+                "--ca-cert",
+                str(self.pki["ca_cert"]),
+                "--rounds",
+                "2",
+                "--health-contains",
+                '"status":"ok"',
+            ),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def assert_cli_profile_rejected(self, cert_name: str, key_name: str) -> None:
+        process, ready = self.start_cli_profile(cert_name, key_name)
+        result = self.run_cli_probe(int(ready["port"]))
+        events = self.stop_cli_profile(process)
+        self.assertEqual(result.returncode, 1)
+        error_event = json.loads(result.stderr)
+        self.assertEqual(error_event["event"], "peer_error")
+        self.assertEqual(error_event["error"], "SSLCertVerificationError")
+        self.assertFalse(any(event["event"] == "request" for event in events))
+        hellos = [
+            event for event in events if event["event"] == "tls_client_hello"
+        ]
+        self.assertEqual(hellos[0]["server_name"], "localhost")
+        self.assertTrue(
+            any(event["event"] == "tls_handshake_error" for event in events)
+        )
+
+    def assert_profile_rejected(
+        self, cert_name: str, key_name: str
+    ) -> ssl.SSLCertVerificationError:
+        events = RecordingSink()
+        _, _, port = self.start_profile(
+            cert_name,
+            key_name,
+            events=events,
+        )
+        connection = http.client.HTTPSConnection(
+            "localhost", port, timeout=2, context=self.trusted_context()
+        )
+        self.addCleanup(connection.close)
+        with self.assertRaises(ssl.SSLCertVerificationError) as raised:
+            connection.request("GET", "/health")
+        self.assertTrue(events.wait_for("tls_handshake_error"))
+        records = events.snapshot()
+        self.assertFalse(any(event == "request" for event, _ in records))
+        hellos = [
+            fields for event, fields in records if event == "tls_client_hello"
+        ]
+        self.assertEqual(hellos[0]["server_name"], "localhost")
+        return raised.exception
+
+    def test_tls_probe_health_echo_and_keep_alive(self) -> None:
+        events = RecordingSink()
+        _, _, port = self.start_profile(
+            "server_cert",
+            "server_key",
+            maximum_version=ssl.TLSVersion.TLSv1_2,
+            events=events,
+        )
+        args = argparse.Namespace(
+            base_url=f"https://localhost:{port}",
+            ca_cert=str(self.pki["ca_cert"]),
+            timeout_ms=2000,
+            response_limit_bytes=16 * 1024,
+            health_contains='"status":"ok"',
+            rounds=2,
+            interval_ms=0,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(http_peer.run_probe(args), 0)
+        output_lines = [json_line for json_line in output.getvalue().splitlines()]
+        self.assertEqual(len(output_lines), 3)
+        self.assertIn('"event":"probe_pass"', output_lines[-1])
+        connection_events = [
+            fields for event, fields in events.records if event == "connection_open"
+        ]
+        self.assertEqual(connection_events[0]["tls_version"], "TLSv1.2")
+        self.assertEqual(connection_events[0]["tls_server_name"], "localhost")
+        hello_events = [
+            fields for event, fields in events.records if event == "tls_client_hello"
+        ]
+        self.assertEqual(hello_events[0]["server_name"], "localhost")
+
+    def test_wrong_hostname_is_rejected(self) -> None:
+        error = self.assert_profile_rejected("wrong_host_cert", "wrong_host_key")
+        self.assertIn("Hostname mismatch", str(error))
+
+    def test_untrusted_ca_is_rejected(self) -> None:
+        error = self.assert_profile_rejected(
+            "untrusted_server_cert", "untrusted_server_key"
+        )
+        self.assertIn("certificate verify failed", str(error))
+
+    def test_bad_signature_is_rejected(self) -> None:
+        error = self.assert_profile_rejected(
+            "bad_signature_server_cert", "server_key"
+        )
+        self.assertIn("certificate verify failed", str(error))
+
+    def test_expired_certificate_is_rejected(self) -> None:
+        error = self.assert_profile_rejected(
+            "expired_server_cert", "expired_server_key"
+        )
+        self.assertEqual(error.verify_code, 10)
+
+    def test_not_yet_valid_certificate_is_rejected(self) -> None:
+        error = self.assert_profile_rejected(
+            "not_yet_valid_server_cert", "not_yet_valid_server_key"
+        )
+        self.assertEqual(error.verify_code, 9)
+
+    def test_cli_tls12_serve_and_probe(self) -> None:
+        process, ready = self.start_cli_profile(
+            "server_cert", "server_key", maximum_version="1.2"
+        )
+        result = self.run_cli_probe(int(ready["port"]))
+        events = self.stop_cli_profile(process)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        probe_events = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(probe_events[-1]["event"], "probe_pass")
+        self.assertEqual(probe_events[-1]["rounds"], 2)
+        connections = [
+            event for event in events if event["event"] == "connection_open"
+        ]
+        self.assertEqual(connections[0]["tls_version"], "TLSv1.2")
+        self.assertEqual(connections[0]["tls_server_name"], "localhost")
+        self.assertEqual(
+            len([event for event in events if event["event"] == "request"]), 4
+        )
+
+    def test_cli_rejects_wrong_hostname_before_http(self) -> None:
+        self.assert_cli_profile_rejected("wrong_host_cert", "wrong_host_key")
+
+    def test_cli_rejects_unknown_ca_before_http(self) -> None:
+        self.assert_cli_profile_rejected(
+            "untrusted_server_cert", "untrusted_server_key"
+        )
+
+    def test_cli_rejects_bad_signature_before_http(self) -> None:
+        self.assert_cli_profile_rejected("bad_signature_server_cert", "server_key")
+
+    def test_cli_rejects_expired_certificate_before_http(self) -> None:
+        self.assert_cli_profile_rejected(
+            "expired_server_cert", "expired_server_key"
+        )
+
+    def test_cli_rejects_not_yet_valid_certificate_before_http(self) -> None:
+        self.assert_cli_profile_rejected(
+            "not_yet_valid_server_cert", "not_yet_valid_server_key"
+        )
 
 
 if __name__ == "__main__":
