@@ -12,6 +12,9 @@ it must run its Guest and protocol conformance suites against this engine.
 
 All realm APIs are owner-task-only. Native workers can wake that task or queue
 plain data, but they must never call these functions or QuickJS directly.
+Calls from product schedulers into a registered Guest dispatcher use
+`pocketjs_esp_guest_call_function()`, which applies the same monotonic timeout
+and QuickJS interrupt-check budget as factory, frame, and Promise-job calls.
 
 Product Hosts mount bundles as factories. The component freezes a private
 native binding object and passes it directly to the factory; it never installs
