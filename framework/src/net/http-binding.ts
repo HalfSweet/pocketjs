@@ -246,6 +246,13 @@ const arrayIsArray = Array.isArray;
 const numberIsSafeInteger = Number.isSafeInteger;
 const reflectApply = Reflect.apply;
 const regExpTest = RegExp.prototype.test;
+const REQUIRED_HTTP_CLIENT_LIMITS = objectFreeze([
+  "http.bufferedBodyBytes",
+  "http.headerBytes",
+  "http.maxBodyChunkBytes",
+  "http.maxOperations",
+  "runtime.nativeBufferBytes",
+]);
 
 function ownDataField(value: object, key: PropertyKey, label: string): unknown {
   const descriptor = objectGetOwnPropertyDescriptor(value, key);
@@ -335,6 +342,28 @@ function snapshotHttpClientLimits(
       minimum: minimum as number,
     });
     previousName = name;
+  }
+  for (let requiredIndex = 0;
+    requiredIndex < REQUIRED_HTTP_CLIENT_LIMITS.length;
+    requiredIndex++) {
+    const requiredName = REQUIRED_HTTP_CLIENT_LIMITS[requiredIndex]!;
+    let present = false;
+    for (let valueIndex = 0; valueIndex < values.length; valueIndex++) {
+      if (values[valueIndex]!.name === requiredName) {
+        if (values[valueIndex]!.default < 1) {
+          throw new TypeError(
+            `PocketJS HTTP client binding required limit ${requiredName} is zero`,
+          );
+        }
+        present = true;
+        break;
+      }
+    }
+    if (!present) {
+      throw new TypeError(
+        `PocketJS HTTP client binding limits omit required ${requiredName}`,
+      );
+    }
   }
   const features = snapshotTokens(rawFeatures, "limits feature set", 64, 128);
   if (features.length !== featureSet.length) {

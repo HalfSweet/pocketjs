@@ -20,11 +20,16 @@ import {
   BodyController,
   bodyFromBinding,
   extractBody,
+  HTTP_BODY_CHUNK_BYTES,
   HTTP_BODY_HELPER_BYTES,
+  HTTP_BODY_TEE_BRANCH_BYTES,
   ownedUint8ArrayBuffer,
   snapshotUint8Array,
 } from "./http-body.ts";
-import type { BodyStream as HttpBodyStream } from "./http-body.ts";
+import type {
+  BodyStream as HttpBodyStream,
+  HttpBodyLimits,
+} from "./http-body.ts";
 import {
   getHttpClientBinding,
   NetworkV1CommandOpcode,
@@ -113,6 +118,7 @@ interface HeaderEntry {
 interface HeadersState {
   guard: HeadersGuard;
   readonly list: HeaderEntry[];
+  byteLimit: number;
 }
 
 const functionCall = Function.prototype.call;
@@ -133,6 +139,7 @@ const objectKeys = Object.keys;
 const numberIsFinite = Number.isFinite;
 const numberIsInteger = Number.isInteger;
 const numberIsSafeInteger = Number.isSafeInteger;
+const mathMin = Math.min;
 const PromiseIntrinsic = Promise;
 const promiseResolve = Promise.resolve;
 const promiseThen = Promise.prototype.then;
@@ -184,6 +191,61 @@ const FORBIDDEN_REQUEST_NAMES = new Set([
 const FORBIDDEN_RESPONSE_NAMES = new Set(["set-cookie", "set-cookie2"]);
 const NORMALIZED_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+interface EffectiveHttpSdkLimits {
+  readonly headerBytes: number;
+  readonly body: Readonly<HttpBodyLimits>;
+}
+
+const UNBOUND_HTTP_SDK_LIMITS: Readonly<EffectiveHttpSdkLimits> = objectFreeze({
+  headerBytes: HTTP_HEADER_BYTES,
+  body: objectFreeze({
+    bufferedBytes: HTTP_BODY_HELPER_BYTES,
+    chunkBytes: HTTP_BODY_CHUNK_BYTES,
+    teeBranchBytes: HTTP_BODY_TEE_BRANCH_BYTES,
+  }),
+});
+
+function admittedLimitDefault(
+  binding: HttpClientPrivateBinding,
+  name: string,
+): number {
+  const values = binding.httpClientLimits.values;
+  for (let index = 0; index < values.length; index++) {
+    const entry = values[index]!;
+    if (entry.name === name) return entry.default;
+  }
+  throw new TypeError(`PocketJS HTTP client binding is missing ${name}`);
+}
+
+function effectiveHttpSdkLimits(
+  binding: HttpClientPrivateBinding | undefined = getHttpClientBinding(),
+): Readonly<EffectiveHttpSdkLimits> {
+  if (!binding) return UNBOUND_HTTP_SDK_LIMITS;
+  const bufferedBytes = mathMin(
+    admittedLimitDefault(binding, "http.bufferedBodyBytes"),
+    HTTP_BODY_HELPER_BYTES,
+  );
+  const chunkBytes = mathMin(
+    admittedLimitDefault(binding, "http.maxBodyChunkBytes"),
+    HTTP_BODY_CHUNK_BYTES,
+  );
+  return objectFreeze({
+    headerBytes: mathMin(
+      admittedLimitDefault(binding, "http.headerBytes"),
+      HTTP_HEADER_BYTES,
+    ),
+    body: objectFreeze({
+      bufferedBytes,
+      chunkBytes,
+      teeBranchBytes: mathMin(
+        bufferedBytes,
+        HTTP_BODY_TEE_BRANCH_BYTES,
+        chunkBytes * 4,
+      ),
+    }),
+  });
+}
 
 function headersState(headers: Headers): HeadersState {
   const state = headerStates.get(headers);
@@ -280,12 +342,12 @@ function assertMutable(state: HeadersState): void {
   if (state.guard === "immutable") throw new TypeError("Headers are immutable");
 }
 
-function assertHeaderBudget(entries: readonly HeaderEntry[]): void {
+function assertHeaderBudget(entries: readonly HeaderEntry[], byteLimit: number): void {
   let bytes = 0;
   for (const entry of entries) {
     bytes += entry.name.length + entry.value.length + 4;
   }
-  if (entries.length > HTTP_HEADER_COUNT || bytes > HTTP_HEADER_BYTES) {
+  if (entries.length > HTTP_HEADER_COUNT || bytes > byteLimit) {
     throw new NetworkError("HTTP headers exceed the SDK safety ceiling", {
       category: "runtime",
       code: "resource_limit",
@@ -305,7 +367,7 @@ function appendHeader(
   const value = normalizeHeaderValue(valueValue);
   assertMutable(state);
   if (!bypassGuard && guardRejects(state.guard, name, value)) return;
-  assertHeaderBudget([...state.list, { name, value }]);
+  assertHeaderBudget([...state.list, { name, value }], state.byteLimit);
   arrayPush(state.list, { name, value });
 }
 
@@ -457,18 +519,24 @@ class HeadersIterator<T extends [string, string] | string> implements IterableIt
 function createHeaders(
   init: HeadersInit | undefined,
   guard: HeadersGuard,
+  byteLimit = effectiveHttpSdkLimits().headerBytes,
 ): Headers {
   const headers = new Headers();
   const state = headersState(headers);
+  state.byteLimit = byteLimit;
   state.guard = guard === "immutable" ? "none" : guard;
   fillHeaders(state, init);
   state.guard = guard;
   return headers;
 }
 
-function createBindingHeaders(entries: readonly HttpBindingHeader[]): Headers {
+function createBindingHeaders(
+  entries: readonly HttpBindingHeader[],
+  byteLimit: number,
+): Headers {
   const headers = new Headers();
   const state = headersState(headers);
+  state.byteLimit = byteLimit;
   for (const entry of entries) appendHeader(state, entry.name, entry.value, true);
   state.guard = "immutable";
   return headers;
@@ -478,6 +546,7 @@ function cloneHeaders(headers: Headers): Headers {
   const source = headersState(headers);
   const clone = new Headers();
   const target = headersState(clone);
+  target.byteLimit = source.byteLimit;
   for (const entry of source.list) {
     arrayPush(target.list, { name: entry.name, value: entry.value });
   }
@@ -497,7 +566,11 @@ function bindingHeaders(headers: Headers): readonly HttpBindingHeader[] {
 
 export class Headers implements Iterable<[string, string]> {
   constructor(init: HeadersInit | undefined = undefined) {
-    const state: HeadersState = { guard: "none", list: [] };
+    const state: HeadersState = {
+      guard: "none",
+      list: [],
+      byteLimit: effectiveHttpSdkLimits().headerBytes,
+    };
     headerStates.set(this, state);
     fillHeaders(state, init);
   }
@@ -551,7 +624,7 @@ export class Headers implements Iterable<[string, string]> {
       }
     }
     if (!inserted) arrayPush(next, { name, value });
-    assertHeaderBudget(next);
+    assertHeaderBudget(next, state.byteLimit);
     arraySplice(state.list, 0, state.list.length, ...next);
   }
 
@@ -767,6 +840,7 @@ function normalizeMaxRedirects(value: number | undefined): number {
 
 function normalizeLimits(
   limits: NetworkLimitOverrides | undefined,
+  binding: HttpClientPrivateBinding | undefined,
 ): NetworkLimitOverrides | undefined {
   if (limits === undefined) return undefined;
   if (typeof limits !== "object" || limits === null) {
@@ -789,6 +863,25 @@ function normalizeLimits(
     const value = limits[key];
     if (!numberIsSafeInteger(value) || value <= 0) {
       throw new TypeError(`HTTP limit ${key} must be a positive safe integer`);
+    }
+    if (binding) {
+      let admitted: Readonly<{
+        name: string;
+        default: number;
+        minimum: number;
+      }> | undefined;
+      const values = binding.httpClientLimits.values;
+      for (let index = 0; index < values.length; index++) {
+        if (values[index]!.name === key) {
+          admitted = values[index]!;
+          break;
+        }
+      }
+      if (!admitted || value < admitted.minimum || value > admitted.default) {
+        throw new TypeError(
+          `HTTP limit ${key} is outside its admitted minimum/default range`,
+        );
+      }
     }
     output[key] = value;
   }
@@ -914,6 +1007,7 @@ function normalizeTls(tls: TlsOptions | undefined): TlsOptions | undefined {
 function requestExtensions(
   init: RequestInitSnapshot,
   inherited?: RequestState,
+  binding: HttpClientPrivateBinding | undefined = getHttpClientBinding(),
 ): RequestExtensions {
   return {
     timeouts: init.timeouts === undefined
@@ -923,7 +1017,9 @@ function requestExtensions(
       ? inherited?.maxRedirects ?? 5
       : normalizeMaxRedirects(init.maxRedirects),
     tls: init.tls === undefined ? inherited?.tls : normalizeTls(init.tls),
-    limits: init.limits === undefined ? inherited?.limits : normalizeLimits(init.limits),
+    limits: init.limits === undefined
+      ? inherited?.limits
+      : normalizeLimits(init.limits, binding),
     ref: init.ref === undefined ? inherited?.ref ?? true : webIdlBoolean(init.ref),
   };
 }
@@ -953,6 +1049,8 @@ export class Request {
     input: string | URL | Request,
     init: RequestInit | null | undefined = undefined,
   ) {
+    const binding = getHttpClientBinding();
+    const sdkLimits = effectiveHttpSdkLimits(binding);
     const snapshot = snapshotRequestInit(init);
     const inherited = input instanceof Request ? requestState(input) : undefined;
     const method = normalizeMethod(snapshot.method ?? inherited?.method ?? "GET");
@@ -966,9 +1064,9 @@ export class Request {
       throw new TypeError("HTTP Request signal must be a PocketJS AbortSignal");
     }
     const headers = snapshot.headers === undefined
-      ? createHeaders(inherited?.headers, "request")
-      : createHeaders(snapshot.headers, "request");
-    const extensions = requestExtensions(snapshot, inherited);
+      ? createHeaders(inherited?.headers, "request", sdkLimits.headerBytes)
+      : createHeaders(snapshot.headers, "request", sdkLimits.headerBytes);
+    const extensions = requestExtensions(snapshot, inherited, binding);
 
     // Fetch treats a null RequestInit body like no override; it does not erase
     // an input Request's body.
@@ -981,7 +1079,7 @@ export class Request {
     let body: BodyController | null = null;
     let contentType: string | undefined;
     if (hasExplicitBody) {
-      const extracted = extractBody(snapshot.body!);
+      const extracted = extractBody(snapshot.body!, sdkLimits.body);
       body = extracted.controller;
       contentType = extracted.contentType;
     } else if (!hasExplicitBody && inherited?.body) {
@@ -1098,16 +1196,17 @@ function newResponseFromState(state: ResponseState): Response {
 
 export class Response {
   constructor(body: BodyInit = null, init: ResponseInit | null = {}) {
+    const sdkLimits = effectiveHttpSdkLimits();
     const snapshot = snapshotResponseInit(init);
     const status = normalizeStatus(snapshot.status);
     const statusText = normalizeStatusText(snapshot.statusText);
-    const headers = createHeaders(snapshot.headers, "response");
+    const headers = createHeaders(snapshot.headers, "response", sdkLimits.headerBytes);
     let controller: BodyController | null = null;
     if (body !== null) {
       if (status === 204 || status === 205 || status === 304) {
         throw new TypeError(`HTTP status ${status} cannot have a body`);
       }
-      const extracted = extractBody(body);
+      const extracted = extractBody(body, sdkLimits.body);
       controller = extracted.controller;
       if (extracted.contentType !== undefined &&
         !hasNormalizedHeader(headers, "content-type")) {
@@ -1202,12 +1301,13 @@ export class Response {
       throw new RangeError("Invalid HTTP redirect status");
     }
     const parsed = parseAbsoluteUrl(url);
+    const sdkLimits = effectiveHttpSdkLimits();
     return newResponseFromState({
       status: convertedStatus,
       statusText: "",
       headers: createBindingHeaders([
         { name: "location", value: `${parsed.href}${parsed.fragment}` },
-      ]),
+      ], sdkLimits.headerBytes),
       body: null,
       url: "",
       redirected: false,
@@ -1631,6 +1731,7 @@ function validateResponseEvent(
   event: HttpResponseHeadersEvent,
   operationId: number,
   requestMethod: string,
+  sdkLimits: Readonly<EffectiveHttpSdkLimits>,
 ): void {
   if (
     event.eventCode !== NetworkV1EventCode.HttpResponseHeaders ||
@@ -1671,7 +1772,8 @@ function validateResponseEvent(
   }
   if (
     event.bufferedBodyBytes !== undefined &&
-    (!numberIsSafeInteger(event.bufferedBodyBytes) || event.bufferedBodyBytes <= 0)
+    (!numberIsSafeInteger(event.bufferedBodyBytes) || event.bufferedBodyBytes <= 0 ||
+      event.bufferedBodyBytes > sdkLimits.body.bufferedBytes)
   ) {
     throw new NetworkError("Invalid HTTP body limit from private binding", {
       category: "protocol",
@@ -1682,15 +1784,26 @@ function validateResponseEvent(
   }
 }
 
-function responseFromBinding(event: HttpResponseHeadersEvent): Response {
+function responseFromBinding(
+  event: HttpResponseHeadersEvent,
+  sdkLimits: Readonly<EffectiveHttpSdkLimits>,
+): Response {
   let headers: Headers;
   let body: BodyController | null = null;
   try {
-    headers = createBindingHeaders(event.headers);
+    headers = createBindingHeaders(event.headers, sdkLimits.headerBytes);
     if (event.body !== undefined && event.body !== null) {
+      const bufferedBytes = mathMin(
+        event.bufferedBodyBytes ?? sdkLimits.body.bufferedBytes,
+        sdkLimits.body.bufferedBytes,
+      );
       body = bodyFromBinding(
         event.body,
-        Math.min(event.bufferedBodyBytes ?? HTTP_BODY_HELPER_BYTES, HTTP_BODY_HELPER_BYTES),
+        objectFreeze({
+          ...sdkLimits.body,
+          bufferedBytes,
+          teeBranchBytes: mathMin(sdkLimits.body.teeBranchBytes, bufferedBytes),
+        }),
       );
     }
   } catch {
@@ -1818,11 +1931,14 @@ export async function fetch(
   const binding = getHttpClientBinding();
   if (!binding) return unsupportedNetworkPromise("http.fetch", "http");
 
+  const sdkLimits = effectiveHttpSdkLimits(binding);
+
   const request = new Request(input, init);
   const state = requestState(request);
   try {
     const parsedUrl = validateFetchUrl(state.url);
     preflightBindingFeatures(binding, state, parsedUrl);
+    if (state.limits !== undefined) normalizeLimits(state.limits, binding);
     if (abortSignalAborted(state.signal)) throw abortError();
   } catch (error) {
     state.detachSignal();
@@ -1890,8 +2006,8 @@ export async function fetch(
     const event = snapshotResponseEvent(await Promise.race([operation.response, aborted]));
     receivedEvent = event;
     if (abortSignalAborted(state.signal)) throw abortError();
-    validateResponseEvent(event, operationId, state.method);
-    const response = responseFromBinding(event);
+    validateResponseEvent(event, operationId, state.method, sdkLimits);
+    const response = responseFromBinding(event, sdkLimits);
     responseBody = responseState(response).body;
     if (abortSignalAborted(state.signal)) throw abortError();
     // A response-headers event claims the request-upload direction terminal.
