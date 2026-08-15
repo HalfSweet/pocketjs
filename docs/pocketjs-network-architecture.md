@@ -25,8 +25,8 @@
 | 状态 | 范围 | 含义 |
 |---|---|---|
 | 共同基线 | 第 8–20、24–25 节中的 capability、permission、Backend、turn、operation、queue、buffer、错误、资源、teardown 与 conformance 机制 | 从第一项网络能力开始生效；后续协议不能绕开 |
-| 第一项公共能力 | HTTP Client，以及它实际使用的 `@pocketjs/framework/net` 支持类型 | 完成 ESP-IDF Phase 1A 后才可声明可用 |
-| 同一 Host 的后续能力 | WebSocket Client | 只有 HTTP/substrate gate 通过后才进入 ESP-IDF Phase 1B；PSP 也必须先完成 HTTP parity。WSS 的 TLS role 另行 admission |
+| 第一项公共能力 | 明文 HTTP Client，以及它实际使用的 `@pocketjs/framework/net` 支持类型 | 完成 ESP-IDF Phase 1A 后只声明 `network.http.client`；HTTPS 在 Phase 1B 单独准入 |
+| 同一 Host 的后续能力 | HTTP Client TLS、WebSocket Client | HTTP TLS 通过独立 Phase 1B 后才声明 `network.http.client.tls`；WebSocket 只有 HTTP/substrate gate 通过后才进入 ESP-IDF Phase 1C。WSS 的 TLS role 另行 admission |
 | staged target | HTTP Server、WebSocket Server/upgrade、MQTT、公共 TCP/UDP、Browser profile 与第 23 节完整 record/replay tooling | 保留目标契约和能力命名，**当前不构成交付承诺**；必须有具体用户故事、Host 预算和独立互操作测试后单独晋级 |
 | future | TLS-PSK、mDNS/设备发现、HTTP/2/3、MQTT 5、DTLS 与真正无 UI daemon | 只保留边界或命名空间，不进入本轮公共 API |
 
@@ -37,8 +37,9 @@ NetDriver 的 plain stream、listener 和 datagram 形状继续作为完整 subs
 | 阶段 | Host 与公开角色 | 必须通过的出口条件 |
 |---|---|---|
 | Phase 0 | 旧 NET v1 | 冻结旧 surface；在首个新 capability 合入前移除 `@pocketjs/framework/net` 的旧导出以及应用可达的 `globalThis.net` 和 `net.http`，内部代码只可作为迁移素材暂留；随后才由新的支持模块接管该 package path |
-| Phase 1A | **ESP-IDF：HTTP Client** | Shared Async Runtime、HTTP/1.1、权限、资源、取消/timeout、ESP-TLS、无 UI frame delivery、独立 HTTP/TLS peer 与目标硬件资源测试全部通过 |
-| Phase 1B | **ESP-IDF：WebSocket Client** | 复用已经通过的 substrate；通过独立 RFC 6455 suite、长连接、断链与背压测试。WSS 还必须独立准入 `websocket.client` TLS role |
+| Phase 1A | **ESP-IDF：明文 HTTP Client** | Shared Async Runtime、HTTP/1.1、权限、资源、取消/timeout、无 UI frame delivery、独立 HTTP peer 与目标硬件资源测试全部通过；只广告 `network.http.client` |
+| Phase 1B | **ESP-IDF：HTTP Client TLS** | 在已经通过的 HTTP Core 上选择 ESP-TLS source；TLS 1.2、Host trust、可信时钟、hostname verification、SNI、无明文 fallback、独立 TLS peer 与握手资源测试全部通过后才广告 `network.http.client.tls` |
+| Phase 1C | **ESP-IDF：WebSocket Client** | 复用已经通过的 substrate；通过独立 RFC 6455 suite、长连接、断链与背压测试。WSS 还必须独立准入 `websocket.client` TLS role |
 | Phase 2A | **PSP：明文 HTTP Client parity** | 不扩大 JS surface；先证明 PSP 网络初始化、link/address 变化、IPv4 resolver/plain stream、owner-thread wake、内存预算和真机 teardown，再运行 HTTP 公共断言 |
 | Phase 2B | **PSP：HTTPS/TLS gate** | 单独选择并验证 PSP TLS source/HTTPS Backend；通过独立 TLS peer、错误时钟和握手内存测试前不声明 `network.http.client.tls` |
 | Phase 2C | **PSP：WebSocket Client parity** | Phase 2A/2B 通过后执行 WebSocket 长连接、WLAN 断开/恢复、休眠/恢复和真机资源测试；WSS 仍需要独立 TLS source/descriptor/peer gate，不能继承 Phase 2B 的 HTTP TLS |
@@ -1002,20 +1003,20 @@ flowchart LR
 - Server credential handle、client certificate policy 和 ALPN；
 - Core 计算的 handshake deadline 与 cancel token。
 
-### 14.1 ESP-IDF Phase 1 TLS source
+### 14.1 ESP-IDF Phase 1B TLS source
 
-ESP-IDF Phase 1 固定以下装配候选，并把最终选择写入 canonical Build Plan/descriptor：
+ESP-IDF Phase 1A 先固定 plain `NetDriver` 与 HTTP Backend；Phase 1B 再固定以下 TLS 装配候选，并把最终选择写入 canonical Build Plan/descriptor：
 
 - `NetDriver` 使用 lwIP socket 与 ESP-NETIF；BSP 必须先提供已初始化的具体 network interface，PocketJS 不负责配网 UI；
 - TLS implementation 使用 [ESP-TLS](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32p4/api-reference/protocols/esp_tls.html) 及其默认 Mbed TLS backend。ESP-TLS 提供非阻塞连接、CA verification、SNI 和 ALPN 等 native primitive；Phase 1 不实现 `PocketTlsProvider`；
 - 使用 reference HTTP/1.1 Backend 时，ESP-TLS 适配为独立 `NativeTlsProvider`，`tlsByRole["http.client"] = { source: "provider", id: <esp-tls-provider-id> }`；
 - 使用 [ESP HTTP Client](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32p4/api-reference/protocols/esp_http_client.html) native Backend 时，HTTPS 由该 Backend 内部的 ESP-TLS 数据路径完成，descriptor 必须声明 `internalTls`，并选择 `tlsByRole["http.client"] = { source: "backend", id: <esp-http-client-backend-id> }`；不能同时伪装为经过独立 `NativeTlsProvider`。
 
-ESP HTTP Client 只作为 `HttpClientBackend` 候选。它必须证明 DNS candidate policy、逐跳 redirect、完整重复 header、严格 framing、streaming/backpressure、取消、timeout 和隐藏重试都能受 Core 控制；任一项无法兑现时，Phase 1 改用 reference HTTP/1.1 Backend over lwIP + ESP-TLS。两种路径只能选择一个并写入 plan；选择变化会改变 `ResolvedNetworkProviders`/`planHash`，必须重跑整个 Phase 1A HTTP/TLS suite，不能放宽公共合同。
+ESP HTTP Client 只作为 `HttpClientBackend` 候选。它必须证明 DNS candidate policy、逐跳 redirect、完整重复 header、严格 framing、streaming/backpressure、取消、timeout 和隐藏重试都能受 Core 控制；任一项无法兑现时，Phase 1 改用 reference HTTP/1.1 Backend over lwIP，并在 Phase 1B 接入 ESP-TLS。两种路径只能选择一个并写入 plan；选择变化会改变 `ResolvedNetworkProviders`/`planHash`，必须重跑 Phase 1A HTTP suite；若 TLS source 或最终 Backend 也变化，还必须重跑 Phase 1B TLS suite，不能放宽公共合同。
 
 对锁定的 ESP-IDF v6.0.2 实现审阅后，ESP HTTP Client 当前只可作为 experimental transport spike。它在调用 response header callback 前会动态累积 parser/header 状态，公开 API 不提供任意 method token 或 wire reason phrase，同步 DNS/connect/TLS 没有安全的跨 task 取消点，`esp_http_client_cancel_request()` 也不能从 owner task 与 worker 并发调用。spike 必须把所有 handle 操作固定在同一个 worker，使用手动 `open/write/fetch_headers/read/close` 路径，关闭自动 redirect/auth retry，并在 descriptor 中把这些缺口标为 unsupported。解决有界 parser、method/status text、DNS policy 和可中断连接前，不能把该 Backend 选入正式 Build Plan。
 
-Phase 1A 只要求 IPv4、HTTP/1.1、TLS 1.2、Host trust、hostname verification 与 SNI。TLS 1.3 requirement、custom CA、client certificate、custom ALPN 和 revocation capability 默认 staged；只有对应测试和资源预算通过后，ESP-IDF descriptor 才能逐项增加 feature。整个 HTTP Client contract 通过前，ESP32-P4+C6 与 ESP32-S3 profile 都保持 experimental，不能在 target registry 中广告 `network.http.client` 或 `.tls`。
+Phase 1A 只要求 IPv4 与 HTTP/1.1，并且只接受 manifest 明确允许的明文 endpoint；它通过前，ESP32-P4+C6 与 ESP32-S3 profile 都不能在 target registry 中广告 `network.http.client`。Phase 1B 要求 TLS 1.2、Host trust、hostname verification 与 SNI；它通过前只能保留已经准入的明文 capability，不能广告 `.tls`。TLS 1.3 requirement、custom CA、client certificate、custom ALPN 和 revocation capability 默认 staged；只有对应测试和资源预算通过后，ESP-IDF descriptor 才能逐项增加 feature。
 
 ESP-IDF Host 必须提供显式的 wall-clock trust 状态。时间可以由产品 provisioning、持久化 RTC 或 [ESP-NETIF SNTP](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32p4/api-reference/system/system_time.html) 建立，但“系统有一个数值”不等于可信。需要检查证书有效期而 wall clock 尚未可信时，TLS handshake fail closed 并映射为 `tls_certificate_invalid`，平台细节只进入脱敏的 `causeCode`；生产构建不能通过关闭有效期验证继续连接。
 
@@ -1332,12 +1333,12 @@ TLS 1.2 wire 固定到 [RFC 5246](https://www.rfc-editor.org/rfc/rfc5246)，可�
 |---|---|---|---|
 | HTTP Client | HTTP/1.1、streaming body、keep-alive、redirect、AbortSignal；禁用 pipelining | ESP-IDF Phase 1A；PSP Phase 2A parity | HTTP/2、HTTP/3、compression、public trailers |
 | HTTP Server | HTTP/1.1、streaming body、keep-alive、graceful stop；禁用 pipelining | staged | HTTP/2、HTTP/3、server push |
-| WebSocket Client | RFC 6455、fragmentation、text/binary、ping/pong、close；WSS 使用独立 `websocket.client` TLS role admission | ESP-IDF Phase 1B；PSP Phase 2C parity | per-message compression |
+| WebSocket Client | RFC 6455、fragmentation、text/binary、ping/pong、close；WSS 使用独立 `websocket.client` TLS role admission | ESP-IDF Phase 1C；PSP Phase 2C parity | per-message compression |
 | WebSocket Server / upgrade | RFC 6455 Server 与显式 HTTP upgrade lease | staged | per-message compression |
 | MQTT Client | 3.1.1、QoS 0/1、retain、will、keepalive、当前 client/runtime 内的 clean/persistent session | staged | MQTT 5、QoS 2、durable offline/session store |
 | TCP Client / Server | IPv4、half-close、handler/pull 两种读取模式 | staged public API；NetDriver plain stream 仍是 substrate | IPv6、Unix socket |
 | UDP | IPv4 connected/unconnected、sendMany、handler/pull 两种读取模式 | staged public API；NetDriver datagram 仍是 substrate | IPv6、broadcast、multicast、DTLS |
-| TLS | TLS 1.2、Host trust/hostname verification 或 Server credential、禁用 0-RTT | ESP-IDF HTTP Client Phase 1A；PSP HTTP Client Phase 2B；其他 role 随对应阶段 | 可自动协商 TLS 1.3；应用要求 1.3 需独立 capability |
+| TLS | TLS 1.2、Host trust/hostname verification 或 Server credential、禁用 0-RTT | ESP-IDF HTTP Client Phase 1B；PSP HTTP Client Phase 2B；其他 role 随对应阶段 | 可自动协商 TLS 1.3；应用要求 1.3 需独立 capability |
 
 本表固定每个 role 的 v1 contract，不要求目标一次实现全部 role。前文各 API 章节定义 capability 被声明后的可观察语义；处于 staged 的 role 不能出现在 Host descriptor 中。Host Backend descriptor 必须准确报告扩展。静态 required 扩展缺失时构建失败，动态 option 未进入 ResolvedBuildPlan 时返回 `unsupported`，不能静默降级或用行为不同的模拟实现。
 
@@ -1507,14 +1508,19 @@ reference 与 native Backend 对共同 feature 使用同一套断言；native Ba
 
 除 fake Backend 和 PocketJS reference self-test 外，每个晋级 role 还需要独立实现参与的真实 wire 黑盒互操作：HTTP Client 对独立 Server、HTTP Server 对独立 Client、WebSocket 运行 Autobahn Testsuite 或同等级独立 RFC 6455 suite、MQTT 连接独立 3.1.1 broker（例如 Mosquitto），TCP/UDP 分别使用独立 echo/half-close peer 与 datagram peer。PocketJS TLS Client 必须对独立 TLS Server 测试，PocketJS TLS Server 也必须对独立 TLS Client 测试；只让 reference 与 native Backend 互测不能作为 wire conformance 通过条件。
 
-Phase 1A 的 ESP-IDF admission 额外要求：
+Phase 1A 的 ESP-IDF 明文 HTTP admission 额外要求：
 
 - 固定 ESP-IDF v6.0.2 commit `7101770dc6db2667b3c477cc31365dd1acd6db4e`、具体 board/BSP 和具体 Ethernet/Wi-Fi expansion；AtomS3R 与 Tab5 分别完成 firmware build/link，并分别记录 flash、internal DRAM、PSRAM、task stack 与 native pool；
-- 真机证明停止 UI frame 后 HTTPS Promise/handler 仍运行，所有 QuickJS 调用只在 owner task，frame/network 同 ready、取消/timeout/success race 与 teardown 符合第 15–18 节；
+- 真机证明停止 UI frame 后 HTTP Promise/handler 仍运行，所有 QuickJS 调用只在 owner task，frame/network 同 ready、取消/timeout/success race 与 teardown 符合第 15–18 节；
 - 冷启动、DHCP、DNS 多候选、link down/up、私网过滤，以及没有 BSP network interface 时 capability admission 失败；
 - 独立 HTTP peer 覆盖 streaming、chunked/trailer validation、TE+CL、重复 CL、obs-fold、逐跳 redirect permission、各阶段 abort/timeout、4xx/5xx 与连接复用，并证明没有隐藏 retry/redirect/auth/cookie/proxy/compression；
+- 最大并发、queue overflow、反复连接/取消、长流和至少一个规定时长的 soak，全部资源高水位保持在声明 hard limit 内且无泄漏/碎片持续增长。
+
+Phase 1B 的 ESP-IDF HTTP TLS admission 在 Phase 1A 全部断言之上额外要求：
+
 - 独立 TLS PKI 覆盖 TLS 1.2、有效链、未知 CA、expired/not-yet-valid、hostname mismatch、SNI、无可信 wall clock 与无明文 fallback；
-- 最大并发、queue overflow、反复握手/取消、长流和至少一个规定时长的 soak，全部资源高水位保持在声明 hard limit 内且无泄漏/碎片持续增长。
+- TLS handshake 的取消、timeout、反复连接与至少一个规定时长的 soak，握手内存、native allocation、task stack 和连接资源高水位保持在声明 hard limit 内；
+- HTTPS 重跑 Phase 1A 的 redirect、streaming、framing、错误与 teardown 断言，证明 TLS wrapper 不改变 HTTP 可观察语义。
 
 PSP Phase 2 的 admission 额外要求：
 
@@ -1533,15 +1539,16 @@ PSP Phase 2 的 admission 额外要求：
 建议按以下顺序落地：
 
 1. **Phase 0：冻结旧 NET。** 立即停止增加旧 API，在首个新 capability 合入前移除 `@pocketjs/framework/net` 的旧 value export、manifest capability 与 Host 注入形成的应用可达 `globalThis.net` 和 `net.http`；只有有明确迁移用途的 parser、bounded allocation 或 fixture 可以暂留内部。旧导出清除后，新的公共支持模块与协议子路径才可以接管 `@pocketjs/framework/net` namespace。
-2. **先建 gate。** 建立 fake clock/wake、竞态/model、HTTP/TLS 独立 peer 与硬件资源 harness；锁定 AtomS3R 与 Tab5 的 network interface/BSP、ESP-IDF v6.0.2 commit、HTTP Backend 候选与 ESP-TLS TLS source。两块板先运行独立 build/link gate，再运行板间 smoke 和各自的独立 peer/resource gate；板间互通不能替代 conformance。
+2. **先建 gate。** 建立 fake clock/wake、竞态/model、HTTP/TLS 独立 peer 与硬件资源 harness；锁定 AtomS3R 与 Tab5 的 network interface/BSP、ESP-IDF v6.0.2 commit、HTTP Backend 候选与下一阶段的 ESP-TLS TLS source。两块板先运行独立 build/link gate，再运行板间 smoke 和各自的独立 peer/resource gate；板间互通不能替代 conformance。
 3. **独立固定 private ABI 注入。** 在跨仓库 build/artifact 变更中选择并验证第 11.1 节的 bundle factory 或满足全部约束的过渡适配器；覆盖所有实际参与 Phase 1 的 compiler/loader/test 路径。
 4. 固定 manifest format 3、ResolvedNetworkPolicy、ResolvedNetworkProviders、Build Plan/HostBuildInputs 传递、package admission、NetworkLimits 与稳定错误。
 5. 落地 Network Guest Binding、Shared Async Runtime、logical turn/slice、operation claim、completion credit、ready-resource list、BufferLease 和三阶段 teardown；同时把 framework/ESP-IDF Host 接到统一 `beginGuestTurn/flushGuestTurn/endGuestTurn`、non-presenting mutation commit 与 headless wake。
-6. **ESP-IDF Phase 1A：** 只打通 HTTP Client、lwIP/ESP-NETIF、选定 HTTP Backend 和第 14.1 节对应的 ESP-TLS TLS source；实现与 HTTP/TLS independent peer、竞态、资源和目标硬件 gate 同步完成。全部通过后才广告 capability。
-7. **ESP-IDF Phase 1B：** 只有出现 WebSocket Client 使用方并通过独立 RFC 6455/长连接/背压 gate 后才开放；WSS 另行选择并准入 `websocket.client` TLS role，不能复用 HTTP role 的通过结果，也不能顺带加入 Server、MQTT 或公共 TCP/UDP。
-8. **PSP Phase 2：** 先完成第 1.3 节 Host substrate，再依次执行明文 HTTP Client、HTTP TLS/HTTPS 和 WebSocket Client gate；WSS 使用独立 TLS source/descriptor/peer gate。每一步保持 capability 默认关闭，直到 PSP-1000 真机验收。
-9. 后续 staged role 每个单独提出需求、实现、独立 peer conformance、资源报告和 capability admission；Browser profile 与 replay 也分别接入，不能作为端侧 Phase 1 的隐含范围。
-10. 删除剩余迁移代码与旧 opcode，执行 repo-wide 零残留审计；内部迁移素材不能无限期保留为第二套网络栈。
+6. **ESP-IDF Phase 1A：** 只打通明文 HTTP Client、lwIP/ESP-NETIF 与选定 HTTP Backend；实现与独立 HTTP peer、竞态、资源和目标硬件 gate 同步完成。全部通过后只广告 `network.http.client`。
+7. **ESP-IDF Phase 1B：** 在同一 HTTP contract 上接入第 14.1 节的 ESP-TLS source；完成独立 TLS peer、可信时钟、无明文 fallback、握手竞态与资源 gate 后才增加 `network.http.client.tls`，Phase 1A 的明文结果不能替代该 gate。
+8. **ESP-IDF Phase 1C：** 只有出现 WebSocket Client 使用方并通过独立 RFC 6455/长连接/背压 gate 后才开放；WSS 另行选择并准入 `websocket.client` TLS role，不能复用 HTTP role 的通过结果，也不能顺带加入 Server、MQTT 或公共 TCP/UDP。
+9. **PSP Phase 2：** 先完成第 1.3 节 Host substrate，再依次执行明文 HTTP Client、HTTP TLS/HTTPS 和 WebSocket Client gate；WSS 使用独立 TLS source/descriptor/peer gate。每一步保持 capability 默认关闭，直到 PSP-1000 真机验收。
+10. 后续 staged role 每个单独提出需求、实现、独立 peer conformance、资源报告和 capability admission；Browser profile 与 replay 也分别接入，不能作为端侧 Phase 1 的隐含范围。
+11. 删除剩余迁移代码与旧 opcode，执行 repo-wide 零残留审计；内部迁移素材不能无限期保留为第二套网络栈。
 
 每一步都必须保持 capability 默认关闭。迁移期间不能同时把新旧模块装入同一个 runtime，以免产生两套权限与调度语义。仓库内当前没有生产使用方，只能说明清理成本低；不能据此假设仓库外 bundle 获得兼容承诺，因此 Phase 0 仍需要清晰的 breaking-change release note。
 
