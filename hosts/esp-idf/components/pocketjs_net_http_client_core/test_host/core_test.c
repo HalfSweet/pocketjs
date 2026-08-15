@@ -682,6 +682,7 @@ static void test_headers_body_and_status_success(void) {
       fixture.core, body.detail.body.lease));
   retire_event(&fixture, body);
   assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 1U));
+  pump(&fixture);
   assert(
       !pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 1U));
   assert(fixture.fake.active_kind == FAKE_CLOSE);

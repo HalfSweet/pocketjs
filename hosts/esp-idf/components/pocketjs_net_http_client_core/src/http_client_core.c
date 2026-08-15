@@ -137,6 +137,7 @@ struct pocketjs_net_http_client_core {
   bool completion_retire_pending;
 
   size_t body_credit;
+  bool terminal_body_pull_active;
   uint8_t body_bytes[POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES];
   size_t body_byte_count;
   bool body_lease_active;
@@ -2036,17 +2037,17 @@ bool pocketjs_net_http_client_core_grant_body_credit(
         core->response_status != 204U && core->response_status != 205U &&
         core->response_status != 304U;
     if (!core->terminal_success || !core->parser_complete ||
-        !response_exposes_body) {
+        !response_exposes_body || core->terminal_body_pull_active) {
       return false;
     }
     /*
      * The last non-empty body lease is not itself an EOF marker. Accept one
      * final downstream pull while the successful terminal is closing or
      * queued so the binding can wait for BODY_END without mistaking normal
-     * end-of-stream for an invalid state. The credit also rejects duplicates
-     * until terminal retirement resets the operation.
+     * end-of-stream for an invalid state. Dedicated one-shot state rejects
+     * duplicates until terminal retirement resets the operation.
      */
-    core->body_credit = maximum_bytes;
+    core->terminal_body_pull_active = true;
     return true;
   }
 
@@ -2229,6 +2230,7 @@ static void reset_after_terminal(pocketjs_net_http_client_core_t *core) {
   core->request_body_pull_active = false;
   core->request_body_pull_event_retired = false;
   core->body_credit = 0U;
+  core->terminal_body_pull_active = false;
   core->body_byte_count = 0U;
   core->body_lease_active = false;
   core->body_lease_released = false;
