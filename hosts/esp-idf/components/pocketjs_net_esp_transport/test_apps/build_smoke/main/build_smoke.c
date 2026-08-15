@@ -15,6 +15,7 @@ void app_main(void) {
   assert(!descriptor->advertises_public_capability);
   assert(descriptor->ipv4);
   assert(descriptor->asynchronous_raw_dns);
+  assert(descriptor->stock_lwip_dns_callbacks_only);
   assert(!descriptor->complete_dns_candidate_set);
   assert(!descriptor->dns_cancel_generation_cleanup);
   assert(!descriptor->synchronous_getaddrinfo_for_hostname);
