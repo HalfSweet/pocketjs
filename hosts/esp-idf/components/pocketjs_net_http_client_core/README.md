@@ -84,14 +84,20 @@ completion-retirement failure cannot replace it. Those native cleanup failures
 set machine-readable poison flags exposed by
 `pocketjs_net_http_client_core_get_status`; a poisoned Core rejects every new
 request. Failed lease release retains the exact handle as owned state, and a
-failed completion retirement retains its token for bounded retries.
+failed completion retirement retains its token for bounded retries. An exact
+Host event-retirement invariant failure is reported separately and retains the
+delivering event and any body lease until shutdown cleanup.
 
 The lifecycle is explicit. `begin_shutdown` permanently stops admission and
 aborts a current request. The owner continues pumping and retiring events until
 `is_quiescent` succeeds, then calls `deinit`. If poisoned native ownership cannot
 be discharged through the transport API, the product must synchronously destroy
 the dedicated transport and call `confirm_transport_shutdown` before the Core
-can become quiescent. `init` detects and rejects reuse of live storage.
+can become quiescent. A poisoned Core whose exact Host event still cannot be
+retired after that confirmation exposes a separate abandon call; it is rejected
+before shutdown, on a healthy Core, before transport confirmation, for a pending
+event, or for a mismatched sequence. `init` detects and rejects reuse of live
+storage.
 
 The Core performs no automatic redirect, retry, authentication, cookie,
 proxy, compression, or decompression behavior. Redirect responses are exposed
@@ -139,7 +145,8 @@ boundaries, and exact-one terminal delivery. Hostile cases cover all
 public API calls attempted from a permission callback, bytes-plus-EOF reads,
 stale completions while idle, malformed read cleanup, lease and completion
 retirement failures, close admission/error/timeout, terminal immutability,
-explicit teardown, HEAD, 1xx followed by 304, numeric-host denial, and the exact
+explicit teardown, poison-only Host event/lease abandonment, HEAD, 1xx followed
+by 304, numeric-host denial, and the exact
 4096-byte fixed request-body boundary. Streaming hostile cases cover strict
 chunk coding over more than 64 KiB, one-byte chunks, asynchronous credit after
 event retirement, empty/oversized/no-credit/stale submissions, known-length
