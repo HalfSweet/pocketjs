@@ -279,12 +279,13 @@ class FakeHost {
   headers(
     body: NetworkV1Handle = ABSENT,
     sequence = 1,
+    status = 200,
   ): NetworkV1Completion {
     return Object.freeze({
       eventCode: NetworkV1EventCode.HttpResponseHeaders,
       identity: completionIdentity(this.startCommand, body, sequence),
       metadata: Object.freeze({
-        status: 200,
+        status,
         statusText: "OK",
         headers: Object.freeze([Object.freeze({ name: "content-type", value: "text/plain" })]),
         url: "http://example.test/",
@@ -510,6 +511,8 @@ describe("formal HTTP command/completion adapter", () => {
       new AbortController().signal,
     )).toThrow("request method is invalid");
     expect(host.commands).toHaveLength(0);
+    binding.start(highStart(2), null, new AbortController().signal);
+    expect(host.startCommand.identity.operation.generation).toBe(1);
   });
 
   test("snapshots every Host response metadata field exactly once", async () => {
@@ -1213,6 +1216,62 @@ describe("formal HTTP command/completion adapter", () => {
     } finally {
       cleanup();
     }
+  });
+
+  test("holds a bodyless operation slot until native BODY_END", async () => {
+    const host = new FakeHost();
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(
+      host.table,
+      EXPECTED,
+      { maxOperations: 1 },
+    ));
+    const first = binding.start(highStart(1), null, new AbortController().signal);
+    const firstGeneration = host.startCommand.identity.operation.generation;
+    host.completions.push(host.headers(ABSENT, 1, 204));
+    host.run();
+    const response = await first.response;
+    expect(response.status).toBe(204);
+    expect("body" in response).toBe(false);
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("capacity");
+
+    host.completions.push(host.end(ABSENT, 2));
+    host.run();
+    binding.start(highStart(3), null, new AbortController().signal);
+    expect(host.startCommand.identity.operation.generation).toBe(firstGeneration + 1);
+  });
+
+  test("holds a cancelled body slot until native terminal cleanup", async () => {
+    const host = new FakeHost();
+    const binding = admittedBinding(createNetworkV1HttpBindingAdapterForTesting(
+      host.table,
+      EXPECTED,
+      { maxOperations: 1 },
+    ));
+    const first = binding.start(highStart(1), null, new AbortController().signal);
+    const body = Object.freeze({ id: 91, generation: 1 });
+    host.completions.push(host.headers(body, 1));
+    host.run();
+    const response = await first.response;
+    await response.body!.cancel();
+    expect(() => binding.start(
+      highStart(2),
+      null,
+      new AbortController().signal,
+    )).toThrow("capacity");
+
+    host.completions.push(host.chunk(body, [0x61], 2), Object.freeze({
+      eventCode: NetworkV1EventCode.BodyError,
+      identity: completionIdentity(host.startCommand, body, 3),
+      error: failure(NetworkV1ErrorCode.Aborted),
+    }));
+    host.run();
+    expect(host.releaseCount).toBe(1);
+    expect(await response.body!.readInto(new Uint8Array(1))).toEqual({ bytes: 0, done: true });
+    binding.start(highStart(3), null, new AbortController().signal);
   });
 
   test("bounds operation slots, advances generation, and never wraps", async () => {
