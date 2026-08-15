@@ -216,6 +216,150 @@ interface Collected {
 
 export type BuildFeatures = Readonly<Record<string, boolean>>;
 
+const NETWORK_SURFACE_DEMANDS: Readonly<
+  Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+  [`${PACKAGE_NAME}/net/http`]: {
+    fetch: ["network.http.client"],
+    serve: ["network.http.server"],
+  },
+  [`${PACKAGE_NAME}/net/websocket`]: {
+    connect: ["network.websocket.client"],
+    serve: ["network.websocket.server"],
+    upgrade: [
+      "network.http.server",
+      "network.websocket.server",
+      "network.websocket.server.upgrade",
+    ],
+  },
+  [`${PACKAGE_NAME}/net/mqtt`]: {
+    connect: ["network.mqtt.client"],
+  },
+  [`${PACKAGE_NAME}/net/tcp`]: {
+    connect: ["network.tcp.client"],
+    listen: ["network.tcp.server"],
+  },
+  [`${PACKAGE_NAME}/net/udp`]: {
+    udpSocket: ["network.udp"],
+  },
+};
+
+/** Value implementations that are declared for type-checking but cannot be
+ * linked into a PocketJS application until their Guest Binding is complete. */
+const STAGED_NETWORK_VALUES: Readonly<Record<string, ReadonlySet<string>>> = {
+  [`${PACKAGE_NAME}/net/http`]: new Set(["fetch", "serve", "Headers", "Request", "Response"]),
+  [`${PACKAGE_NAME}/net/websocket`]: new Set(["connect", "serve", "upgrade"]),
+  [`${PACKAGE_NAME}/net/mqtt`]: new Set(["connect"]),
+  [`${PACKAGE_NAME}/net/tcp`]: new Set(["connect", "listen"]),
+  [`${PACKAGE_NAME}/net/udp`]: new Set(["udpSocket"]),
+};
+
+function makeNetworkDemandGate(features: BuildFeatures | undefined): PluginObj {
+  const requireCapabilities = (
+    path: { buildCodeFrameError(message: string): Error },
+    source: string,
+    exportNames: readonly string[] | null,
+  ): void => {
+    const surface = NETWORK_SURFACE_DEMANDS[source];
+    if (!surface) return;
+    const names = exportNames ?? [
+      ...new Set([...Object.keys(surface), ...(STAGED_NETWORK_VALUES[source] ?? [])]),
+    ];
+    const demanded = new Set<string>();
+    for (const name of names) {
+      for (const capability of surface[name] ?? []) demanded.add(capability);
+    }
+    const missing = [...demanded].filter((capability) => features?.[capability] !== true);
+    if (missing.length === 0) return;
+    const selected = exportNames === null ? "namespace/all value exports" :
+      exportNames.map((name) => `\`${name}\``).join(", ");
+    throw path.buildCodeFrameError(
+      `PocketJS: ${source} ${selected} requires admitted ` +
+        `${missing.length === 1 ? "capability" : "capabilities"} ${missing.map((id) => `\`${id}\``).join(", ")}. ` +
+        "The ResolvedBuildPlan does not provide them.",
+    );
+  };
+
+  const requireReadySurface = (
+    path: { buildCodeFrameError(message: string): Error },
+    source: string,
+    exportNames: readonly string[] | null,
+  ): void => {
+    const staged = STAGED_NETWORK_VALUES[source];
+    if (!staged) return;
+    const names = exportNames ?? [...staged];
+    const unavailable = names.filter((name) => staged.has(name));
+    if (unavailable.length === 0) return;
+    throw path.buildCodeFrameError(
+      `PocketJS: ${source} ${unavailable.map((name) => `\`${name}\``).join(", ")} ` +
+        "is a staged surface whose Guest Binding is not available in this build.",
+    );
+  };
+
+  const checkSurface = (
+    path: { buildCodeFrameError(message: string): Error },
+    source: string,
+    exportNames: readonly string[] | null,
+  ): void => {
+    requireCapabilities(path, source, exportNames);
+    requireReadySurface(path, source, exportNames);
+  };
+
+  return {
+    name: "pocketjs-network-demand-gate",
+    visitor: {
+      ImportDeclaration(path) {
+        const source = path.node.source.value;
+        if (!NETWORK_SURFACE_DEMANDS[source] || path.node.importKind === "type") return;
+        let allValues = path.node.specifiers.length === 0;
+        const names: string[] = [];
+        for (const specifier of path.node.specifiers) {
+          if (specifier.type === "ImportSpecifier") {
+            if (specifier.importKind === "type") continue;
+            names.push(
+              specifier.imported.type === "Identifier"
+                ? specifier.imported.name
+                : specifier.imported.value,
+            );
+          } else {
+            allValues = true;
+          }
+        }
+        checkSurface(path, source, allValues ? null : names);
+      },
+      ExportNamedDeclaration(path) {
+        const source = path.node.source?.value;
+        if (!source || !NETWORK_SURFACE_DEMANDS[source] || path.node.exportKind === "type") return;
+        let allValues = false;
+        const names: string[] = [];
+        for (const specifier of path.node.specifiers) {
+          if (specifier.type !== "ExportSpecifier") {
+            allValues = true;
+            continue;
+          }
+          if (specifier.exportKind === "type") continue;
+          const local = specifier.local as
+            | { readonly type: "Identifier"; readonly name: string }
+            | { readonly type: "StringLiteral"; readonly value: string };
+          names.push(local.type === "Identifier" ? local.name : local.value);
+        }
+        checkSurface(path, source, allValues ? null : names);
+      },
+      ExportAllDeclaration(path) {
+        const source = path.node.source.value;
+        if (path.node.exportKind === "type") return;
+        checkSurface(path, source, null);
+      },
+      CallExpression(path) {
+        if (path.node.callee.type !== "Import" || path.node.arguments.length !== 1) return;
+        const argument = path.node.arguments[0];
+        if (argument?.type !== "StringLiteral") return;
+        checkSurface(path, argument.value, null);
+      },
+    },
+  };
+}
+
 /** Fold only calls proven to reference the public platform import. */
 function makeFeatureFolder(features: BuildFeatures): PluginObj {
   return {
@@ -387,17 +531,21 @@ function resolvePackageSubpath(spec: string): string | null {
 /**
  * Resolve an `@pocketjs/framework[/…]` import to a module file, or null to
  * let Bun's package.json resolution (or an error) take over. A framework
- * prefix (`vue-vapor/audio`) pins that framework's view; a bare subpath
- * resolves through the ACTIVE framework — both are lookups into the same
- * SUBPATHS-derived table, so the registry is the only authority.
+ * prefix (`vue-vapor/audio`) pins that framework's published alias; a bare
+ * subpath resolves through the ACTIVE framework. Both are lookups into the
+ * same SUBPATHS-derived table, so an absent `aliases` declaration cannot be
+ * bypassed by compiler resolution.
  */
 export function packagePath(spec: string, framework: PocketFramework): string | null {
   const subpath = resolvePackageSubpath(spec);
   if (subpath === null) return null;
   for (const fw of POCKET_FRAMEWORKS) {
-    if (subpath === fw) return RESOLVED[fw][""] ?? null;
+    if (subpath === fw) {
+      return SUBPATHS[""]?.aliases?.includes(fw) ? (RESOLVED[fw][""] ?? null) : null;
+    }
     if (subpath.startsWith(fw + "/")) {
-      return RESOLVED[fw][subpath.slice(fw.length + 1)] ?? null;
+      const name = subpath.slice(fw.length + 1);
+      return SUBPATHS[name]?.aliases?.includes(fw) ? (RESOLVED[fw][name] ?? null) : null;
     }
   }
   return RESOLVED[framework][subpath] ?? null;
@@ -457,6 +605,7 @@ export async function transformFile(
       presets: [],
       parserOpts: JSX_PARSER_OPTS,
       plugins: [
+        makeNetworkDemandGate(options.features),
         ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
         makeCollector(collected, framework),
       ],
@@ -483,6 +632,7 @@ export async function transformFile(
   const collected: Collected = { classStrings: [], textCodepoints: new Set() };
   const opts = transformOptions(framework);
   const plugins = [
+    makeNetworkDemandGate(options.features),
     ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
     makeCollector(collected, framework),
   ];
