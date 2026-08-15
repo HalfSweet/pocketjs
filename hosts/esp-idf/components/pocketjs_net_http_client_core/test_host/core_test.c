@@ -375,6 +375,13 @@ allow_endpoint(void *context,
     assert(!pocketjs_net_http_client_core_pump(log->core, 1U, 1U, 1U));
     assert(!pocketjs_net_http_client_core_grant_body_credit(log->core, 1U,
                                                             1U));
+    static const uint8_t request_body_byte[] = "x";
+    assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+        log->core, 1U, 1U, 1U, request_body_byte, 1U));
+    assert(!pocketjs_net_http_client_core_submit_request_body_end(
+        log->core, 1U, 1U, 1U));
+    assert(!pocketjs_net_http_client_core_submit_request_body_error(
+        log->core, 1U, 1U, 1U, 1));
     assert(!pocketjs_net_http_client_core_take_event(log->core, &event));
     assert(!pocketjs_net_http_client_core_retire_event(log->core, 1U));
     assert(!pocketjs_net_http_client_core_body_lease_view(
@@ -529,6 +536,93 @@ static void connect_and_write_get(fixture_t *fixture, uint64_t token,
                                   const char *url) {
   pocketjs_net_http_client_request_t request = make_get(token, url);
   connect_and_write_request(fixture, &request, "GET /x?q=1 HTTP/1.1\r\n");
+}
+
+static pocketjs_net_http_client_request_t make_streaming_post(
+    uint64_t token, bool length_known, uint64_t content_length) {
+  static const uint8_t url[] = "http://127.0.0.1/upload";
+  static const uint8_t post[] = "POST";
+  return (pocketjs_net_http_client_request_t){
+      .operation_token = token,
+      .url = {.data = url, .length = sizeof(url) - 1U},
+      .method = {.data = post, .length = sizeof(post) - 1U},
+      .body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING,
+      .streaming_content_length_known = length_known,
+      .streaming_content_length = content_length,
+  };
+}
+
+static void start_streaming_request(
+    fixture_t *fixture, const pocketjs_net_http_client_request_t *request) {
+  assert(pocketjs_net_http_client_core_start(fixture->core, request,
+                                             fixture->now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(fixture->fake.active_kind == FAKE_CONNECT);
+  fake_complete_connect(&fixture->fake);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_WRITE);
+  assert(bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
+                       "POST /upload HTTP/1.1\r\n"));
+  if (request->streaming_content_length_known) {
+    char expected[64];
+    int length = snprintf(expected, sizeof(expected), "Content-Length: %llu\r\n",
+                          (unsigned long long)request->streaming_content_length);
+    assert(length > 0 && (size_t)length < sizeof(expected));
+    assert(bytes_contain(fixture->fake.write_bytes,
+                         fixture->fake.write_length, expected));
+    assert(!bytes_contain(fixture->fake.write_bytes,
+                          fixture->fake.write_length,
+                          "Transfer-Encoding: chunked\r\n"));
+  } else {
+    assert(bytes_contain(fixture->fake.write_bytes,
+                         fixture->fake.write_length,
+                         "Transfer-Encoding: chunked\r\n"));
+    assert(!bytes_contain(fixture->fake.write_bytes,
+                          fixture->fake.write_length, "Content-Length:"));
+  }
+  fake_complete_write(&fixture->fake);
+  pump(fixture);
+}
+
+static pocketjs_net_http_client_event_t take_request_body_pull(
+    fixture_t *fixture, size_t expected_maximum) {
+  pocketjs_net_http_client_event_t pull = take_event(
+      fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL);
+  assert(pull.operation_token != 0U);
+  assert(pull.detail.request_body_pull.body_generation != 0U);
+  assert(pull.detail.request_body_pull.pull_generation != 0U);
+  assert(pull.detail.request_body_pull.maximum_bytes == expected_maximum);
+  return pull;
+}
+
+static void retire_request_body_pull(
+    fixture_t *fixture, pocketjs_net_http_client_event_t pull) {
+  retire_event(fixture, pull);
+  pocketjs_net_http_client_core_status_t status = get_status(fixture);
+  assert(status.request_body_credit_outstanding);
+  assert(!status.event_outstanding);
+  assert(status.request_body_generation ==
+         pull.detail.request_body_pull.body_generation);
+  assert(status.request_body_pull_generation ==
+         pull.detail.request_body_pull.pull_generation);
+}
+
+static void finish_empty_response(fixture_t *fixture) {
+  assert(fixture->fake.active_kind == FAKE_READ);
+  fake_complete_read(&fixture->fake, "HTTP/1.1 204 No Content\r\n\r\n",
+                     false);
+  pump(fixture);
+  pocketjs_net_http_client_event_t headers =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  assert(headers.detail.response.status_code == 204U);
+  retire_event(fixture, headers);
+  assert(fixture->fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture->fake);
+  pump(fixture);
+  pocketjs_net_http_client_event_t complete =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  retire_event(fixture, complete);
+  assert(!pocketjs_net_http_client_core_take_event(fixture->core, &complete));
 }
 
 static void test_headers_body_and_status_success(void) {
@@ -769,6 +863,7 @@ static void test_request_body_is_snapshotted(void) {
       .operation_token = 1U,
       .url = {.data = url, .length = sizeof(url) - 1U},
       .method = {.data = post, .length = sizeof(post) - 1U},
+      .body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED,
       .body = {.data = source_body, .length = sizeof(source_body) - 1U},
   };
   assert(pocketjs_net_http_client_core_start(fixture.core, &request,
@@ -1013,6 +1108,7 @@ static void test_maximum_request_body_boundary(void) {
       .operation_token = 1U,
       .url = {.data = url, .length = sizeof(url) - 1U},
       .method = {.data = post, .length = sizeof(post) - 1U},
+      .body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED,
       .body = {.data = source_body, .length = sizeof(source_body)},
   };
   assert(pocketjs_net_http_client_core_start(fixture.core, &request,
@@ -1039,6 +1135,413 @@ static void test_maximum_request_body_boundary(void) {
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
   assert(error.detail.error.code == POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED);
   retire_event(&fixture, error);
+}
+
+static void test_streaming_chunked_upload_exceeds_64k(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_streaming_post(1U, false, 0U);
+  start_streaming_request(&fixture, &request);
+
+  uint8_t chunk[POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES];
+  memset(chunk, 'a', sizeof(chunk));
+  uint64_t body_generation = 0U;
+  uint64_t previous_pull_generation = 0U;
+  uint64_t previous_event_sequence = 0U;
+  size_t total = 0U;
+  for (size_t index = 0U; index < 33U; ++index) {
+    chunk[0] = (uint8_t)('a' + index % 26U);
+    pocketjs_net_http_client_event_t pull = take_request_body_pull(
+        &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+    if (index == 0U) {
+      body_generation = pull.detail.request_body_pull.body_generation;
+    } else {
+      assert(pull.detail.request_body_pull.body_generation ==
+             body_generation);
+    }
+    assert(pull.detail.request_body_pull.pull_generation >
+           previous_pull_generation);
+    assert(pull.sequence > previous_event_sequence);
+    previous_pull_generation =
+        pull.detail.request_body_pull.pull_generation;
+    previous_event_sequence = pull.sequence;
+    retire_request_body_pull(&fixture, pull);
+    assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+        fixture.core, 1U, body_generation, previous_pull_generation, chunk,
+        sizeof(chunk)));
+    assert(fixture.fake.active_kind == FAKE_WRITE);
+    assert(fixture.fake.write_length == sizeof(chunk) + 7U);
+    assert(memcmp(fixture.fake.write_bytes, "800\r\n", 5U) == 0);
+    assert(memcmp(fixture.fake.write_bytes + 5U, chunk, sizeof(chunk)) == 0);
+    assert(memcmp(fixture.fake.write_bytes + 5U + sizeof(chunk), "\r\n",
+                  2U) == 0);
+    pocketjs_net_http_client_core_status_t status = get_status(&fixture);
+    assert(!status.request_body_credit_outstanding);
+    fake_complete_write(&fixture.fake);
+    pump(&fixture);
+    total += sizeof(chunk);
+  }
+  assert(total > 64U * 1024U);
+
+  pocketjs_net_http_client_event_t end_pull = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  assert(end_pull.detail.request_body_pull.body_generation == body_generation);
+  assert(end_pull.detail.request_body_pull.pull_generation >
+         previous_pull_generation);
+  retire_request_body_pull(&fixture, end_pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 1U, body_generation,
+      end_pull.detail.request_body_pull.pull_generation));
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(fixture.fake.write_length == 5U);
+  assert(memcmp(fixture.fake.write_bytes, "0\r\n\r\n", 5U) == 0);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  finish_empty_response(&fixture);
+
+  request = make_streaming_post(2U, false, 0U);
+  start_streaming_request(&fixture, &request);
+  pocketjs_net_http_client_event_t next_body_pull = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  assert(next_body_pull.detail.request_body_pull.body_generation >
+         body_generation);
+  assert(next_body_pull.detail.request_body_pull.pull_generation >
+         end_pull.detail.request_body_pull.pull_generation);
+  retire_request_body_pull(&fixture, next_body_pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 2U,
+      next_body_pull.detail.request_body_pull.body_generation,
+      next_body_pull.detail.request_body_pull.pull_generation));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  finish_empty_response(&fixture);
+}
+
+static void test_streaming_credit_is_hostile_input_safe(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_streaming_post(1U, false, 0U);
+  static const uint8_t x[] = "x";
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, 1U, 1U, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 1U, 1U, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_error(
+      fixture.core, 1U, 1U, 1U, 7));
+  start_streaming_request(&fixture, &request);
+
+  pocketjs_net_http_client_event_t first = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  uint64_t body_generation =
+      first.detail.request_body_pull.body_generation;
+  uint64_t first_pull_generation =
+      first.detail.request_body_pull.pull_generation;
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 1U, body_generation, first_pull_generation));
+  retire_request_body_pull(&fixture, first);
+
+  uint8_t oversize
+      [POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES + 1U];
+  memset(oversize, 'z', sizeof(oversize));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 2U, body_generation, first_pull_generation, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation + 1U, first_pull_generation, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation + 1U, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, NULL, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, x, 0U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, oversize,
+      sizeof(oversize)));
+  assert(get_status(&fixture).request_body_credit_outstanding);
+  assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, x, 1U));
+  assert(fixture.fake.write_length == 6U);
+  assert(memcmp(fixture.fake.write_bytes, "1\r\nx\r\n", 6U) == 0);
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, x, 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 1U, body_generation, first_pull_generation));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+
+  pocketjs_net_http_client_event_t second = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  assert(second.detail.request_body_pull.pull_generation >
+         first_pull_generation);
+  retire_request_body_pull(&fixture, second);
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation, first_pull_generation, x, 1U));
+  static const uint8_t y[] = "y";
+  assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+      fixture.core, 1U, body_generation,
+      second.detail.request_body_pull.pull_generation, y, 1U));
+  assert(memcmp(fixture.fake.write_bytes, "1\r\ny\r\n", 6U) == 0);
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  pocketjs_net_http_client_event_t end_pull = take_request_body_pull(
+      &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  retire_request_body_pull(&fixture, end_pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_end(
+      fixture.core, 1U, body_generation,
+      end_pull.detail.request_body_pull.pull_generation));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  finish_empty_response(&fixture);
+}
+
+static void test_known_length_streaming_accounting(void) {
+  fixture_t exact;
+  fixture_init(&exact);
+  pocketjs_net_http_client_request_t request =
+      make_streaming_post(1U, true, 5U);
+  start_streaming_request(&exact, &request);
+  pocketjs_net_http_client_event_t pull = take_request_body_pull(&exact, 5U);
+  uint64_t body_generation = pull.detail.request_body_pull.body_generation;
+  uint64_t pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&exact, pull);
+  static const uint8_t too_many[] = "123456";
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      exact.core, 1U, body_generation, pull_generation, too_many,
+      sizeof(too_many) - 1U));
+  assert(get_status(&exact).request_body_credit_outstanding);
+  static const uint8_t first[] = "12";
+  assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+      exact.core, 1U, body_generation, pull_generation, first,
+      sizeof(first) - 1U));
+  assert(exact.fake.write_length == 2U);
+  assert(memcmp(exact.fake.write_bytes, "12", 2U) == 0);
+  fake_complete_write(&exact.fake);
+  pump(&exact);
+  pull = take_request_body_pull(&exact, 3U);
+  assert(pull.detail.request_body_pull.body_generation == body_generation);
+  assert(pull.detail.request_body_pull.pull_generation > pull_generation);
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&exact, pull);
+  static const uint8_t last[] = "345";
+  assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+      exact.core, 1U, body_generation, pull_generation, last,
+      sizeof(last) - 1U));
+  assert(exact.fake.write_length == 3U);
+  assert(memcmp(exact.fake.write_bytes, "345", 3U) == 0);
+  fake_complete_write(&exact.fake);
+  pump(&exact);
+  assert(exact.fake.active_kind == FAKE_READ);
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      exact.core, 1U, body_generation, pull_generation, first,
+      sizeof(first) - 1U));
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      exact.core, 1U, body_generation, pull_generation));
+  finish_empty_response(&exact);
+
+  fixture_t underflow;
+  fixture_init(&underflow);
+  request = make_streaming_post(1U, true, 5U);
+  start_streaming_request(&underflow, &request);
+  pull = take_request_body_pull(&underflow, 5U);
+  body_generation = pull.detail.request_body_pull.body_generation;
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&underflow, pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_chunk(
+      underflow.core, 1U, body_generation, pull_generation, first,
+      sizeof(first) - 1U));
+  fake_complete_write(&underflow.fake);
+  pump(&underflow);
+  pull = take_request_body_pull(&underflow, 3U);
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&underflow, pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_end(
+      underflow.core, 1U, body_generation, pull_generation));
+  assert(underflow.fake.active_kind == FAKE_CLOSE);
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      underflow.core, 1U, body_generation, pull_generation));
+  fake_complete_close(&underflow.fake);
+  pump(&underflow);
+  pocketjs_net_http_client_event_t error =
+      take_event(&underflow, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code ==
+         POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY);
+  assert(error.detail.error.cause_code ==
+         POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_CAUSE_LENGTH_UNDERFLOW);
+  retire_event(&underflow, error);
+  assert(!pocketjs_net_http_client_core_take_event(underflow.core, &error));
+
+  fixture_t zero;
+  fixture_init(&zero);
+  request = make_streaming_post(1U, true, 0U);
+  start_streaming_request(&zero, &request);
+  assert(zero.fake.active_kind == FAKE_READ);
+  pocketjs_net_http_client_event_t unexpected;
+  assert(!pocketjs_net_http_client_core_take_event(zero.core, &unexpected));
+  finish_empty_response(&zero);
+}
+
+static void complete_streaming_error(fixture_t *fixture,
+                                     pocketjs_net_http_client_error_t code,
+                                     int32_t cause) {
+  assert(fixture->fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture->fake);
+  pump(fixture);
+  pocketjs_net_http_client_event_t error =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == code);
+  assert(error.detail.error.cause_code == cause);
+  retire_event(fixture, error);
+  assert(!pocketjs_net_http_client_core_take_event(fixture->core, &error));
+}
+
+static void test_streaming_cancel_timeout_error_and_teardown(void) {
+  static const uint8_t x[] = "x";
+
+  fixture_t aborted;
+  fixture_init(&aborted);
+  pocketjs_net_http_client_request_t request =
+      make_streaming_post(1U, false, 0U);
+  start_streaming_request(&aborted, &request);
+  pocketjs_net_http_client_event_t pull = take_request_body_pull(
+      &aborted, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  uint64_t body_generation = pull.detail.request_body_pull.body_generation;
+  uint64_t pull_generation = pull.detail.request_body_pull.pull_generation;
+  assert(pocketjs_net_http_client_core_abort(aborted.core, 1U));
+  assert(!get_status(&aborted).request_body_credit_outstanding);
+  assert(!pocketjs_net_http_client_core_retire_event(aborted.core,
+                                                      pull.sequence));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      aborted.core, 1U, body_generation, pull_generation, x, 1U));
+  complete_streaming_error(&aborted,
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
+
+  fixture_t timed_out;
+  fixture_init(&timed_out);
+  request = make_streaming_post(1U, false, 0U);
+  start_streaming_request(&timed_out, &request);
+  pull = take_request_body_pull(
+      &timed_out, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  body_generation = pull.detail.request_body_pull.body_generation;
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&timed_out, pull);
+  timed_out.now += timed_out.config.total_timeout_us + 1U;
+  assert(pocketjs_net_http_client_core_pump(timed_out.core, timed_out.now, 8U,
+                                            8U));
+  assert(!get_status(&timed_out).request_body_credit_outstanding);
+  assert(!pocketjs_net_http_client_core_submit_request_body_end(
+      timed_out.core, 1U, body_generation, pull_generation));
+  complete_streaming_error(&timed_out,
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_TIMED_OUT, 0);
+
+  fixture_t producer_error;
+  fixture_init(&producer_error);
+  request = make_streaming_post(1U, false, 0U);
+  start_streaming_request(&producer_error, &request);
+  pull = take_request_body_pull(
+      &producer_error, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  body_generation = pull.detail.request_body_pull.body_generation;
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&producer_error, pull);
+  assert(pocketjs_net_http_client_core_submit_request_body_error(
+      producer_error.core, 1U, body_generation, pull_generation, 31337));
+  assert(!pocketjs_net_http_client_core_submit_request_body_error(
+      producer_error.core, 1U, body_generation, pull_generation, 99));
+  complete_streaming_error(&producer_error,
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
+                           31337);
+
+  fixture_t teardown;
+  fixture_init(&teardown);
+  request = make_streaming_post(1U, false, 0U);
+  start_streaming_request(&teardown, &request);
+  pull = take_request_body_pull(
+      &teardown, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
+  body_generation = pull.detail.request_body_pull.body_generation;
+  pull_generation = pull.detail.request_body_pull.pull_generation;
+  retire_request_body_pull(&teardown, pull);
+  ++teardown.now;
+  assert(pocketjs_net_http_client_core_begin_shutdown(teardown.core,
+                                                       teardown.now));
+  assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
+      teardown.core, 1U, body_generation, pull_generation, x, 1U));
+  complete_streaming_error(&teardown,
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
+  assert(pocketjs_net_http_client_core_is_quiescent(teardown.core));
+  assert(pocketjs_net_http_client_core_deinit(teardown.core));
+}
+
+static void test_request_body_mode_validation(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  static const uint8_t x[] = "x";
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://127.0.0.1/");
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST);
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST);
+  static const uint8_t head[] = "HEAD";
+  request.method = (pocketjs_net_http_client_slice_t){
+      .data = head,
+      .length = sizeof(head) - 1U,
+  };
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST);
+
+  static const uint8_t post[] = "POST";
+  request.method = (pocketjs_net_http_client_slice_t){
+      .data = post,
+      .length = sizeof(post) - 1U,
+  };
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE;
+  request.body = (pocketjs_net_http_client_slice_t){.data = x, .length = 1U};
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request.body = (pocketjs_net_http_client_slice_t){0};
+  request.streaming_content_length_known = true;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request.streaming_content_length_known = false;
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_FIXED;
+  request.body = (pocketjs_net_http_client_slice_t){
+      .data = x,
+      .length = POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES + 1U,
+  };
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_LIMIT_EXCEEDED);
+  request.body_kind = POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING;
+  request.body = (pocketjs_net_http_client_slice_t){.data = x, .length = 1U};
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request.body = (pocketjs_net_http_client_slice_t){0};
+  request.streaming_content_length = 1U;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  request.streaming_content_length = 0U;
+  request.body_kind =
+      (pocketjs_net_http_client_request_body_kind_t)UINT32_MAX;
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
+  assert(fixture.fake.active_kind == FAKE_NONE);
 }
 
 static void test_idle_stale_read_is_cleanup_only(void) {
@@ -1476,6 +1979,11 @@ int main(void) {
   test_head_informational_and_304_are_bodyless();
   test_numeric_permission_denial_has_no_io();
   test_maximum_request_body_boundary();
+  test_streaming_chunked_upload_exceeds_64k();
+  test_streaming_credit_is_hostile_input_safe();
+  test_known_length_streaming_accounting();
+  test_streaming_cancel_timeout_error_and_teardown();
+  test_request_body_mode_validation();
   test_idle_stale_read_is_cleanup_only();
   test_close_error_preserves_success_and_explicit_teardown();
   test_close_error_preserves_protocol_failure();

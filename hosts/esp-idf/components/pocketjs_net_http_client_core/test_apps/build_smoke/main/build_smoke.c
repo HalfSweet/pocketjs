@@ -40,8 +40,19 @@ void app_main(void) {
   assert(descriptor->cleanup_faults_separate_from_terminal);
   assert(descriptor->poison_is_machine_readable);
   assert(descriptor->explicit_shutdown_lifecycle);
+  assert(descriptor->fixed_request_body);
+  assert(descriptor->streaming_request_body);
+  assert(descriptor->chunked_request_body);
+  assert(descriptor->known_length_streaming_request_body);
+  assert(!descriptor->streaming_request_body_buffered_in_full);
   assert(descriptor->instance_bytes ==
          POCKETJS_NET_HTTP_CLIENT_CORE_INSTANCE_BYTES);
+  assert(descriptor->max_request_body_bytes ==
+         POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES);
+  assert(descriptor->max_fixed_request_body_bytes ==
+         POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_BODY_BYTES);
+  assert(descriptor->max_request_body_chunk_bytes ==
+         POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
 
   const pocketjs_net_http_client_transport_ops_t *ops =
       pocketjs_net_http_client_core_esp_transport_ops();
