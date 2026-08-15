@@ -9,8 +9,13 @@
 import {
   NETWORK_V1_ABI_MAJOR,
   NETWORK_V1_ABI_MINOR,
+  NETWORK_V1_FEATURE_CAPABILITY_BY_ID,
   NETWORK_V1_FEATURE_ID_BY_CAPABILITY,
   NETWORK_V1_FEATURE_IDS,
+  NETWORK_V1_LIMIT_ENTRY_MAX,
+  NETWORK_V1_LIMIT_NAME_MAX_BYTES,
+  NETWORK_V1_LIMIT_PROTOCOL_ANY,
+  NETWORK_V1_LIMIT_ROLE_ANY,
   NETWORK_V1_PLAN_HASH_BYTES,
   NETWORK_V1_SEQUENCE_MAX,
   NETWORK_V1_UINT32_MAX,
@@ -26,6 +31,8 @@ import {
   NetworkV1HttpRedirectMode,
   NetworkV1LeaseAction,
   NetworkV1LeaseState,
+  NetworkV1LimitProtocol,
+  NetworkV1LimitRole,
   NetworkV1ServiceTurnKind,
   NetworkV1ServiceTurnStatus,
   NetworkV1TlsRevocation,
@@ -75,6 +82,39 @@ export interface NetworkV1Handshake {
   /** Raw 32-byte digest from the verified `sha256:<hex>` Build Plan hash. */
   readonly planHash: Uint8Array;
   /** Strictly increasing exact projection of true `network.*` plan features. */
+  readonly featureIds: readonly NetworkV1FeatureId[];
+}
+
+export type NetworkV1LimitProtocolQuery =
+  | typeof NETWORK_V1_LIMIT_PROTOCOL_ANY
+  | NetworkV1LimitProtocol;
+
+export type NetworkV1LimitRoleQuery =
+  | typeof NETWORK_V1_LIMIT_ROLE_ANY
+  | NetworkV1LimitRole;
+
+export interface NetworkV1LimitsQuery {
+  readonly runtimeGeneration: number;
+  /** Zero selects every protocol in the admitted build. */
+  readonly protocol: NetworkV1LimitProtocolQuery;
+  /** Zero selects every role in the admitted build. */
+  readonly role: NetworkV1LimitRoleQuery;
+}
+
+export interface NetworkV1LimitEntry {
+  /** Stable dotted identifier, unique and lexicographically sorted. */
+  readonly name: string;
+  readonly default: number;
+  readonly hard: number;
+  readonly minimum: number;
+}
+
+export interface NetworkV1LimitsSnapshot {
+  readonly runtimeGeneration: number;
+  readonly protocol: NetworkV1LimitProtocolQuery;
+  readonly role: NetworkV1LimitRoleQuery;
+  readonly values: readonly NetworkV1LimitEntry[];
+  /** Exact scoped subset of the mount handshake feature ids. */
   readonly featureIds: readonly NetworkV1FeatureId[];
 }
 
@@ -383,6 +423,8 @@ export type NetworkV1ServiceDispatcher = (
  */
 export interface NetworkV1BindingTable {
   readonly handshake: NetworkV1Handshake;
+  /** ABI 1.1: immutable Build Plan/descriptor snapshot; never negotiates. */
+  getLimits(query: NetworkV1LimitsQuery): NetworkV1LimitsSnapshot;
   dispatch(command: NetworkV1AsyncCommand): NetworkV1AsyncDispatchResult;
   nextCompletion(request: NetworkV1CompletionPollRequest): NetworkV1CompletionPollResult;
   leaseTake(command: NetworkV1BufferLeaseTakeCommand): NetworkV1LeaseTakeResult;
@@ -663,8 +705,228 @@ export function assertNetworkV1Handshake(
   }
 }
 
+const NETWORK_V1_LIMIT_PROTOCOL_SET: ReadonlySet<number> = new Set([
+  NETWORK_V1_LIMIT_PROTOCOL_ANY,
+  ...Object.values(NetworkV1LimitProtocol),
+]);
+
+const NETWORK_V1_LIMIT_ROLE_SET: ReadonlySet<number> = new Set([
+  NETWORK_V1_LIMIT_ROLE_ANY,
+  ...Object.values(NetworkV1LimitRole),
+]);
+
+function assertNetworkV1LimitsQuery(
+  query: NetworkV1LimitsQuery,
+  runtimeGeneration: number,
+): void {
+  if (typeof query !== "object" || query === null) fail("limitsQuery", "must be an object");
+  const queryRuntimeGeneration = query.runtimeGeneration;
+  const protocol = query.protocol;
+  const role = query.role;
+  assertNetworkV1RuntimeGeneration(
+    queryRuntimeGeneration,
+    "limitsQuery.runtimeGeneration",
+  );
+  if (queryRuntimeGeneration !== runtimeGeneration) {
+    fail("limitsQuery.runtimeGeneration", "does not match the mounted runtime");
+  }
+  assertIntegerInRange(protocol, 0, 0xffff, "limitsQuery.protocol");
+  if (!NETWORK_V1_LIMIT_PROTOCOL_SET.has(protocol)) {
+    fail("limitsQuery.protocol", "is unknown");
+  }
+  assertIntegerInRange(role, 0, 0xffff, "limitsQuery.role");
+  if (!NETWORK_V1_LIMIT_ROLE_SET.has(role)) fail("limitsQuery.role", "is unknown");
+}
+
+function frozenDataField(
+  value: object,
+  key: string,
+  label: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !("value" in descriptor)) {
+    fail(`${label}.${key}`, "must be an own frozen data property");
+  }
+  return descriptor.value;
+}
+
+function assertFrozenRecord(value: unknown, label: string): asserts value is object {
+  if (typeof value !== "object" || value === null || !Object.isFrozen(value)) {
+    fail(label, "must be a frozen object");
+  }
+}
+
+function capabilityMatchesLimitsQuery(
+  capability: string,
+  protocol: NetworkV1LimitProtocolQuery,
+  role: NetworkV1LimitRoleQuery,
+): boolean {
+  let protocolMatches = true;
+  if (protocol === NetworkV1LimitProtocol.Http) {
+    protocolMatches = capability.startsWith("network.http.") ||
+      capability.startsWith("network.browser.http.");
+  } else if (protocol === NetworkV1LimitProtocol.WebSocket) {
+    protocolMatches = capability.startsWith("network.websocket.") ||
+      capability.startsWith("network.browser.websocket.");
+  } else if (protocol === NetworkV1LimitProtocol.Mqtt) {
+    protocolMatches = capability.startsWith("network.mqtt.");
+  } else if (protocol === NetworkV1LimitProtocol.Tcp) {
+    protocolMatches = capability.startsWith("network.tcp.");
+  } else if (protocol === NetworkV1LimitProtocol.Udp) {
+    protocolMatches = capability === "network.udp" ||
+      capability.startsWith("network.udp.");
+  }
+  if (!protocolMatches || role === NETWORK_V1_LIMIT_ROLE_ANY) return protocolMatches;
+  if (role === NetworkV1LimitRole.Client) {
+    return capability.includes(".client") || capability.includes(".browser.");
+  }
+  return capability.includes(".server");
+}
+
+function expectedLimitFeatureIds(
+  handshakeSnapshot: NetworkV1Handshake,
+  protocol: NetworkV1LimitProtocolQuery,
+  role: NetworkV1LimitRoleQuery,
+): readonly NetworkV1FeatureId[] {
+  return handshakeSnapshot.featureIds.filter((featureId) => {
+    const capability = (
+      NETWORK_V1_FEATURE_CAPABILITY_BY_ID as Readonly<Record<number, string>>
+    )[featureId];
+    return capability !== undefined &&
+      capabilityMatchesLimitsQuery(capability, protocol, role);
+  });
+}
+
+/**
+ * Validate and detach the ABI 1.1 limits result before exposing it publicly.
+ * Every Host-provided container must already be frozen and accessor-free.
+ */
+export function snapshotNetworkV1Limits(
+  query: NetworkV1LimitsQuery,
+  value: unknown,
+  handshake: NetworkV1Handshake,
+): Readonly<NetworkV1LimitsSnapshot> {
+  const handshakeSnapshot = snapshotHandshake(handshake, "handshake");
+  assertNetworkV1LimitsQuery(query, handshakeSnapshot.runtimeGeneration);
+  assertFrozenRecord(value, "limitsSnapshot");
+
+  const runtimeGeneration = frozenDataField(
+    value,
+    "runtimeGeneration",
+    "limitsSnapshot",
+  );
+  const protocol = frozenDataField(value, "protocol", "limitsSnapshot");
+  const role = frozenDataField(value, "role", "limitsSnapshot");
+  const rawValues = frozenDataField(value, "values", "limitsSnapshot");
+  const rawFeatureIds = frozenDataField(value, "featureIds", "limitsSnapshot");
+
+  assertNetworkV1RuntimeGeneration(runtimeGeneration, "limitsSnapshot.runtimeGeneration");
+  if (runtimeGeneration !== query.runtimeGeneration) {
+    fail("limitsSnapshot.runtimeGeneration", "does not echo the query");
+  }
+  if (protocol !== query.protocol) fail("limitsSnapshot.protocol", "does not echo the query");
+  if (role !== query.role) fail("limitsSnapshot.role", "does not echo the query");
+
+  if (!Array.isArray(rawValues) || !Object.isFrozen(rawValues)) {
+    fail("limitsSnapshot.values", "must be a frozen data array");
+  }
+  if (rawValues.length > NETWORK_V1_LIMIT_ENTRY_MAX) {
+    fail("limitsSnapshot.values", `cannot exceed ${NETWORK_V1_LIMIT_ENTRY_MAX} entries`);
+  }
+  const values: NetworkV1LimitEntry[] = [];
+  let previousName = "";
+  for (let index = 0; index < rawValues.length; index += 1) {
+    const entry = frozenDataField(rawValues, String(index), "limitsSnapshot.values");
+    assertFrozenRecord(entry, `limitsSnapshot.values[${index}]`);
+    const name = frozenDataField(entry, "name", `limitsSnapshot.values[${index}]`);
+    const defaultValue = frozenDataField(
+      entry,
+      "default",
+      `limitsSnapshot.values[${index}]`,
+    );
+    const hard = frozenDataField(entry, "hard", `limitsSnapshot.values[${index}]`);
+    const minimum = frozenDataField(
+      entry,
+      "minimum",
+      `limitsSnapshot.values[${index}]`,
+    );
+    if (typeof name !== "string" || name.length === 0 ||
+      name.length > NETWORK_V1_LIMIT_NAME_MAX_BYTES ||
+      !/^[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)*$/.test(name) ||
+      name.split(".").some((segment) =>
+        segment === "constructor" || segment === "prototype"
+      )) {
+      fail(
+        `limitsSnapshot.values[${index}].name`,
+        "must be a bounded dotted ASCII identifier",
+      );
+    }
+    if (name <= previousName) {
+      fail("limitsSnapshot.values", "must be unique and lexicographically sorted");
+    }
+    assertIntegerInRange(
+      defaultValue,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      `limitsSnapshot.values[${index}].default`,
+    );
+    assertIntegerInRange(
+      hard,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      `limitsSnapshot.values[${index}].hard`,
+    );
+    assertIntegerInRange(
+      minimum,
+      0,
+      Number.MAX_SAFE_INTEGER,
+      `limitsSnapshot.values[${index}].minimum`,
+    );
+    if (minimum > defaultValue || defaultValue > hard) {
+      fail(
+        `limitsSnapshot.values[${index}]`,
+        "must satisfy minimum <= default <= hard",
+      );
+    }
+    values.push(Object.freeze({ name, default: defaultValue, hard, minimum }));
+    previousName = name;
+  }
+
+  if (!Array.isArray(rawFeatureIds) || !Object.isFrozen(rawFeatureIds)) {
+    fail("limitsSnapshot.featureIds", "must be a frozen data array");
+  }
+  if (rawFeatureIds.length > NETWORK_V1_FEATURE_IDS.length) {
+    fail("limitsSnapshot.featureIds", "cannot exceed the known feature count");
+  }
+  const featureIds: number[] = [];
+  for (let index = 0; index < rawFeatureIds.length; index += 1) {
+    featureIds.push(
+      frozenDataField(rawFeatureIds, String(index), "limitsSnapshot.featureIds") as number,
+    );
+  }
+  assertFeatureIds(featureIds, "limitsSnapshot.featureIds");
+  const expectedFeatureIds = expectedLimitFeatureIds(
+    handshakeSnapshot,
+    query.protocol,
+    query.role,
+  );
+  if (featureIds.length !== expectedFeatureIds.length ||
+    featureIds.some((featureId, index) => featureId !== expectedFeatureIds[index])) {
+    fail("limitsSnapshot.featureIds", "does not match the exact scoped feature set");
+  }
+
+  return Object.freeze({
+    runtimeGeneration,
+    protocol: query.protocol,
+    role: query.role,
+    values: Object.freeze(values),
+    featureIds: Object.freeze(featureIds as NetworkV1FeatureId[]),
+  });
+}
+
 const NETWORK_V1_BINDING_KEYS = [
   "handshake",
+  "getLimits",
   "dispatch",
   "nextCompletion",
   "leaseTake",
@@ -675,7 +937,7 @@ const NETWORK_V1_BINDING_KEYS = [
 
 /**
  * Validate the lexical table without invoking accessors. Newer ABI minors may
- * append frozen data properties; every v1.0 property remains mandatory.
+ * append frozen data properties; every v1.1 property remains mandatory.
  */
 export function assertNetworkV1BindingTable(
   value: unknown,

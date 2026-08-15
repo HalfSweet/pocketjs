@@ -12,10 +12,14 @@ extern "C" {
 #endif
 
 #define POCKETJS_NETWORK_V1_ABI_MAJOR UINT16_C(1)
-#define POCKETJS_NETWORK_V1_ABI_MINOR UINT16_C(0)
+#define POCKETJS_NETWORK_V1_ABI_MINOR UINT16_C(1)
 #define POCKETJS_NETWORK_V1_PLAN_HASH_BYTES UINT16_C(32)
 #define POCKETJS_NETWORK_V1_SEQUENCE_MAX UINT64_C(9007199254740991)
+#define POCKETJS_NETWORK_V1_LIMIT_ENTRY_MAX UINT16_C(64)
+#define POCKETJS_NETWORK_V1_LIMIT_NAME_MAX_BYTES UINT16_C(64)
 #define POCKETJS_NETWORK_V1_ABSENT_ID UINT32_C(0)
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_ANY UINT16_C(0)
+#define POCKETJS_NETWORK_V1_LIMIT_ROLE_ANY UINT16_C(0)
 #define POCKETJS_NETWORK_V1_FEATURE_COUNT UINT16_C(70)
 
 typedef uint16_t pocketjs_network_v1_feature_id_t;
@@ -26,6 +30,8 @@ typedef uint16_t pocketjs_network_v1_error_code_t;
 typedef uint16_t pocketjs_network_v1_dispatch_status_t;
 typedef uint16_t pocketjs_network_v1_completion_poll_status_t;
 typedef uint16_t pocketjs_network_v1_borrowed_input_kind_t;
+typedef uint16_t pocketjs_network_v1_limit_protocol_t;
+typedef uint16_t pocketjs_network_v1_limit_role_t;
 typedef uint16_t pocketjs_network_v1_http_redirect_mode_t;
 typedef uint16_t pocketjs_network_v1_tls_version_t;
 typedef uint16_t pocketjs_network_v1_tls_verification_t;
@@ -415,6 +421,22 @@ typedef uint16_t pocketjs_network_v1_lease_action_t;
 /** Body bytes attached to BODY_CHUNK. */
 #define POCKETJS_NETWORK_V1_BORROWED_INPUT_BODY_CHUNK ((pocketjs_network_v1_borrowed_input_kind_t)UINT16_C(2))
 
+/** HTTP limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_HTTP ((pocketjs_network_v1_limit_protocol_t)UINT16_C(1))
+/** WebSocket limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_WEBSOCKET ((pocketjs_network_v1_limit_protocol_t)UINT16_C(2))
+/** MQTT limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_MQTT ((pocketjs_network_v1_limit_protocol_t)UINT16_C(3))
+/** TCP limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_TCP ((pocketjs_network_v1_limit_protocol_t)UINT16_C(4))
+/** UDP limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_UDP ((pocketjs_network_v1_limit_protocol_t)UINT16_C(5))
+
+/** Client-role limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_ROLE_CLIENT ((pocketjs_network_v1_limit_role_t)UINT16_C(1))
+/** Server-role limits and features. */
+#define POCKETJS_NETWORK_V1_LIMIT_ROLE_SERVER ((pocketjs_network_v1_limit_role_t)UINT16_C(2))
+
 /** Follow redirects inside the HTTP Core. */
 #define POCKETJS_NETWORK_V1_HTTP_REDIRECT_FOLLOW ((pocketjs_network_v1_http_redirect_mode_t)UINT16_C(1))
 /** Publish the redirect response without following. */
@@ -552,6 +574,34 @@ typedef struct pocketjs_network_v1_handshake_view {
   uint16_t reserved_zero;
   uint8_t plan_hash[POCKETJS_NETWORK_V1_PLAN_HASH_BYTES];
 } pocketjs_network_v1_handshake_view_t;
+
+/** Zero protocol/role selects the build-wide dimension. */
+typedef struct pocketjs_network_v1_limits_query {
+  uint32_t runtime_generation;
+  pocketjs_network_v1_limit_protocol_t protocol;
+  pocketjs_network_v1_limit_role_t role;
+} pocketjs_network_v1_limits_query_t;
+
+/** One immutable effective limit entry returned by the Host. */
+typedef struct pocketjs_network_v1_limit_entry_view {
+  const char *name;
+  uint16_t name_length;
+  uint16_t reserved_zero;
+  uint64_t default_value;
+  uint64_t hard_value;
+  uint64_t minimum_value;
+} pocketjs_network_v1_limit_entry_view_t;
+
+/** Borrowed synchronous view for the ABI 1.1 getLimits method. */
+typedef struct pocketjs_network_v1_limits_snapshot_view {
+  uint32_t runtime_generation;
+  pocketjs_network_v1_limit_protocol_t protocol;
+  pocketjs_network_v1_limit_role_t role;
+  const pocketjs_network_v1_limit_entry_view_t *values;
+  uint16_t value_count;
+  const pocketjs_network_v1_feature_id_t *feature_ids;
+  uint16_t feature_count;
+} pocketjs_network_v1_limits_snapshot_view_t;
 
 /** Host-to-Guest budget for one registered service-dispatcher invocation. */
 typedef struct pocketjs_network_v1_service_turn_request {

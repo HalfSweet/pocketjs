@@ -94,6 +94,8 @@ export function validateNetworkV1Definition(): void {
   if (definition.abi.sequenceMax !== Number.MAX_SAFE_INTEGER) {
     throw new TypeError("ABI v1 sequence bound must remain Number.MAX_SAFE_INTEGER");
   }
+  assertUint16(definition.abi.limitEntryMax, "abi.limitEntryMax");
+  assertUint16(definition.abi.limitNameMaxBytes, "abi.limitNameMaxBytes");
 
   validateEntries("features", definition.features);
   validateEntries("commands", definition.commands);
@@ -103,6 +105,8 @@ export function validateNetworkV1Definition(): void {
   validateEntries("dispatchStatuses", definition.dispatchStatuses);
   validateEntries("completionPollStatuses", definition.completionPollStatuses);
   validateEntries("borrowedInputKinds", definition.borrowedInputKinds);
+  validateEntries("limitProtocols", definition.limitProtocols);
+  validateEntries("limitRoles", definition.limitRoles);
   validateEntries("httpRedirectModes", definition.httpRedirectModes);
   validateEntries("tlsVersions", definition.tlsVersions);
   validateEntries("tlsVerifications", definition.tlsVerifications);
@@ -191,8 +195,12 @@ export function generateNetworkV1TypeScript(): string {
     `export const NETWORK_V1_ABI_MINOR = ${definition.abi.minor} as const;`,
     `export const NETWORK_V1_PLAN_HASH_BYTES = ${definition.abi.planHashBytes} as const;`,
     `export const NETWORK_V1_SEQUENCE_MAX = ${definition.abi.sequenceMax} as const;`,
+    `export const NETWORK_V1_LIMIT_ENTRY_MAX = ${definition.abi.limitEntryMax} as const;`,
+    `export const NETWORK_V1_LIMIT_NAME_MAX_BYTES = ${definition.abi.limitNameMaxBytes} as const;`,
     "export const NETWORK_V1_UINT32_MAX = 0xffff_ffff as const;",
     "export const NETWORK_V1_ABSENT_ID = 0 as const;",
+    "export const NETWORK_V1_LIMIT_PROTOCOL_ANY = 0 as const;",
+    "export const NETWORK_V1_LIMIT_ROLE_ANY = 0 as const;",
     "",
   ];
 
@@ -205,6 +213,8 @@ export function generateNetworkV1TypeScript(): string {
     ["NetworkV1DispatchStatus", definition.dispatchStatuses],
     ["NetworkV1CompletionPollStatus", definition.completionPollStatuses],
     ["NetworkV1BorrowedInputKind", definition.borrowedInputKinds],
+    ["NetworkV1LimitProtocol", definition.limitProtocols],
+    ["NetworkV1LimitRole", definition.limitRoles],
     ["NetworkV1HttpRedirectMode", definition.httpRedirectModes],
     ["NetworkV1TlsVersion", definition.tlsVersions],
     ["NetworkV1TlsVerification", definition.tlsVerifications],
@@ -288,7 +298,11 @@ export function generateNetworkV1Header(): string {
     `#define POCKETJS_NETWORK_V1_ABI_MINOR UINT16_C(${definition.abi.minor})`,
     `#define POCKETJS_NETWORK_V1_PLAN_HASH_BYTES UINT16_C(${definition.abi.planHashBytes})`,
     `#define POCKETJS_NETWORK_V1_SEQUENCE_MAX UINT64_C(${definition.abi.sequenceMax})`,
+    `#define POCKETJS_NETWORK_V1_LIMIT_ENTRY_MAX UINT16_C(${definition.abi.limitEntryMax})`,
+    `#define POCKETJS_NETWORK_V1_LIMIT_NAME_MAX_BYTES UINT16_C(${definition.abi.limitNameMaxBytes})`,
     "#define POCKETJS_NETWORK_V1_ABSENT_ID UINT32_C(0)",
+    "#define POCKETJS_NETWORK_V1_LIMIT_PROTOCOL_ANY UINT16_C(0)",
+    "#define POCKETJS_NETWORK_V1_LIMIT_ROLE_ANY UINT16_C(0)",
     `#define POCKETJS_NETWORK_V1_FEATURE_COUNT UINT16_C(${definition.features.length})`,
     "",
     "typedef uint16_t pocketjs_network_v1_feature_id_t;",
@@ -299,6 +313,8 @@ export function generateNetworkV1Header(): string {
     "typedef uint16_t pocketjs_network_v1_dispatch_status_t;",
     "typedef uint16_t pocketjs_network_v1_completion_poll_status_t;",
     "typedef uint16_t pocketjs_network_v1_borrowed_input_kind_t;",
+    "typedef uint16_t pocketjs_network_v1_limit_protocol_t;",
+    "typedef uint16_t pocketjs_network_v1_limit_role_t;",
     "typedef uint16_t pocketjs_network_v1_http_redirect_mode_t;",
     "typedef uint16_t pocketjs_network_v1_tls_version_t;",
     "typedef uint16_t pocketjs_network_v1_tls_verification_t;",
@@ -340,6 +356,10 @@ export function generateNetworkV1Header(): string {
     ),
     "",
     ...cDefine("BORROWED_INPUT", "borrowed_input_kind", definition.borrowedInputKinds),
+    "",
+    ...cDefine("LIMIT_PROTOCOL", "limit_protocol", definition.limitProtocols),
+    "",
+    ...cDefine("LIMIT_ROLE", "limit_role", definition.limitRoles),
     "",
     ...cDefine("HTTP_REDIRECT", "http_redirect_mode", definition.httpRedirectModes),
     "",
@@ -447,6 +467,34 @@ export function generateNetworkV1Header(): string {
     "  uint16_t reserved_zero;",
     "  uint8_t plan_hash[POCKETJS_NETWORK_V1_PLAN_HASH_BYTES];",
     "} pocketjs_network_v1_handshake_view_t;",
+    "",
+    "/** Zero protocol/role selects the build-wide dimension. */",
+    "typedef struct pocketjs_network_v1_limits_query {",
+    "  uint32_t runtime_generation;",
+    "  pocketjs_network_v1_limit_protocol_t protocol;",
+    "  pocketjs_network_v1_limit_role_t role;",
+    "} pocketjs_network_v1_limits_query_t;",
+    "",
+    "/** One immutable effective limit entry returned by the Host. */",
+    "typedef struct pocketjs_network_v1_limit_entry_view {",
+    "  const char *name;",
+    "  uint16_t name_length;",
+    "  uint16_t reserved_zero;",
+    "  uint64_t default_value;",
+    "  uint64_t hard_value;",
+    "  uint64_t minimum_value;",
+    "} pocketjs_network_v1_limit_entry_view_t;",
+    "",
+    "/** Borrowed synchronous view for the ABI 1.1 getLimits method. */",
+    "typedef struct pocketjs_network_v1_limits_snapshot_view {",
+    "  uint32_t runtime_generation;",
+    "  pocketjs_network_v1_limit_protocol_t protocol;",
+    "  pocketjs_network_v1_limit_role_t role;",
+    "  const pocketjs_network_v1_limit_entry_view_t *values;",
+    "  uint16_t value_count;",
+    "  const pocketjs_network_v1_feature_id_t *feature_ids;",
+    "  uint16_t feature_count;",
+    "} pocketjs_network_v1_limits_snapshot_view_t;",
     "",
     "/** Host-to-Guest budget for one registered service-dispatcher invocation. */",
     "typedef struct pocketjs_network_v1_service_turn_request {",

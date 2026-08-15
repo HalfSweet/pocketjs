@@ -24,9 +24,11 @@ export interface NetworkV1NamedEntry extends NetworkV1NumericEntry {
 export const NETWORK_V1_DEFINITION = {
   abi: {
     major: 1,
-    minor: 0,
+    minor: 1,
     planHashBytes: 32,
     sequenceMax: Number.MAX_SAFE_INTEGER,
+    limitEntryMax: 64,
+    limitNameMaxBytes: 64,
   },
 
   /**
@@ -195,6 +197,19 @@ export const NETWORK_V1_DEFINITION = {
   borrowedInputKinds: [
     { name: "CustomCa", cName: "CUSTOM_CA", value: 1, description: "Custom CA bytes attached to a start command" },
     { name: "BodyChunk", cName: "BODY_CHUNK", value: 2, description: "Body bytes attached to BODY_CHUNK" },
+  ] satisfies readonly NetworkV1NumericEntry[],
+
+  limitProtocols: [
+    { name: "Http", cName: "HTTP", value: 1, description: "HTTP limits and features" },
+    { name: "WebSocket", cName: "WEBSOCKET", value: 2, description: "WebSocket limits and features" },
+    { name: "Mqtt", cName: "MQTT", value: 3, description: "MQTT limits and features" },
+    { name: "Tcp", cName: "TCP", value: 4, description: "TCP limits and features" },
+    { name: "Udp", cName: "UDP", value: 5, description: "UDP limits and features" },
+  ] satisfies readonly NetworkV1NumericEntry[],
+
+  limitRoles: [
+    { name: "Client", cName: "CLIENT", value: 1, description: "Client-role limits and features" },
+    { name: "Server", cName: "SERVER", value: 2, description: "Server-role limits and features" },
   ] satisfies readonly NetworkV1NumericEntry[],
 
   httpRedirectModes: [

@@ -2,11 +2,15 @@
 // Source of truth: contracts/spec/network/definition.ts.
 
 export const NETWORK_V1_ABI_MAJOR = 1 as const;
-export const NETWORK_V1_ABI_MINOR = 0 as const;
+export const NETWORK_V1_ABI_MINOR = 1 as const;
 export const NETWORK_V1_PLAN_HASH_BYTES = 32 as const;
 export const NETWORK_V1_SEQUENCE_MAX = 9007199254740991 as const;
+export const NETWORK_V1_LIMIT_ENTRY_MAX = 64 as const;
+export const NETWORK_V1_LIMIT_NAME_MAX_BYTES = 64 as const;
 export const NETWORK_V1_UINT32_MAX = 0xffff_ffff as const;
 export const NETWORK_V1_ABSENT_ID = 0 as const;
+export const NETWORK_V1_LIMIT_PROTOCOL_ANY = 0 as const;
+export const NETWORK_V1_LIMIT_ROLE_ANY = 0 as const;
 
 export const NetworkV1FeatureId = Object.freeze({
   /** HTTP client role. */
@@ -309,6 +313,30 @@ export const NetworkV1BorrowedInputKind = Object.freeze({
 } as const);
 export type NetworkV1BorrowedInputKind =
   (typeof NetworkV1BorrowedInputKind)[keyof typeof NetworkV1BorrowedInputKind];
+
+export const NetworkV1LimitProtocol = Object.freeze({
+  /** HTTP limits and features. */
+  Http: 0x0001,
+  /** WebSocket limits and features. */
+  WebSocket: 0x0002,
+  /** MQTT limits and features. */
+  Mqtt: 0x0003,
+  /** TCP limits and features. */
+  Tcp: 0x0004,
+  /** UDP limits and features. */
+  Udp: 0x0005,
+} as const);
+export type NetworkV1LimitProtocol =
+  (typeof NetworkV1LimitProtocol)[keyof typeof NetworkV1LimitProtocol];
+
+export const NetworkV1LimitRole = Object.freeze({
+  /** Client-role limits and features. */
+  Client: 0x0001,
+  /** Server-role limits and features. */
+  Server: 0x0002,
+} as const);
+export type NetworkV1LimitRole =
+  (typeof NetworkV1LimitRole)[keyof typeof NetworkV1LimitRole];
 
 export const NetworkV1HttpRedirectMode = Object.freeze({
   /** Follow redirects inside the HTTP Core. */
