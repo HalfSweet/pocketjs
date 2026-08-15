@@ -35,7 +35,6 @@ import {
   assertNetworkV1CompletionPollResult,
   assertNetworkV1NextSequence,
   assertNetworkV1RuntimeGeneration,
-  assertNetworkV1ServiceTurnRequest,
   assertNetworkV1ServiceTurnResult,
   networkV1HandleIsAbsent,
   networkV1SameHandle,
@@ -54,6 +53,8 @@ import {
   type NetworkV1Handshake,
   type NetworkV1HttpRequestMetadata,
   type NetworkV1HttpResponseMetadata,
+  type NetworkV1LimitEntry,
+  type NetworkV1LimitsSnapshot,
   type NetworkV1ServiceDispatcher,
   type NetworkV1ServiceTurnRequest,
   type NetworkV1ServiceTurnResult,
@@ -88,20 +89,41 @@ const MAX_CA_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 8192;
 const MAX_OPERATION_LABEL_BYTES = 64;
 const MAX_CAUSE_CODE_BYTES = 64;
+const MAX_SERVICE_TURN_EVENTS = 128;
+const MAX_SERVICE_TURN_PAYLOAD_BYTES = 256 * 1024;
 
+const Uint8ArrayIntrinsic = Uint8Array;
+const mathMin = Math.min;
+const functionCall = Function.prototype.call;
+const bindCall = <Args extends unknown[], Result>(
+  operation: (...args: Args) => Result,
+): ((receiver: unknown, ...args: Args) => Result) =>
+  functionCall.bind(operation) as (receiver: unknown, ...args: Args) => Result;
 const objectFreeze = Object.freeze;
 const objectKeys = Object.keys;
 const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const objectIsFrozen = Object.isFrozen;
 const arrayIsArray = Array.isArray;
+const arrayIncludes = bindCall(Array.prototype.includes) as (
+  receiver: readonly string[],
+  value: string,
+) => boolean;
+const arraySort = bindCall(Array.prototype.sort) as (
+  receiver: string[],
+) => string[];
 const numberIsSafeInteger = Number.isSafeInteger;
 const numberIsInteger = Number.isInteger;
 const reflectApply = Reflect.apply;
+const regExpTest = bindCall(RegExp.prototype.test);
+const stringCharCodeAt = bindCall(String.prototype.charCodeAt);
+const stringIncludes = bindCall(String.prototype.includes);
+const stringFromCharCode = String.fromCharCode;
 const PromiseIntrinsic = Promise;
 const promiseResolve = Promise.resolve;
 const promiseThen = Promise.prototype.then;
-const uint8ArraySlice = Uint8Array.prototype.slice;
-const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const uint8ArraySlice = Uint8ArrayIntrinsic.prototype.slice;
+const uint8ArraySubarray = Uint8ArrayIntrinsic.prototype.subarray;
+const typedArrayPrototype = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype) as object;
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   "byteLength",
@@ -163,6 +185,16 @@ interface AdapterTestOptions {
   readonly initialSlotGeneration?: number;
 }
 
+interface ProjectedNetworkLimits {
+  readonly values: readonly Readonly<NetworkV1LimitEntry>[];
+  readonly features: readonly string[];
+}
+
+interface AdmittedHttpClientBinding extends HttpClientPrivateBinding {
+  /** Private immutable snapshot; the high-level seam must explicitly preserve it. */
+  readonly httpClientLimits: ProjectedNetworkLimits;
+}
+
 function abiFault(detail: string): TypeError {
   return new TypeError(`PocketJS network ABI adapter: ${detail}`);
 }
@@ -185,9 +217,62 @@ function byteString(value: unknown, maximum: number, label: string): string {
     throw abiFault(`${label} is not a bounded string`);
   }
   for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) > 0xff) throw abiFault(`${label} is not ByteString`);
+    if (stringCharCodeAt(value, index) > 0xff) throw abiFault(`${label} is not ByteString`);
   }
   return value;
+}
+
+function tokenCode(value: unknown, label: string): string {
+  const token = byteString(value, MAX_CAUSE_CODE_BYTES, label);
+  if (token.length === 0 ||
+    !regExpTest(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, token)) {
+    throw abiFault(`${label} is not a bounded token`);
+  }
+  return token;
+}
+
+function canonicalAddress(value: unknown, label: string): string {
+  const address = byteString(value, 253, label);
+  if (address.length === 0) throw abiFault(`${label} is empty`);
+  const ipv6 = stringIncludes(address, ":");
+  let parsed: ReturnType<typeof canonicalizeHttpUrl>;
+  try {
+    parsed = canonicalizeHttpUrl(ipv6 ? `http://[${address}]/` : `http://${address}/`);
+  } catch {
+    throw abiFault(`${label} is not a canonical network address`);
+  }
+  if (parsed.hostname !== address) {
+    throw abiFault(`${label} is not a canonical network address`);
+  }
+  return address;
+}
+
+function canonicalServerNameForComparison(value: unknown): string {
+  const source = byteString(value, 253, "TLS serverName");
+  if (source.length === 0) throw abiFault("TLS serverName is empty");
+  const end = source[source.length - 1] === "." ? source.length - 1 : source.length;
+  let normalized = "";
+  for (let index = 0; index < end; index += 1) {
+    const code = stringCharCodeAt(source, index);
+    normalized += code >= 0x41 && code <= 0x5a
+      ? stringFromCharCode(code + 0x20)
+      : source[index]!;
+  }
+  if (normalized.length === 0) throw abiFault("TLS serverName is empty");
+  let parsed: ReturnType<typeof canonicalizeHttpUrl>;
+  try {
+    parsed = canonicalizeHttpUrl(
+      stringIncludes(normalized, ":")
+        ? `http://[${normalized}]/`
+        : `http://${normalized}/`,
+    );
+  } catch {
+    throw abiFault("TLS serverName is not a canonical hostname");
+  }
+  if (parsed.hostname !== normalized) {
+    throw abiFault("TLS serverName is not a canonical hostname");
+  }
+  return normalized;
 }
 
 function snapshotHandle(value: unknown, label: string): Readonly<NetworkV1Handle> {
@@ -240,7 +325,7 @@ function snapshotHeaders(value: unknown, label: string): readonly HttpBindingHea
     );
     blockBytes += name.length + headerValue.length;
     if (blockBytes > MAX_HEADER_BLOCK_BYTES) throw abiFault(`${label} exceeds its block ceiling`);
-    headers.push(objectFreeze({ name, value: headerValue }));
+    headers[headers.length] = objectFreeze({ name, value: headerValue });
   }
   return objectFreeze(headers);
 }
@@ -248,37 +333,45 @@ function snapshotHeaders(value: unknown, label: string): readonly HttpBindingHea
 function snapshotError(value: unknown, label: string): Readonly<NetworkV1ErrorMetadata> {
   if (typeof value !== "object" || value === null) throw abiFault(`${label} is missing`);
   const candidate = value as Partial<NetworkV1ErrorMetadata>;
-  const category = integer(candidate.category, 1, 5, `${label}.category`) as NetworkV1ErrorMetadata["category"];
-  const code = integer(candidate.code, 1, 0x7fff, `${label}.code`) as NetworkV1ErrorMetadata["code"];
+  const rawCategory = candidate.category;
+  const rawCode = candidate.code;
+  const rawOperation = candidate.operation;
+  const rawTemporary = candidate.temporary;
+  const rawAddress = candidate.address;
+  const rawPort = candidate.port;
+  const rawCauseCode = candidate.causeCode;
+  const rawReasonCode = candidate.reasonCode;
+  const category = integer(rawCategory, 1, 5, `${label}.category`) as NetworkV1ErrorMetadata["category"];
+  const code = integer(rawCode, 1, 0x7fff, `${label}.code`) as NetworkV1ErrorMetadata["code"];
   if ((NETWORK_V1_ERROR_CATEGORY_NAME_BY_ID as Readonly<Record<number, string>>)[category] === undefined ||
     (NETWORK_V1_ERROR_NAME_BY_ID as Readonly<Record<number, string>>)[code] === undefined) {
     throw abiFault(`${label} uses an unknown category or code`);
   }
   const operation = byteString(
-    candidate.operation,
+    rawOperation,
     MAX_OPERATION_LABEL_BYTES,
     `${label}.operation`,
   );
-  if (operation.length === 0 || typeof candidate.temporary !== "boolean") {
+  if (operation.length === 0 || typeof rawTemporary !== "boolean") {
     throw abiFault(`${label} has invalid stable metadata`);
   }
-  const address = candidate.address === undefined
+  const address = rawAddress === undefined
     ? undefined
-    : byteString(candidate.address, 253, `${label}.address`);
-  const port = candidate.port === undefined
+    : canonicalAddress(rawAddress, `${label}.address`);
+  const port = rawPort === undefined
     ? undefined
-    : integer(candidate.port, 1, 65_535, `${label}.port`);
-  const causeCode = candidate.causeCode === undefined
+    : integer(rawPort, 1, 65_535, `${label}.port`);
+  const causeCode = rawCauseCode === undefined
     ? undefined
-    : byteString(candidate.causeCode, MAX_CAUSE_CODE_BYTES, `${label}.causeCode`);
-  const reasonCode = candidate.reasonCode === undefined
+    : tokenCode(rawCauseCode, `${label}.causeCode`);
+  const reasonCode = rawReasonCode === undefined
     ? undefined
-    : integer(candidate.reasonCode, 0, NETWORK_V1_UINT32_MAX, `${label}.reasonCode`);
+    : integer(rawReasonCode, 0, NETWORK_V1_UINT32_MAX, `${label}.reasonCode`);
   return objectFreeze({
     category,
     code,
     operation,
-    temporary: candidate.temporary,
+    temporary: rawTemporary,
     ...(address === undefined ? {} : { address }),
     ...(port === undefined ? {} : { port }),
     ...(causeCode === undefined ? {} : { causeCode }),
@@ -289,13 +382,28 @@ function snapshotError(value: unknown, label: string): Readonly<NetworkV1ErrorMe
 function snapshotResponseMetadata(value: unknown): Readonly<NetworkV1HttpResponseMetadata> {
   if (typeof value !== "object" || value === null) throw abiFault("response metadata is missing");
   const candidate = value as Partial<NetworkV1HttpResponseMetadata>;
-  const status = integer(candidate.status, 200, 599, "response.status");
-  const statusText = byteString(candidate.statusText, 1024, "response.statusText");
-  const headers = snapshotHeaders(candidate.headers, "response.headers");
-  const url = byteString(candidate.url, MAX_URL_BYTES, "response.url");
-  if (typeof candidate.redirected !== "boolean") throw abiFault("response.redirected is invalid");
+  const rawStatus = candidate.status;
+  const rawStatusText = candidate.statusText;
+  const rawHeaders = candidate.headers;
+  const rawUrl = candidate.url;
+  const rawRedirected = candidate.redirected;
+  const rawBufferedBodyBytes = candidate.bufferedBodyBytes;
+  const status = integer(rawStatus, 200, 599, "response.status");
+  const statusText = byteString(rawStatusText, 1024, "response.statusText");
+  const headers = snapshotHeaders(rawHeaders, "response.headers");
+  const url = byteString(rawUrl, MAX_URL_BYTES, "response.url");
+  let parsedUrl: ReturnType<typeof canonicalizeHttpUrl>;
+  try {
+    parsedUrl = canonicalizeHttpUrl(url);
+  } catch {
+    throw abiFault("response.url is not a canonical HTTP(S) URL");
+  }
+  if (parsedUrl.href !== url || parsedUrl.hasFragment) {
+    throw abiFault("response.url is not a canonical HTTP(S) URL");
+  }
+  if (typeof rawRedirected !== "boolean") throw abiFault("response.redirected is invalid");
   const bufferedBodyBytes = integer(
-    candidate.bufferedBodyBytes,
+    rawBufferedBodyBytes,
     1,
     NETWORK_V1_UINT32_MAX,
     "response.bufferedBodyBytes",
@@ -305,8 +413,52 @@ function snapshotResponseMetadata(value: unknown): Readonly<NetworkV1HttpRespons
     statusText,
     headers,
     url,
-    redirected: candidate.redirected,
+    redirected: rawRedirected,
     bufferedBodyBytes,
+  });
+}
+
+function snapshotServiceTurnRequest(
+  value: unknown,
+): Readonly<NetworkV1ServiceTurnRequest> {
+  if (typeof value !== "object" || value === null) {
+    throw abiFault("service turn request is missing");
+  }
+  const candidate = value as Partial<NetworkV1ServiceTurnRequest>;
+  const rawRuntimeGeneration = candidate.runtimeGeneration;
+  const rawTurnId = candidate.turnId;
+  const rawKind = candidate.kind;
+  const rawMaxEvents = candidate.maxEvents;
+  const rawMaxPayloadBytes = candidate.maxPayloadBytes;
+  const runtimeGeneration = integer(
+    rawRuntimeGeneration,
+    1,
+    NETWORK_V1_UINT32_MAX,
+    "serviceTurn.runtimeGeneration",
+  );
+  const turnId = integer(rawTurnId, 1, NETWORK_V1_SEQUENCE_MAX, "serviceTurn.turnId");
+  if (rawKind !== NetworkV1ServiceTurnKind.Network &&
+    rawKind !== NetworkV1ServiceTurnKind.Shutdown) {
+    throw abiFault("serviceTurn.kind is unknown");
+  }
+  const maxEvents = integer(
+    rawMaxEvents,
+    1,
+    MAX_SERVICE_TURN_EVENTS,
+    "serviceTurn.maxEvents",
+  );
+  const maxPayloadBytes = integer(
+    rawMaxPayloadBytes,
+    1,
+    MAX_SERVICE_TURN_PAYLOAD_BYTES,
+    "serviceTurn.maxPayloadBytes",
+  );
+  return objectFreeze({
+    runtimeGeneration,
+    turnId,
+    kind: rawKind,
+    maxEvents,
+    maxPayloadBytes,
   });
 }
 
@@ -390,7 +542,7 @@ function snapshotCompletion(value: unknown): NetworkV1Completion {
 
 function actualUint8ArrayLength(value: unknown, label: string): number {
   try {
-    return typedArrayByteLength.call(value) as number;
+    return reflectApply(typedArrayByteLength, value, []) as number;
   } catch {
     throw abiFault(`${label} must be a Uint8Array`);
   }
@@ -404,7 +556,7 @@ function snapshotExpectedHandshake(
   if (!arrayIsArray(value.planHashBytes) || value.planHashBytes.length !== 32) {
     throw abiFault("compiled plan hash must contain 32 bytes");
   }
-  const planHash = new Uint8Array(32);
+  const planHash = new Uint8ArrayIntrinsic(32);
   for (let index = 0; index < 32; index += 1) {
     planHash[index] = integer(value.planHashBytes[index], 0, 0xff, `planHash[${index}]`);
   }
@@ -417,7 +569,7 @@ function snapshotExpectedHandshake(
       (NETWORK_V1_FEATURE_CAPABILITY_BY_ID as Readonly<Record<number, string>>)[id] === undefined) {
       throw abiFault("compiled feature ids are unknown, duplicate, or unsorted");
     }
-    featureIds.push(id as NetworkV1FeatureId);
+    featureIds[featureIds.length] = id as NetworkV1FeatureId;
     previous = id;
   }
   return objectFreeze({
@@ -486,7 +638,10 @@ function httpErrorCompatibility(category: number, code: number): boolean {
     (code === NetworkV1ErrorCode.HttpProtocolError || code === NetworkV1ErrorCode.MessageTooLarge);
 }
 
-function publicError(metadata: NetworkV1ErrorMetadata): NetworkError {
+function publicError(
+  metadata: NetworkV1ErrorMetadata,
+  operation = "http.fetch",
+): NetworkError {
   const category = (NETWORK_V1_ERROR_CATEGORY_NAME_BY_ID as Readonly<Record<number, string>>)[metadata.category];
   const code = (NETWORK_V1_ERROR_NAME_BY_ID as Readonly<Record<number, string>>)[metadata.code];
   if (!category || !code || !httpErrorCompatibility(metadata.category, metadata.code)) {
@@ -500,7 +655,7 @@ function publicError(metadata: NetworkV1ErrorMetadata): NetworkError {
   return new NetworkError(`HTTP request failed with ${code}`, {
     category: category as ConstructorParameters<typeof NetworkError>[1]["category"],
     code: code as ConstructorParameters<typeof NetworkError>[1]["code"],
-    operation: metadata.operation,
+    operation,
     temporary: metadata.temporary,
     address: metadata.address,
     port: metadata.port,
@@ -552,13 +707,14 @@ function localErrorMetadata(
 }
 
 class NetworkV1HttpAdapter {
-  readonly binding: HttpClientPrivateBinding;
+  readonly binding: AdmittedHttpClientBinding | undefined;
   readonly dispatcher: NetworkV1ServiceDispatcher;
   readonly #table: NetworkV1BindingTable;
   readonly #methods: Readonly<SafeBindingMethods>;
   readonly #runtimeGeneration: number;
   readonly #handshake: Readonly<NetworkV1Handshake>;
   readonly #slots: OperationSlot[];
+  readonly #httpClientLimits: ProjectedNetworkLimits;
   #commandSequence = 0;
   #completionSequence = 0;
   #inServiceTurn = false;
@@ -590,7 +746,7 @@ class NetworkV1HttpAdapter {
         );
     this.#slots = [];
     for (let index = 0; index < maxOperations; index += 1) {
-      this.#slots.push({
+      this.#slots[this.#slots.length] = {
         slotId: index + 1,
         generation: initialGeneration,
         phase: "retired",
@@ -603,28 +759,66 @@ class NetworkV1HttpAdapter {
         uploadPullPending: false,
         uploadTerminal: true,
         cancelSent: false,
-      });
+      };
     }
 
-    const featureSet: string[] = [];
-    for (const id of expectedHandshake.featureIds) {
-      featureSet.push(
-        (NETWORK_V1_FEATURE_CAPABILITY_BY_ID as Readonly<Record<number, string>>)[id]!,
-      );
+    this.#httpClientLimits = this.#queryLimits(
+      NetworkV1LimitProtocol.Http,
+      NetworkV1LimitRole.Client,
+    );
+    let httpClientAdmitted = false;
+    for (let index = 0; index < expectedHandshake.featureIds.length; index++) {
+      const id = expectedHandshake.featureIds[index]!;
+      if (id === NetworkV1FeatureId.HttpClient) {
+        httpClientAdmitted = true;
+        break;
+      }
     }
-    this.binding = objectFreeze({
-      abiMajor: NETWORK_V1_ABI_MAJOR,
-      abiMinor: NETWORK_V1_ABI_MINOR,
-      featureSet: objectFreeze(featureSet),
-      // v1.0 has no selected-provider ALPN snapshot. Keeping this absent makes
-      // custom ALPN fail before I/O instead of trusting Host implementation data.
-      start: (
-        command: HttpRequestStartCommand,
-        requestBody: HttpBodyProducer | null,
-      ): HttpClientBindingOperation => this.#start(command, requestBody),
-    });
     this.dispatcher = (request) => this.#serviceTurn(request);
-    reflectApply(this.#methods.registerServiceDispatcher, this.#table, [this.dispatcher]);
+    if (httpClientAdmitted) {
+      this.binding = objectFreeze({
+        abiMajor: NETWORK_V1_ABI_MAJOR,
+        abiMinor: NETWORK_V1_ABI_MINOR,
+        featureSet: this.#httpClientLimits.features,
+        httpClientLimits: this.#httpClientLimits,
+        // v1.0 has no selected-provider ALPN snapshot. Keeping this absent makes
+        // custom ALPN fail before I/O instead of trusting Host implementation data.
+        start: (
+          command: HttpRequestStartCommand,
+          requestBody: HttpBodyProducer | null,
+        ): HttpClientBindingOperation => this.#start(command, requestBody),
+      });
+      reflectApply(this.#methods.registerServiceDispatcher, this.#table, [this.dispatcher]);
+    }
+  }
+
+  #queryLimits(
+    protocol: typeof NETWORK_V1_LIMIT_PROTOCOL_ANY | NetworkV1LimitProtocol,
+    role: typeof NETWORK_V1_LIMIT_ROLE_ANY | NetworkV1LimitRole,
+  ): ProjectedNetworkLimits {
+    const query = objectFreeze({
+      runtimeGeneration: this.#runtimeGeneration,
+      protocol,
+      role,
+    });
+    let snapshot: Readonly<NetworkV1LimitsSnapshot>;
+    try {
+      const raw = reflectApply(this.#methods.getLimits, this.#table, [query]);
+      snapshot = snapshotNetworkV1Limits(query, raw, this.#handshake);
+    } catch (error) {
+      throw this.#poison(error);
+    }
+    const features: string[] = [];
+    for (let index = 0; index < snapshot.featureIds.length; index++) {
+      const id = snapshot.featureIds[index]!;
+      features[features.length] = (
+        NETWORK_V1_FEATURE_CAPABILITY_BY_ID as Readonly<Record<number, string>>
+      )[id]!;
+    }
+    return objectFreeze({
+      values: snapshot.values,
+      features: objectFreeze(features),
+    });
   }
 
   limits(
@@ -656,28 +850,11 @@ class NetworkV1HttpAdapter {
       : role === "client"
         ? NetworkV1LimitRole.Client
         : NetworkV1LimitRole.Server;
-    const query = objectFreeze({
-      runtimeGeneration: this.#runtimeGeneration,
-      protocol: protocolId,
-      role: roleId,
-    });
-    let snapshot: ReturnType<typeof snapshotNetworkV1Limits>;
-    try {
-      const raw = reflectApply(this.#methods.getLimits, this.#table, [query]);
-      snapshot = snapshotNetworkV1Limits(query, raw, this.#handshake);
-    } catch (error) {
-      throw this.#poison(error);
+    if (protocolId === NetworkV1LimitProtocol.Http &&
+      roleId === NetworkV1LimitRole.Client) {
+      return this.#httpClientLimits;
     }
-    const features: string[] = [];
-    for (const id of snapshot.featureIds) {
-      features.push(
-        (NETWORK_V1_FEATURE_CAPABILITY_BY_ID as Readonly<Record<number, string>>)[id]!,
-      );
-    }
-    return objectFreeze({
-      values: snapshot.values,
-      features: objectFreeze(features),
-    });
+    return this.#queryLimits(protocolId, roleId);
   }
 
   #nextCommandSequence(): number {
@@ -709,7 +886,8 @@ class NetworkV1HttpAdapter {
 
   #allocate(highOperationId: number): OperationSlot {
     integer(highOperationId, 1, NETWORK_V1_SEQUENCE_MAX, "operationId");
-    for (const active of this.#slots) {
+    for (let index = 0; index < this.#slots.length; index++) {
+      const active = this.#slots[index]!;
       if (active.phase !== "retired" && active.highOperationId === highOperationId) {
         throw new NetworkError("HTTP operation id is already active", {
           category: "runtime",
@@ -719,7 +897,8 @@ class NetworkV1HttpAdapter {
         });
       }
     }
-    for (const slot of this.#slots) {
+    for (let index = 0; index < this.#slots.length; index++) {
+      const slot = this.#slots[index]!;
       if (slot.phase !== "retired" || slot.generation === NETWORK_V1_UINT32_MAX) continue;
       slot.generation += 1;
       slot.phase = "headers";
@@ -774,7 +953,12 @@ class NetworkV1HttpAdapter {
     const slot = this.#allocate(command.operationId);
     let prepared: ReturnType<typeof prepareRequestMetadata>;
     try {
-      prepared = prepareRequestMetadata(command, this.binding.featureSet);
+      if (!this.binding) throw abiFault("HTTP client start is not admitted");
+      prepared = prepareRequestMetadata(
+        command,
+        this.binding.featureSet,
+        this.#httpClientLimits.values,
+      );
       if (prepared.metadata.hasBody !== (requestBody !== null)) {
         throw abiFault("request body presence disagrees with metadata");
       }
@@ -864,9 +1048,10 @@ class NetworkV1HttpAdapter {
   #serviceTurn(request: NetworkV1ServiceTurnRequest): NetworkV1ServiceTurnResult {
     this.#assertHealthy();
     if (this.#inServiceTurn) throw this.#poison(abiFault("service dispatcher is reentrant"));
+    let snapshot: Readonly<NetworkV1ServiceTurnRequest>;
     try {
-      assertNetworkV1ServiceTurnRequest(request);
-      if (request.runtimeGeneration !== this.#runtimeGeneration) {
+      snapshot = snapshotServiceTurnRequest(request);
+      if (snapshot.runtimeGeneration !== this.#runtimeGeneration) {
         throw abiFault("service turn uses a stale runtime generation");
       }
     } catch (error) {
@@ -878,8 +1063,9 @@ class NetworkV1HttpAdapter {
     let status: typeof NetworkV1ServiceTurnStatus.Drained |
       typeof NetworkV1ServiceTurnStatus.MoreReady = NetworkV1ServiceTurnStatus.MoreReady;
     try {
-      if (request.kind === NetworkV1ServiceTurnKind.Shutdown) {
-        for (const slot of this.#slots) {
+      if (snapshot.kind === NetworkV1ServiceTurnKind.Shutdown) {
+        for (let index = 0; index < this.#slots.length; index++) {
+          const slot = this.#slots[index]!;
           if (slot.phase === "retired" || slot.cancelSent) continue;
           slot.cancelSent = true;
           const refused = this.#dispatch(objectFreeze({
@@ -890,8 +1076,8 @@ class NetworkV1HttpAdapter {
         }
       }
 
-      while (eventsDelivered < request.maxEvents) {
-        const remainingBytes = request.maxPayloadBytes - payloadBytesDelivered;
+      while (eventsDelivered < snapshot.maxEvents) {
+        const remainingBytes = snapshot.maxPayloadBytes - payloadBytesDelivered;
         const polled = this.#poll(remainingBytes);
         if (polled.status === NetworkV1CompletionPollStatus.Drained) {
           status = NetworkV1ServiceTurnStatus.Drained;
@@ -920,7 +1106,7 @@ class NetworkV1HttpAdapter {
         this.#deliver(item.completion);
       }
 
-      if (eventsDelivered === request.maxEvents && status !== NetworkV1ServiceTurnStatus.Drained) {
+      if (eventsDelivered === snapshot.maxEvents && status !== NetworkV1ServiceTurnStatus.Drained) {
         const probe = this.#poll(0);
         if (probe.status === NetworkV1CompletionPollStatus.Item) {
           this.#cleanupSelectedLease(probe.completion);
@@ -937,7 +1123,7 @@ class NetworkV1HttpAdapter {
         payloadBytesDelivered,
         lastSequence: eventsDelivered === 0 ? 0 : this.#completionSequence,
       });
-      assertNetworkV1ServiceTurnResult(request, result);
+      assertNetworkV1ServiceTurnResult(snapshot, result);
       return result;
     } catch (error) {
       throw this.#poison(error);
@@ -1064,9 +1250,22 @@ class NetworkV1HttpAdapter {
     }
     const normalized = reflectApply(promiseResolve, PromiseIntrinsic, [pulled]) as Promise<unknown>;
     reflectApply(promiseThen, normalized, [
-      (chunk: unknown) => this.#completeUploadPull(slot, maxBytes, chunk, undefined),
-      (error: unknown) => this.#completeUploadPull(slot, maxBytes, undefined, error),
+      (chunk: unknown) => this.#settleUploadPull(slot, maxBytes, chunk, undefined),
+      (error: unknown) => this.#settleUploadPull(slot, maxBytes, undefined, error),
     ]);
+  }
+
+  #settleUploadPull(
+    slot: OperationSlot,
+    credit: number,
+    chunk: unknown,
+    pullError: unknown,
+  ): void {
+    try {
+      this.#completeUploadPull(slot, credit, chunk, pullError);
+    } catch (error) {
+      this.#poison(error);
+    }
   }
 
   #completeUploadPull(
@@ -1079,62 +1278,51 @@ class NetworkV1HttpAdapter {
       !slot.uploadPullPending || slot.uploadCredit !== credit) return;
     slot.uploadPullPending = false;
     slot.uploadCredit = 0;
-    let command: NetworkV1AsyncCommand;
-    if (pullError !== undefined) {
-      slot.uploadTerminal = true;
-      command = objectFreeze({
-        opcode: NetworkV1CommandOpcode.BodyError,
-        identity: this.#identity(slot, slot.requestBody),
-        error: objectFreeze({
-          ...localErrorMetadata(NetworkV1ErrorCode.SystemError, "http.fetch.upload"),
-          causeCode: "guest_body",
-        }),
-      });
-    } else if (chunk === null) {
-      slot.uploadTerminal = true;
-      command = objectFreeze({
-        opcode: NetworkV1CommandOpcode.BodyEnd,
-        identity: this.#identity(slot, slot.requestBody),
-      });
-    } else {
-      let bytes: Uint8Array;
-      try {
-        bytes = snapshotUint8Array(chunk, credit, "HTTP request body chunk");
-        if (bytes.byteLength === 0) throw abiFault("request BODY_CHUNK must not be empty");
-      } catch {
+    try {
+      let command: NetworkV1AsyncCommand;
+      if (pullError !== undefined) {
         slot.uploadTerminal = true;
         command = objectFreeze({
           opcode: NetworkV1CommandOpcode.BodyError,
           identity: this.#identity(slot, slot.requestBody),
-          error: localErrorMetadata(NetworkV1ErrorCode.InvalidState, "http.fetch.upload"),
+          error: objectFreeze({
+            ...localErrorMetadata(NetworkV1ErrorCode.SystemError, "http.fetch.upload"),
+            causeCode: "guest_body",
+          }),
         });
-        let refused: NetworkV1ErrorMetadata | undefined;
+      } else if (chunk === null) {
+        slot.uploadTerminal = true;
+        command = objectFreeze({
+          opcode: NetworkV1CommandOpcode.BodyEnd,
+          identity: this.#identity(slot, slot.requestBody),
+        });
+      } else {
+        let bytes: Uint8Array;
         try {
-          refused = this.#dispatch(command);
-        } catch (error) {
-          this.#poison(error);
-          return;
+          bytes = snapshotUint8Array(chunk, credit, "HTTP request body chunk");
+          if (bytes.byteLength === 0) throw abiFault("request BODY_CHUNK must not be empty");
+          command = objectFreeze({
+            opcode: NetworkV1CommandOpcode.BodyChunk,
+            identity: this.#identity(slot, slot.requestBody),
+            input: objectFreeze({
+              kind: NetworkV1BorrowedInputKind.BodyChunk,
+              bytes,
+            }),
+          });
+        } catch {
+          slot.uploadTerminal = true;
+          command = objectFreeze({
+            opcode: NetworkV1CommandOpcode.BodyError,
+            identity: this.#identity(slot, slot.requestBody),
+            error: localErrorMetadata(NetworkV1ErrorCode.InvalidState, "http.fetch.upload"),
+          });
         }
-        if (refused) this.#failSlot(slot, publicError(refused));
-        return;
       }
-      command = objectFreeze({
-        opcode: NetworkV1CommandOpcode.BodyChunk,
-        identity: this.#identity(slot, slot.requestBody),
-        input: objectFreeze({
-          kind: NetworkV1BorrowedInputKind.BodyChunk,
-          bytes,
-        }),
-      });
-    }
-    let refused: NetworkV1ErrorMetadata | undefined;
-    try {
-      refused = this.#dispatch(command);
+      const refused = this.#dispatch(command);
+      if (refused) this.#failSlot(slot, publicError(refused, "http.fetch.upload"));
     } catch (error) {
-      this.#poison(error);
-      return;
+      throw this.#poison(error);
     }
-    if (refused) this.#failSlot(slot, publicError(refused));
   }
 
   #stopUpload(slot: OperationSlot, reason: unknown): void {
@@ -1250,7 +1438,7 @@ class NetworkV1HttpAdapter {
           refused = this.#dispatch(objectFreeze({
             opcode: NetworkV1CommandOpcode.BodyPull,
             identity: this.#identity(slot, slot.responseBody),
-            maxBytes: Math.min(capacity, HTTP_BODY_CHUNK_BYTES),
+            maxBytes: mathMin(capacity, HTTP_BODY_CHUNK_BYTES),
           }));
         } catch (error) {
           reject(this.#poison(error));
@@ -1258,7 +1446,7 @@ class NetworkV1HttpAdapter {
         }
         if (refused) {
           slot.pendingRead = undefined;
-          reject(publicError(refused));
+          reject(publicError(refused, "http.body.readInto"));
         }
       });
     };
@@ -1286,7 +1474,7 @@ class NetworkV1HttpAdapter {
         return PromiseIntrinsic.reject(this.#poison(error));
       }
       if (refused) {
-        const error = publicError(refused);
+        const error = publicError(refused, "http.body.cancel");
         slot.pendingRead = undefined;
         pending?.reject(error);
         this.#failResponseBody(slot, error);
@@ -1305,11 +1493,14 @@ class NetworkV1HttpAdapter {
       [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
         return {
           async next(): Promise<IteratorResult<Uint8Array>> {
-            const destination = new Uint8Array(HTTP_BODY_CHUNK_BYTES);
+            const destination = new Uint8ArrayIntrinsic(HTTP_BODY_CHUNK_BYTES);
             const result = await readInto(destination);
             return result.done
               ? { value: undefined, done: true }
-              : { value: uint8ArraySlice.call(destination, 0, result.bytes), done: false };
+              : {
+                  value: reflectApply(uint8ArraySlice, destination, [0, result.bytes]),
+                  done: false,
+                };
           },
           async return(): Promise<IteratorResult<Uint8Array>> {
             await cancel();
@@ -1335,7 +1526,7 @@ class NetworkV1HttpAdapter {
     }
     const pending = slot.pendingRead;
     if (!pending || completion.payload.byteLength >
-      Math.min(pending.capacity, HTTP_BODY_CHUNK_BYTES)) {
+      mathMin(pending.capacity, HTTP_BODY_CHUNK_BYTES)) {
       this.#cleanupSelectedLease(completion);
       throw abiFault("response BODY_CHUNK has no matching credit");
     }
@@ -1370,7 +1561,7 @@ class NetworkV1HttpAdapter {
     }
     const pending = slot.pendingRead;
     slot.pendingRead = undefined;
-    const error = publicError(metadata);
+    const error = publicError(metadata, "http.body.readInto");
     this.#failResponseBody(slot, error);
     pending?.reject(error);
     this.#retire(slot);
@@ -1399,17 +1590,28 @@ class NetworkV1HttpAdapter {
       byteLength: completion.payload.byteLength,
     });
     const takeResult = reflectApply(this.#methods.leaseTake, this.#table, [take]) as unknown;
-    const takeCompleted = this.#leaseTakeCompleted(takeResult);
+    const takeClaim = this.#claimLeaseTake(takeResult);
+    const takeCompleted = takeClaim.completed;
     let takenLength = 0;
     let offset = 0;
     let failure: unknown;
     try {
-      takenLength = this.#snapshotLeaseTakeResult(takeResult);
+      if (!takeClaim.completed) throw takeClaim.error;
+      takenLength = integer(
+        takeClaim.result.byteLength,
+        1,
+        NETWORK_V1_UINT32_MAX,
+        "leaseTake.byteLength",
+      );
       if (takenLength !== completion.payload.byteLength) {
         throw abiFault("lease take length disagrees with its completion");
       }
       while (offset < takenLength) {
-        const window = destination.subarray(offset, takenLength);
+        const window = reflectApply(
+          uint8ArraySubarray,
+          destination,
+          [offset, takenLength],
+        ) as Uint8Array;
         const read: NetworkV1BufferLeaseReadIntoCommand = objectFreeze({
           opcode: NetworkV1CommandOpcode.BufferLeaseReadInto,
           identity: this.#leaseIdentity(completion.identity),
@@ -1434,25 +1636,36 @@ class NetworkV1HttpAdapter {
     if (failure !== undefined) throw failure;
   }
 
-  #leaseTakeCompleted(value: unknown): boolean {
-    return typeof value === "object" && value !== null &&
-      (value as { readonly status?: unknown }).status === NetworkV1DispatchStatus.Completed;
-  }
-
-  #snapshotLeaseTakeResult(value: unknown): number {
+  #claimLeaseTake(value: unknown): Readonly<
+    | {
+        completed: true;
+        result: { readonly byteLength?: unknown };
+      }
+    | { completed: false; error: NetworkError }
+  > {
     if (typeof value !== "object" || value === null) throw abiFault("leaseTake result is missing");
     const candidate = value as { readonly status?: unknown; readonly byteLength?: unknown; readonly error?: unknown };
     const status = candidate.status;
-    if (status === NetworkV1DispatchStatus.Refused) throw publicError(snapshotError(candidate.error, "leaseTake.error"));
+    if (status === NetworkV1DispatchStatus.Refused) {
+      return objectFreeze({
+        completed: false,
+        error: publicError(
+          snapshotError(candidate.error, "leaseTake.error"),
+          "http.body.readInto",
+        ),
+      });
+    }
     if (status !== NetworkV1DispatchStatus.Completed) throw abiFault("leaseTake did not complete synchronously");
-    return integer(candidate.byteLength, 1, NETWORK_V1_UINT32_MAX, "leaseTake.byteLength");
+    return objectFreeze({ completed: true, result: candidate });
   }
 
   #snapshotLeaseReadResult(value: unknown, maximum: number): number {
     if (typeof value !== "object" || value === null) throw abiFault("leaseReadInto result is missing");
     const candidate = value as { readonly status?: unknown; readonly bytesCopied?: unknown; readonly error?: unknown };
     const status = candidate.status;
-    if (status === NetworkV1DispatchStatus.Refused) throw publicError(snapshotError(candidate.error, "leaseReadInto.error"));
+    if (status === NetworkV1DispatchStatus.Refused) {
+      throw publicError(snapshotError(candidate.error, "leaseReadInto.error"), "http.body.readInto");
+    }
     if (status !== NetworkV1DispatchStatus.Completed) throw abiFault("leaseReadInto did not complete synchronously");
     return integer(candidate.bytesCopied, 1, maximum, "leaseReadInto.bytesCopied");
   }
@@ -1470,7 +1683,10 @@ class NetworkV1HttpAdapter {
     if (typeof raw !== "object" || raw === null) throw abiFault("leaseRelease result is missing");
     const candidate = raw as { readonly status?: unknown; readonly error?: unknown };
     if (candidate.status === NetworkV1DispatchStatus.Refused) {
-      throw publicError(snapshotError(candidate.error, "leaseRelease.error"));
+      throw publicError(
+        snapshotError(candidate.error, "leaseRelease.error"),
+        "http.body.readInto",
+      );
     }
     if (candidate.status !== NetworkV1DispatchStatus.Completed) {
       throw abiFault("leaseRelease did not complete synchronously");
@@ -1486,10 +1702,17 @@ class NetworkV1HttpAdapter {
       byteLength: completion.payload.byteLength,
     });
     const raw = reflectApply(this.#methods.leaseTake, this.#table, [take]) as unknown;
-    const takeCompleted = this.#leaseTakeCompleted(raw);
+    const takeClaim = this.#claimLeaseTake(raw);
+    const takeCompleted = takeClaim.completed;
     let failure: unknown;
     try {
-      const length = this.#snapshotLeaseTakeResult(raw);
+      if (!takeClaim.completed) throw takeClaim.error;
+      const length = integer(
+        takeClaim.result.byteLength,
+        1,
+        NETWORK_V1_UINT32_MAX,
+        "leaseTake.byteLength",
+      );
       if (length !== completion.payload.byteLength) {
         throw abiFault("stale lease take length is inconsistent");
       }
@@ -1522,7 +1745,8 @@ class NetworkV1HttpAdapter {
   }
 
   #failAll(error: unknown): void {
-    for (const slot of this.#slots) {
+    for (let index = 0; index < this.#slots.length; index++) {
+      const slot = this.#slots[index]!;
       if (slot.phase !== "retired") this.#failSlot(slot, error);
     }
   }
@@ -1544,6 +1768,7 @@ class NetworkV1HttpAdapter {
 function prepareRequestMetadata(
   command: HttpRequestStartCommand,
   featureSet: readonly string[],
+  admittedLimits: readonly Readonly<NetworkV1LimitEntry>[],
 ): Readonly<{
   metadata: NetworkV1HttpRequestMetadata;
   customCa?: Uint8Array;
@@ -1555,7 +1780,7 @@ function prepareRequestMetadata(
     throw abiFault("request URL is not a canonical HTTP(S) URL without a fragment");
   }
   const method = byteString(command.method, 64, "request.method");
-  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(method) ||
+  if (!regExpTest(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, method) ||
     method === "CONNECT" || method === "TRACE" || method === "TRACK") {
     throw abiFault("request method is invalid");
   }
@@ -1593,21 +1818,33 @@ function prepareRequestMetadata(
   if (command.limits !== undefined) {
     const names = objectKeys(command.limits);
     if (names.length > MAX_LIMIT_OVERRIDES) throw abiFault("request limits exceed their count ceiling");
-    names.sort();
-    for (const name of names) {
+    arraySort(names);
+    for (let nameIndex = 0; nameIndex < names.length; nameIndex++) {
+      const name = names[nameIndex]!;
       if (name.length === 0 || name.length > MAX_LIMIT_NAME_BYTES ||
-        !/^[A-Za-z][A-Za-z0-9._-]*$/.test(name)) {
+        !regExpTest(/^[A-Za-z][A-Za-z0-9._-]*$/, name)) {
         throw abiFault("request limit name is invalid");
       }
-      limits.push(objectFreeze({
+      let admitted: Readonly<NetworkV1LimitEntry> | undefined;
+      for (let limitIndex = 0; limitIndex < admittedLimits.length; limitIndex++) {
+        const entry = admittedLimits[limitIndex]!;
+        if (entry.name === name) {
+          admitted = entry;
+          break;
+        }
+      }
+      if (admitted === undefined) {
+        throw abiFault(`request limit ${name} is not admitted for the HTTP client`);
+      }
+      limits[limits.length] = objectFreeze({
         name,
         value: integer(
           command.limits[name],
-          1,
-          NETWORK_V1_UINT32_MAX,
+          admitted.minimum,
+          admitted.default,
           `request limit ${name}`,
         ),
-      }));
+      });
     }
   }
 
@@ -1615,7 +1852,7 @@ function prepareRequestMetadata(
   let customCa: Uint8Array | undefined;
   if (parsed.scheme === "https") {
     const source = command.tls;
-    const hasV13 = featureSet.includes("network.http.client.tls.v1-3");
+    const hasV13 = arrayIncludes(featureSet, "network.http.client.tls.v1-3");
     const minVersion = source?.minVersion === "1.3"
       ? NetworkV1TlsVersion.V13
       : NetworkV1TlsVersion.V12;
@@ -1631,24 +1868,29 @@ function prepareRequestMetadata(
       if (!arrayIsArray(source.alpn) || source.alpn.length > MAX_ALPN_TOKENS) {
         throw abiFault("TLS ALPN list is invalid");
       }
-      for (const rawToken of source.alpn) {
+      for (let index = 0; index < source.alpn.length; index++) {
+        const rawToken = source.alpn[index];
         const token = byteString(rawToken, 255, "TLS ALPN token");
-        if (token.length === 0 || token.includes("\0") || alpn.includes(token)) {
+        if (token.length === 0 || stringIncludes(token, "\0") || arrayIncludes(alpn, token)) {
           throw abiFault("TLS ALPN token is invalid or duplicate");
         }
         alpnBytes += token.length;
         if (alpnBytes > MAX_ALPN_BYTES) throw abiFault("TLS ALPN list exceeds its byte ceiling");
-        alpn.push(token);
+        alpn[alpn.length] = token;
       }
     }
     if (source?.ca !== undefined) {
       customCa = snapshotUint8Array(source.ca, MAX_CA_BYTES, "TLS custom CA");
       if (customCa.byteLength === 0) throw abiFault("TLS custom CA must not be empty");
     }
-    const hostnameIsIp = parsed.hostname.includes(":") || /^\d+(?:\.\d+){3}$/.test(parsed.hostname);
-    const serverName = hostnameIsIp
-      ? ""
-      : byteString(source?.serverName ?? parsed.hostname, 253, "TLS serverName");
+    const hostnameIsIp = stringIncludes(parsed.hostname, ":") ||
+      regExpTest(/^\d+(?:\.\d+){3}$/, parsed.hostname);
+    const suppliedServerName = source?.serverName;
+    if (suppliedServerName !== undefined &&
+      canonicalServerNameForComparison(suppliedServerName) !== parsed.hostname) {
+      throw abiFault("TLS serverName must equal the canonical request hostname");
+    }
+    const serverName = hostnameIsIp ? "" : parsed.hostname;
     const credential = source?.credential === undefined
       ? ""
       : byteString(source.credential, 128, "TLS credential");
@@ -1701,15 +1943,17 @@ export function createNetworkV1HttpBindingAdapterForTesting(
   expected: NetworkV1CompiledExpectation,
   options?: AdapterTestOptions,
 ): Readonly<{
-  binding: HttpClientPrivateBinding;
+  binding: AdmittedHttpClientBinding | undefined;
   dispatcher: NetworkV1ServiceDispatcher;
   limits: NetworkV1HttpAdapter["limits"];
+  httpClientLimits: ProjectedNetworkLimits;
 }> {
   const adapter = new NetworkV1HttpAdapter(table, expected, options);
   return objectFreeze({
     binding: adapter.binding,
     dispatcher: adapter.dispatcher,
     limits: (protocol, role) => adapter.limits(protocol, role),
+    httpClientLimits: adapter.limits("http", "client"),
   });
 }
 
@@ -1724,5 +1968,5 @@ export function mountNetworkV1HttpBinding(
   runtimeMounted = true;
   const adapter = new NetworkV1HttpAdapter(table as NetworkV1BindingTable, expected);
   installNetworkLimitsProvider((protocol, role) => adapter.limits(protocol, role));
-  installHttpClientBindingForRuntime(adapter.binding);
+  if (adapter.binding !== undefined) installHttpClientBindingForRuntime(adapter.binding);
 }
