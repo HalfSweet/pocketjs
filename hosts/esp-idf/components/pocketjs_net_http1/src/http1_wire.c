@@ -390,7 +390,8 @@ static pocketjs_net_http1_wire_error_t validate_request(
     return POCKETJS_NET_HTTP1_WIRE_ERROR_INVALID_METHOD;
   }
   if (ascii_equal_case(request->method.data, request->method.length, "CONNECT") ||
-      ascii_equal_case(request->method.data, request->method.length, "TRACE")) {
+      ascii_equal_case(request->method.data, request->method.length, "TRACE") ||
+      ascii_equal_case(request->method.data, request->method.length, "TRACK")) {
     return POCKETJS_NET_HTTP1_WIRE_ERROR_FORBIDDEN_METHOD;
   }
   if (!valid_target(request->target)) {

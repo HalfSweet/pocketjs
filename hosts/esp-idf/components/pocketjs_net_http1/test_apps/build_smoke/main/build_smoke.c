@@ -198,6 +198,10 @@ static void test_request_encoder(void) {
   assert(pocketjs_net_http1_request_encoder_init(
              &encoder, &request, &pocketjs_net_http1_default_limits) ==
          POCKETJS_NET_HTTP1_WIRE_ERROR_FORBIDDEN_METHOD);
+  request.method = SLICE("TrAcK");
+  assert(pocketjs_net_http1_request_encoder_init(
+             &encoder, &request, &pocketjs_net_http1_default_limits) ==
+         POCKETJS_NET_HTTP1_WIRE_ERROR_FORBIDDEN_METHOD);
   request.method = SLICE("BAD METHOD");
   assert(pocketjs_net_http1_request_encoder_init(
              &encoder, &request, &pocketjs_net_http1_default_limits) ==
