@@ -66,6 +66,7 @@ const SUITE: readonly Stage[] = [
       "tests/net.test.ts",
       "tests/http-fetch.test.ts",
       "tests/http-body-hardening.test.ts",
+      "tests/http-utf8.test.ts",
       "tests/http-url.test.ts",
       "tests/net-limits-hardening.test.ts",
       "tests/network-bundle-factory.test.ts",
