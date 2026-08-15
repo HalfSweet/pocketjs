@@ -121,6 +121,7 @@ typedef struct {
   bool advertises_public_capability;
   bool ipv4;
   bool asynchronous_raw_dns;
+  bool stock_lwip_dns_callbacks_only;
   bool complete_dns_candidate_set;
   bool dns_cancel_generation_cleanup;
   bool synchronous_getaddrinfo_for_hostname;
@@ -239,8 +240,10 @@ const pocketjs_net_esp_transport_descriptor_t *
 pocketjs_net_esp_transport_descriptor(void);
 
 /**
- * create fixes the calling task as owner. Except for cancel and
- * begin_shutdown, every API below must be called by that same task.
+ * create fixes the calling task as owner. The owner must be a product task,
+ * never lwIP's tcpip task, because destroy uses a synchronous tcpip callback
+ * barrier. Except for cancel and begin_shutdown, every API below must be called
+ * by that same task.
  */
 esp_err_t pocketjs_net_esp_transport_create(
     const pocketjs_net_esp_transport_config_t *config,
@@ -264,6 +267,24 @@ bool pocketjs_net_esp_transport_is_quiescent(
  */
 esp_err_t
 pocketjs_net_esp_transport_destroy(pocketjs_net_esp_transport_t *transport);
+
+/**
+ * Owner-only poison teardown for a dedicated transport whose sole protocol
+ * Core has entered shutdown and reported poisoned native ownership. The caller
+ * must already have called begin_shutdown, prohibited new external calls, and
+ * joined every in-flight caller. This abandons queued/delivering completions,
+ * closes native connections, and releases transport-owned leases only after a
+ * tcpip-thread barrier proves that no DNS callback is executing. A raw DNS
+ * lookup that has not reached its late callback keeps returning
+ * ESP_ERR_NOT_FINISHED; the caller must retry without freeing the Core. Once
+ * this succeeds, transport_context in that Core is invalid: the caller must
+ * synchronously call core_confirm_transport_shutdown before any other Core
+ * entry point.
+ *
+ * Healthy shutdown must use pocketjs_net_esp_transport_destroy().
+ */
+esp_err_t pocketjs_net_esp_transport_destroy_poisoned(
+    pocketjs_net_esp_transport_t *transport);
 
 esp_err_t pocketjs_net_esp_transport_start_resolve(
     pocketjs_net_esp_transport_t *transport,

@@ -62,6 +62,10 @@
 #if DNS_MAX_HOST_IP != POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES
 #error "CONFIG_LWIP_DNS_MAX_HOST_IP must equal PocketJS candidate capacity"
 #endif
+#if defined(CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM) &&                         \
+    CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM
+#error "PocketJS ESP transport requires stock tcpip-thread DNS callbacks"
+#endif
 
 #if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) &&                              \
     CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
@@ -190,6 +194,7 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
     .advertises_public_capability = false,
     .ipv4 = true,
     .asynchronous_raw_dns = true,
+    .stock_lwip_dns_callbacks_only = true,
     /* lwIP returns at most DNS_MAX_HOST_IP answers and may truncate a larger
      * RRset, so this provider cannot claim an exhaustive DNS candidate set. */
     .complete_dns_candidate_set = false,
@@ -749,6 +754,49 @@ tls_config_shape_valid(const pocketjs_net_esp_transport_config_t *config) {
 
 static void tcpip_destroy_barrier(void *context) { (void)context; }
 
+static esp_err_t prepare_poisoned_dns_teardown(
+    pocketjs_net_esp_transport_t *transport) {
+  portENTER_CRITICAL(&transport->lock);
+  for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
+       ++index) {
+    dns_context_t *context = &transport->dns_contexts[index];
+    atomic_store_explicit(&context->cancelled, true, memory_order_release);
+    if (context->state == DNS_CONTEXT_RESULT_READY) {
+      context->state = DNS_CONTEXT_FREE;
+    }
+  }
+  portEXIT_CRITICAL(&transport->lock);
+
+  /* A queued submission observes cancelled and frees its context. A lookup
+   * already owned by lwIP must run its late callback before the backing context
+   * can be released; the barrier makes both observations stable. */
+  if (tcpip_callback_wait(tcpip_destroy_barrier, NULL) != ERR_OK) {
+    return ESP_FAIL;
+  }
+
+  bool callbacks_drained = true;
+  portENTER_CRITICAL(&transport->lock);
+  for (size_t index = 0;
+       callbacks_drained &&
+       index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
+       ++index) {
+    callbacks_drained =
+        transport->dns_contexts[index].state == DNS_CONTEXT_FREE;
+  }
+  portEXIT_CRITICAL(&transport->lock);
+  return callbacks_drained ? ESP_OK : ESP_ERR_NOT_FINISHED;
+}
+
+static void release_transport_storage(
+    pocketjs_net_esp_transport_t *transport) {
+  for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
+       ++index) {
+    tcpip_callbackmsg_delete(transport->dns_contexts[index].submit_message);
+  }
+  memset(transport->pinned_ca, 0, sizeof(transport->pinned_ca));
+  free(transport);
+}
+
 const pocketjs_net_esp_transport_descriptor_t *
 pocketjs_net_esp_transport_descriptor(void) {
   return &s_descriptor;
@@ -888,12 +936,41 @@ pocketjs_net_esp_transport_destroy(pocketjs_net_esp_transport_t *transport) {
   if (tcpip_callback_wait(tcpip_destroy_barrier, NULL) != ERR_OK) {
     return ESP_FAIL;
   }
-  for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
-       ++index) {
-    tcpip_callbackmsg_delete(transport->dns_contexts[index].submit_message);
+  release_transport_storage(transport);
+  return ESP_OK;
+}
+
+esp_err_t pocketjs_net_esp_transport_destroy_poisoned(
+    pocketjs_net_esp_transport_t *transport) {
+  if (!owner_task(transport) ||
+      !atomic_load_explicit(&transport->closing, memory_order_acquire)) {
+    return ESP_ERR_INVALID_STATE;
   }
-  memset(transport->pinned_ca, 0, sizeof(transport->pinned_ca));
-  free(transport);
+  esp_err_t dns_result = prepare_poisoned_dns_teardown(transport);
+  if (dns_result != ESP_OK) {
+    return dns_result;
+  }
+
+  /* The protocol Core has abandoned this dedicated transport. With callbacks
+   * drained and external callers joined, only owner-task native storage
+   * remains. No completion or lease is observable after this call succeeds. */
+  for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_CONNECTIONS;
+       ++index) {
+    connection_native_close(&transport->connections[index]);
+  }
+  for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_READ_LEASES;
+       ++index) {
+    release_read_lease_slot(&transport->read_leases[index]);
+  }
+  memset(transport->operations, 0, sizeof(transport->operations));
+  memset(transport->completion_ring, 0, sizeof(transport->completion_ring));
+  transport->completion_head = 0U;
+  transport->completion_tail = 0U;
+  transport->completion_count = 0U;
+  transport->terminal_credits = (pocketjs_net_terminal_credits_t){
+      .capacity = POCKETJS_NET_ESP_TRANSPORT_COMPLETION_CAPACITY,
+  };
+  release_transport_storage(transport);
   return ESP_OK;
 }
 
