@@ -37,10 +37,12 @@ import {
   type NetworkV1CompiledExpectation,
 } from "../framework/src/net/network-v1-binding.ts";
 import {
+  installHttpClientBindingForTesting,
   NetworkV1CommandOpcode as HighCommandOpcode,
   type HttpRequestStartCommand,
 } from "../framework/src/net/http-binding.ts";
 import { AbortController } from "../framework/src/net/abort.ts";
+import { fetch as httpFetch } from "../framework/src/net/http.ts";
 import type { BodyStream, HttpBodyProducer } from "../framework/src/net/http-body.ts";
 
 const RUNTIME_GENERATION = 7;
@@ -53,10 +55,34 @@ const EXPECTED: NetworkV1CompiledExpectation = Object.freeze({
 const ABSENT = Object.freeze({ id: 0, generation: 0 });
 const DEFAULT_HTTP_CLIENT_LIMITS = Object.freeze([
   Object.freeze({
+    name: "http.bufferedBodyBytes",
+    default: 4096,
+    hard: 8192,
+    minimum: 1024,
+  }),
+  Object.freeze({
+    name: "http.headerBytes",
+    default: 8192,
+    hard: 16384,
+    minimum: 4096,
+  }),
+  Object.freeze({
     name: "http.maxBodyChunkBytes",
     default: 2048,
     hard: 4096,
     minimum: 512,
+  }),
+  Object.freeze({
+    name: "http.maxOperations",
+    default: 8,
+    hard: 8,
+    minimum: 1,
+  }),
+  Object.freeze({
+    name: "runtime.nativeBufferBytes",
+    default: 512 * 1024,
+    hard: 1024 * 1024,
+    minimum: 256 * 1024,
   }),
 ]);
 
@@ -224,9 +250,11 @@ class FakeHost {
   }
 
   get startCommand() {
-    return this.commands.find((command): command is Extract<NetworkV1AsyncCommand, {
-      opcode: typeof NetworkV1CommandOpcode.HttpRequestStart;
-    }> => command.opcode === NetworkV1CommandOpcode.HttpRequestStart)!;
+    for (let index = this.commands.length - 1; index >= 0; index--) {
+      const command = this.commands[index]!;
+      if (command.opcode === NetworkV1CommandOpcode.HttpRequestStart) return command;
+    }
+    throw new Error("test expected an HTTP request start command");
   }
 
   getLimits(query: NetworkV1LimitsQuery) {
@@ -277,6 +305,13 @@ class FakeHost {
         lease,
         byteLength: bytes.length,
       }),
+    });
+  }
+
+  end(body: NetworkV1Handle, sequence: number): NetworkV1Completion {
+    return Object.freeze({
+      eventCode: NetworkV1EventCode.BodyEnd,
+      identity: completionIdentity(this.startCommand, body, sequence),
     });
   }
 
@@ -1143,6 +1178,43 @@ describe("formal HTTP command/completion adapter", () => {
     expect(cancels).toBe(1);
   });
 
+  test("retires more than eight ignored small responses through bounded prefetch", async () => {
+    const host = new FakeHost();
+    const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
+    const cleanup = installHttpClientBindingForTesting(admittedBinding(adapter));
+    const retainedResponses: unknown[] = [];
+    let sequence = 1;
+    try {
+      for (let index = 0; index < 9; index++) {
+        const pending = httpFetch(`http://example.test/${index}`);
+        const body = Object.freeze({ id: 100 + index, generation: 1 });
+        host.completions.push(host.headers(body, sequence++));
+        host.run();
+        retainedResponses[retainedResponses.length] = await pending;
+
+        host.completions.push(
+          host.chunk(body, [0x30 + index], sequence++),
+          host.end(body, sequence++),
+        );
+        host.run();
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+
+      expect(retainedResponses).toHaveLength(9);
+      expect(host.commands.filter((command) =>
+        command.opcode === NetworkV1CommandOpcode.HttpRequestStart
+      )).toHaveLength(9);
+      expect(host.commands.filter((command) =>
+        command.opcode === NetworkV1CommandOpcode.OperationCancel
+      )).toHaveLength(0);
+      expect(host.releaseCount).toBe(9);
+      for (const lease of host.leases.values()) expect(lease.state).toBe("released");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("bounds operation slots, advances generation, and never wraps", async () => {
     const host = new FakeHost();
     const adapter = createNetworkV1HttpBindingAdapterForTesting(
@@ -1235,12 +1307,7 @@ describe("formal limits projection", () => {
     const host = new FakeHost();
     const adapter = createNetworkV1HttpBindingAdapterForTesting(host.table, EXPECTED);
     expect(adapter.limits("http", "client")).toEqual({
-      values: [{
-        name: "http.maxBodyChunkBytes",
-        default: 2048,
-        hard: 4096,
-        minimum: 512,
-      }],
+      values: DEFAULT_HTTP_CLIENT_LIMITS,
       features: ["network.http.client"],
     });
     expect(adapter.limits("http", "server").features).toEqual([]);

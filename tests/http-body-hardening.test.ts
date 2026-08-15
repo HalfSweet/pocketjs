@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  bodyFromBinding,
   type BodyController,
   type BodyStream,
   extractBody,
@@ -366,5 +367,47 @@ describe("admitted HTTP body limits", () => {
     expect(credits.length).toBeGreaterThan(0);
     expect(credits.every((credit) => credit <= 2)).toBe(true);
     await first.stream.cancel();
+  });
+
+  test("prefetches ignored small binding bodies without losing later reads", async () => {
+    const bytes = new TextEncoder().encode("hey");
+    let offset = 0;
+    let reads = 0;
+    const stream: BodyStream = {
+      async readInto(destination) {
+        reads++;
+        if (offset === bytes.byteLength) return { bytes: 0, done: true };
+        const count = Math.min(destination.byteLength, bytes.byteLength - offset);
+        destination.set(bytes.subarray(offset, offset + count));
+        offset += count;
+        return { bytes: count, done: false };
+      },
+      async cancel() {},
+      async *[Symbol.asyncIterator]() {},
+    };
+    const controller = bodyFromBinding(stream, limits);
+    await Bun.sleep(0);
+    expect(offset).toBe(bytes.byteLength);
+    expect(reads).toBeGreaterThan(1);
+    expect(new TextDecoder().decode(await controller.aggregate("http.body.test"))).toBe("hey");
+  });
+
+  test("stops ignored large binding bodies at the admitted prefetch window", async () => {
+    let reads = 0;
+    let cancels = 0;
+    const stream: BodyStream = {
+      async readInto(destination) {
+        reads++;
+        destination[0] = 0x61;
+        return { bytes: 1, done: false };
+      },
+      async cancel() { cancels++; },
+      async *[Symbol.asyncIterator]() {},
+    };
+    const controller = bodyFromBinding(stream, limits);
+    await Bun.sleep(0);
+    expect(reads).toBe(limits.teeBranchBytes);
+    await controller.stream.cancel();
+    expect(cancels).toBe(1);
   });
 });
