@@ -1,3 +1,8 @@
+import { canonicalizeHttpUrl } from "./http-url.ts";
+
+const freezeNetworkValue = Object.freeze;
+const networkString = String;
+
 /** Shared support values and types for the PocketJS network package namespace.
  *
  * Importing this module does not mount a transport or read a public global.
@@ -124,20 +129,17 @@ export class NetworkError extends Error {
 }
 
 /**
- * A transport-neutral URL value. The first SDK phase accepts absolute URLs;
- * relative URL resolution remains outside the public contract until the URL
- * conformance profile is pinned.
+ * A canonical absolute HTTP(S) URL value. Relative and non-HTTP URL schemes
+ * are outside the first public network profile.
  */
 export class URL {
   readonly href: string;
 
   constructor(input: string | URL) {
-    const href = input instanceof URL ? input.href : String(input);
-    if (!/^[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s]+$/.test(href)) {
-      throw new TypeError("PocketJS URL must be absolute and include an authority");
-    }
-    this.href = href;
-    Object.freeze(this);
+    const source = input instanceof URL ? input.href : networkString(input);
+    const parsed = canonicalizeHttpUrl(source);
+    this.href = `${parsed.href}${parsed.fragment}`;
+    freezeNetworkValue(this);
   }
 
   toString(): string {
