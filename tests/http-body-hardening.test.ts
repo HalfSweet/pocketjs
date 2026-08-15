@@ -314,3 +314,57 @@ describe("HTTP body tee fault ownership", () => {
     }
   });
 });
+
+describe("admitted HTTP body limits", () => {
+  const limits = Object.freeze({
+    bufferedBytes: 6,
+    chunkBytes: 2,
+    teeBranchBytes: 4,
+  });
+
+  test("rejects buffered inputs and async chunks above admitted defaults", async () => {
+    expect(() => extractBody("1234567", limits)).toThrow(/exceeds 6 bytes/);
+    expect(() => extractBody(new Uint8Array(7), limits)).toThrow(/exceeds 6 bytes/);
+
+    const iterable: AsyncIterable<Uint8Array> = {
+      async *[Symbol.asyncIterator]() {
+        yield new Uint8Array([1, 2, 3]);
+      },
+    };
+    const controller = extractBody(iterable, limits).controller;
+    await expect(controller.stream.readInto(new Uint8Array(2))).rejects.toMatchObject({
+      code: "resource_limit",
+    });
+  });
+
+  test("uses admitted chunk credit and tee backpressure", async () => {
+    const credits: number[] = [];
+    const stream: BodyStream = {
+      async readInto(destination) {
+        credits.push(destination.byteLength);
+        destination.fill(0x61);
+        return { bytes: destination.byteLength, done: false };
+      },
+      async cancel() {},
+      async *[Symbol.asyncIterator]() {},
+    };
+    const first = extractBody(stream, limits).controller;
+    const second = first.tee();
+    const destination = new Uint8Array(2);
+    expect(await first.stream.readInto(destination)).toEqual({ bytes: 2, done: false });
+    expect(await first.stream.readInto(destination)).toEqual({ bytes: 2, done: false });
+
+    let settled = false;
+    const blocked = first.stream.readInto(destination).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    await second.stream.cancel("release backpressure");
+    expect(await blocked).toEqual({ bytes: 2, done: false });
+    expect(credits.length).toBeGreaterThan(0);
+    expect(credits.every((credit) => credit <= 2)).toBe(true);
+    await first.stream.cancel();
+  });
+});
