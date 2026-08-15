@@ -319,6 +319,89 @@ describe("HTTP Headers snapshot", () => {
     }
   });
 
+  test("captures Headers iterator records and result fields once", () => {
+    let outerNextGets = 0;
+    let pairNextGets = 0;
+    let doneGets = 0;
+    let valueGets = 0;
+    const pair = {
+      [Symbol.iterator]() {
+        let index = 0;
+        return {
+          get next() {
+            pairNextGets++;
+            return () => {
+              const current = index++;
+              return {
+                get done() {
+                  doneGets++;
+                  return current >= 2;
+                },
+                get value() {
+                  valueGets++;
+                  return current === 0 ? "x-once" : "yes";
+                },
+              };
+            };
+          },
+        };
+      },
+    };
+    const init = {
+      [Symbol.iterator]() {
+        let emitted = false;
+        return {
+          get next() {
+            outerNextGets++;
+            return () => emitted
+              ? { done: true, value: undefined }
+              : (emitted = true, { done: false, value: pair });
+          },
+        };
+      },
+    };
+    const headers = new Headers(init as Iterable<readonly [string, string]>);
+    expect(headers.get("x-once")).toBe("yes");
+    expect({ outerNextGets, pairNextGets, doneGets, valueGets }).toEqual({
+      outerNextGets: 1,
+      pairNextGets: 1,
+      doneGets: 3,
+      valueGets: 2,
+    });
+
+    let pairReturnGets = 0;
+    let outerReturnGets = 0;
+    const badPair = {
+      [Symbol.iterator]() {
+        let count = 0;
+        return {
+          next: () => ({ done: false, value: count++ }),
+          get return() {
+            pairReturnGets++;
+            return () => ({ done: true, value: undefined });
+          },
+        };
+      },
+    };
+    const badInit = {
+      [Symbol.iterator]() {
+        return {
+          next: () => ({ done: false, value: badPair }),
+          get return() {
+            outerReturnGets++;
+            return () => ({ done: true, value: undefined });
+          },
+        };
+      },
+    };
+    expect(() => new Headers(badInit as Iterable<readonly [string, string]>))
+      .toThrow(/exactly two/);
+    expect({ pairReturnGets, outerReturnGets }).toEqual({
+      pairReturnGets: 1,
+      outerReturnGets: 1,
+    });
+  });
+
   test("applies request and response guards", () => {
     const request = new Request("https://example.test/", {
       headers: {
@@ -343,6 +426,19 @@ describe("HTTP Headers snapshot", () => {
     });
     expect(response.headers.getSetCookie()).toEqual([]);
     expect(response.headers.get("x-visible")).toBe("yes");
+  });
+
+  test("keeps request guards and TLS admission on captured intrinsics", () => {
+    const result = Bun.spawnSync([
+      "bun",
+      "tests/fixtures/http-hostile-intrinsics.ts",
+    ], {
+      cwd: new URL("..", import.meta.url).pathname,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString()).toBe("");
   });
 });
 
