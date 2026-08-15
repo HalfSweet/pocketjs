@@ -7,6 +7,7 @@ import tsPreset from "@babel/preset-typescript"; // untyped - see framework/comp
 import { transformVueJsxVapor } from "vue-jsx-vapor/api";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { compileVueSfc } from "./vue-sfc-compile.ts";
 import {
   propsHelperCode,
@@ -398,6 +399,33 @@ function canonicalFile(path: string): string | null {
   if (path === "") return null;
   try {
     return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function resolveFileLikeSpecifier(path: string, resolveDir: string): string | null {
+  let candidate: string;
+  if (path.startsWith("file:")) {
+    try {
+      const url = new globalThis.URL(path);
+      if (url.protocol !== "file:") return null;
+      // Bun treats search/hash as module identity suffixes while loading the
+      // same file. Canonicalize the underlying file before applying the
+      // private-module policy.
+      url.search = "";
+      url.hash = "";
+      candidate = fileURLToPath(url);
+    } catch {
+      return null;
+    }
+  } else {
+    if (!isAbsolute(path) && !path.startsWith(".")) return null;
+    const suffix = path.search(/[?#]/u);
+    candidate = suffix === -1 ? path : path.slice(0, suffix);
+  }
+  try {
+    return Bun.resolveSync(candidate, resolveDir);
   } catch {
     return null;
   }
@@ -924,13 +952,8 @@ export function jsxPlugin(
       // mode, including a plain build with no network factory. Resolve the
       // canonical target so absolute paths and symlink aliases are equivalent.
       build.onResolve({ filter: /.*/ }, (args) => {
-        if (!isAbsolute(args.path) && !args.path.startsWith(".")) return undefined;
-        let resolved: string;
-        try {
-          resolved = Bun.resolveSync(args.path, args.resolveDir);
-        } catch {
-          return undefined;
-        }
+        const resolved = resolveFileLikeSpecifier(args.path, args.resolveDir);
+        if (resolved === null) return undefined;
         const target = canonicalFile(resolved);
         if (target === null || !NETWORK_PRIVATE_FRAMEWORK_SOURCES.has(target)) {
           return undefined;
