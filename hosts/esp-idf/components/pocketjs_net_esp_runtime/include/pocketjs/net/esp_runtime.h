@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 #include "pocketjs/esp_guest.h"
+#include "pocketjs/net/esp_transport.h"
 #include "pocketjs/net/http_client_core.h"
 #include "pocketjs_network_v1_abi.h"
 #include "quickjs.h"
@@ -22,6 +23,7 @@ extern "C" {
   "esp-idf-v6.0.2-reference-candidate"
 
 #define POCKETJS_NET_ESP_RUNTIME_MAX_OPERATIONS 8U
+#define POCKETJS_NET_ESP_RUNTIME_MAX_FEATURES 2U
 #define POCKETJS_NET_ESP_RUNTIME_MAX_REDIRECTS 5U
 #define POCKETJS_NET_ESP_RUNTIME_MAX_LIMIT_ENTRIES 5U
 #define POCKETJS_NET_ESP_RUNTIME_SEQUENCE_MAX UINT64_C(9007199254740991)
@@ -63,6 +65,18 @@ typedef struct {
   uint64_t headers_timeout_us;
   uint64_t idle_timeout_us;
   uint64_t total_timeout_us;
+  /** Host-selected immutable TLS profile; Guest code cannot replace it. */
+  pocketjs_net_esp_tls_trust_source_t tls_trust_source;
+  /** Borrowed only for create(); a valid pinned CA is copied before return. */
+  const uint8_t *host_pinned_ca_pem;
+  size_t host_pinned_ca_pem_bytes;
+  /**
+   * Borrowed through successful destroy(). Called only by the owner pump; it
+   * must read already-published trusted-clock state without blocking,
+   * re-entering the runtime, or entering QuickJS.
+   */
+  pocketjs_net_esp_wall_clock_trusted_fn wall_clock_trusted;
+  void *wall_clock_context;
   /** May run from lwIP's tcpip task; it may only signal the scheduler. */
   pocketjs_net_esp_runtime_wake_fn wake;
   void *wake_context;
@@ -99,6 +113,10 @@ typedef struct {
   bool explicit_three_phase_shutdown;
   bool plaintext_http;
   bool https_rejected_before_io;
+  bool https_explicit_opt_in;
+  bool exact_host_tls_profile;
+  bool distinct_tls_errors;
+  const char *tls_provider_id;
   bool redirect_manual;
   bool redirect_error;
   bool redirect_follow;

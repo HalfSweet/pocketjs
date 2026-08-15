@@ -15,7 +15,9 @@ int main(void) {
       POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT_TLS,
   };
   assert(pocketjs_net_esp_runtime_feature_projection_valid(http, 1U));
-  assert(!pocketjs_net_esp_runtime_feature_projection_valid(http_tls, 2U));
+  assert(pocketjs_net_esp_runtime_feature_projection_valid(http_tls, 2U));
+  assert(!pocketjs_net_esp_runtime_feature_projection_has_tls(http, 1U));
+  assert(pocketjs_net_esp_runtime_feature_projection_has_tls(http_tls, 2U));
   assert(!pocketjs_net_esp_runtime_feature_projection_valid(NULL, 0U));
 
   uint64_t sequence = POCKETJS_NETWORK_V1_SEQUENCE_MAX - 1U;

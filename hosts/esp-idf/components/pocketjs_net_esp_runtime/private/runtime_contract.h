@@ -18,6 +18,10 @@ bool pocketjs_net_esp_runtime_feature_projection_valid(
     const pocketjs_network_v1_feature_id_t *feature_ids,
     uint16_t feature_count);
 
+bool pocketjs_net_esp_runtime_feature_projection_has_tls(
+    const pocketjs_network_v1_feature_id_t *feature_ids,
+    uint16_t feature_count);
+
 bool pocketjs_net_esp_runtime_next_sequence(uint64_t *sequence);
 
 bool pocketjs_net_esp_runtime_live_handle(pocketjs_network_v1_handle_t handle);

@@ -3,8 +3,10 @@
 This experimental component adapts the frozen private network ABI 1.1 table to
 a bounded pool of HTTP Client Cores and dedicated ESP transports. **The table
 is owner-task-only, frozen, accessor-free, and bound to the exact Build Plan
-hash and `network.http.client` feature projection.** lwIP callbacks only call
-the configured scheduler wake hook; Guest code runs only through
+hash and either the `network.http.client` projection or the exact
+`network.http.client` plus `network.http.client.tls` projection.** The
+handshake and `getLimits()` return the same frozen feature list. lwIP callbacks
+only call the configured scheduler wake hook; Guest code runs only through
 `pocketjs_esp_guest_call_function()`.
 
 Each operation slot owns one Core and one transport because Core-local
@@ -17,12 +19,22 @@ and pull generations remain recorded for the later producer command.
 `leaseReadInto` accepts only an exact borrowed `Uint8Array` window whose byte
 length equals `maxBytes`, and rejects any range beyond the retained lease.
 
-Only plaintext `http:` and redirect mode `manual` are admitted by this
-candidate. **HTTPS and custom TLS input are rejected synchronously before a
-transport is created or native I/O begins.** `follow` remains disabled because
-the current Core does not expose relative Location canonicalization and the
-formal one-shot streaming producer cannot replay a retained request body for
-307/308. The descriptor therefore keeps public capability advertisement off.
+Plaintext `http:` is available in both projections. HTTPS requires the exact
+TLS feature projection and an immutable Host-selected certificate bundle or a
+single Host-pinned CA. The runtime copies a pinned CA during `create()`; the
+trusted-clock callback and its context remain borrowed until successful
+destroy. **The native boundary accepts only TLS 1.2, full certificate and
+hostname verification, no client certificate, no custom CA input, no ALPN,
+and the canonical DNS A-label as `serverName`.** Numeric HTTPS hosts and every
+other TLS policy are rejected before permission checks, DNS, or socket I/O.
+
+Redirect mode `manual` is the only admitted mode. `follow` remains disabled
+because the current Core does not expose relative Location canonicalization
+and the formal one-shot streaming producer cannot replay a retained request
+body for 307/308. The selected TLS provider and complete Host descriptor are
+not yet verified against the Build Plan by this component, TLS close-notify is
+not bounded, and native TLS allocation limits are not proven. **The descriptor
+therefore keeps public capability advertisement off.**
 
 Shutdown has three explicit stages: stop admission and request cancellation,
 run guarded shutdown service turns while pumping native cleanup, then destroy

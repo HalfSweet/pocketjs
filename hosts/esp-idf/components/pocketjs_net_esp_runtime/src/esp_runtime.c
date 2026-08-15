@@ -27,6 +27,10 @@ static const pocketjs_net_esp_runtime_descriptor_t RUNTIME_DESCRIPTOR = {
     .explicit_three_phase_shutdown = true,
     .plaintext_http = true,
     .https_rejected_before_io = true,
+    .https_explicit_opt_in = true,
+    .exact_host_tls_profile = true,
+    .distinct_tls_errors = true,
+    .tls_provider_id = POCKETJS_NET_ESP_TLS_PROVIDER_ID,
     .redirect_manual = true,
     .redirect_error = false,
     .redirect_follow = false,
@@ -68,6 +72,32 @@ static bool valid_limit(pocketjs_net_esp_runtime_limit_range_t limit,
          limit.hard <= POCKETJS_NET_ESP_RUNTIME_SEQUENCE_MAX;
 }
 
+static bool valid_tls_config_shape(
+    const pocketjs_net_esp_runtime_config_t *config, bool tls_enabled) {
+  if (!tls_enabled) {
+    return config->tls_trust_source == POCKETJS_NET_ESP_TLS_TRUST_DISABLED &&
+           config->host_pinned_ca_pem == NULL &&
+           config->host_pinned_ca_pem_bytes == 0U &&
+           config->wall_clock_trusted == NULL &&
+           config->wall_clock_context == NULL;
+  }
+  if (config->wall_clock_trusted == NULL) {
+    return false;
+  }
+  switch (config->tls_trust_source) {
+  case POCKETJS_NET_ESP_TLS_TRUST_CERTIFICATE_BUNDLE:
+    return config->host_pinned_ca_pem == NULL &&
+           config->host_pinned_ca_pem_bytes == 0U;
+  case POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA:
+    return config->host_pinned_ca_pem != NULL &&
+           config->host_pinned_ca_pem_bytes != 0U &&
+           config->host_pinned_ca_pem_bytes <=
+               POCKETJS_NET_ESP_TRANSPORT_MAX_PINNED_CA_PEM_BYTES;
+  default:
+    return false;
+  }
+}
+
 static bool valid_config(const pocketjs_net_esp_runtime_config_t *config) {
   if (config == NULL || config->guest == NULL ||
       config->runtime_generation == 0U || config->max_operations == 0U ||
@@ -80,6 +110,12 @@ static bool valid_config(const pocketjs_net_esp_runtime_config_t *config) {
       config->allow_endpoint == NULL ||
       !pocketjs_net_esp_runtime_feature_projection_valid(
           config->feature_ids, config->feature_count)) {
+    return false;
+  }
+  const bool tls_enabled =
+      pocketjs_net_esp_runtime_feature_projection_has_tls(
+          config->feature_ids, config->feature_count);
+  if (!valid_tls_config_shape(config, tls_enabled)) {
     return false;
   }
   return valid_limit(config->limits.buffered_body_bytes, true) &&
@@ -147,7 +183,15 @@ static bool initialize_slot(pocketjs_net_esp_runtime_t *runtime,
   pocketjs_net_esp_transport_config_t transport_config = {
       .wake = transport_wake,
       .wake_context = runtime,
-      .tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_DISABLED,
+      .tls_trust_source = runtime->tls_trust_source,
+      .host_pinned_ca_pem =
+          runtime->tls_trust_source ==
+                  POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA
+              ? runtime->pinned_ca
+              : NULL,
+      .host_pinned_ca_pem_bytes = runtime->pinned_ca_bytes,
+      .wall_clock_trusted = runtime->wall_clock_trusted,
+      .wall_clock_context = runtime->wall_clock_context,
   };
   esp_err_t create_result =
       pocketjs_net_esp_transport_create(&transport_config, &slot->transport);
@@ -165,6 +209,7 @@ static bool initialize_slot(pocketjs_net_esp_runtime_t *runtime,
       .headers_timeout_us = runtime->headers_timeout_us,
       .idle_timeout_us = runtime->idle_timeout_us,
       .total_timeout_us = runtime->total_timeout_us,
+      .allow_https = runtime->tls_enabled,
       .response_header_bytes_limit =
           (size_t)runtime->limits.header_bytes.default_value,
   };
@@ -351,7 +396,8 @@ bool pocketjs_net_esp_runtime_start_http(
               POCKETJS_NETWORK_V1_ERROR_RESOURCE_LIMIT, "http.fetch", false);
     return false;
   }
-  if (command->tls_requested || command->borrowed_input_present ||
+  if ((command->tls_requested && !runtime->tls_enabled) ||
+      command->borrowed_input_present ||
       command->has_timeout_overrides || command->has_limit_overrides ||
       command->redirect_mode != POCKETJS_NETWORK_V1_HTTP_REDIRECT_MANUAL) {
     set_error(out_error, POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME,
@@ -394,6 +440,7 @@ bool pocketjs_net_esp_runtime_start_http(
                        : POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE,
       .streaming_content_length_known = false,
       .streaming_content_length = 0U,
+      .tls = command->tls_present ? &command->tls_policy : NULL,
   };
   const uint64_t now_us = (uint64_t)esp_timer_get_time();
   pocketjs_net_http_client_start_result_t result =
@@ -956,19 +1003,49 @@ pocketjs_net_esp_runtime_create(const pocketjs_net_esp_runtime_config_t *config,
   if (runtime == NULL) {
     return ESP_ERR_NO_MEM;
   }
+  runtime->tls_enabled =
+      pocketjs_net_esp_runtime_feature_projection_has_tls(
+          config->feature_ids, config->feature_count);
+  runtime->tls_trust_source = config->tls_trust_source;
+  runtime->pinned_ca_bytes = config->host_pinned_ca_pem_bytes;
+  if (runtime->pinned_ca_bytes != 0U) {
+    memcpy(runtime->pinned_ca, config->host_pinned_ca_pem,
+           runtime->pinned_ca_bytes);
+    runtime->pinned_ca[runtime->pinned_ca_bytes] = '\0';
+  }
+  runtime->wall_clock_trusted = config->wall_clock_trusted;
+  runtime->wall_clock_context = config->wall_clock_context;
+  const pocketjs_net_esp_transport_config_t transport_config = {
+      .tls_trust_source = runtime->tls_trust_source,
+      .host_pinned_ca_pem =
+          runtime->tls_trust_source ==
+                  POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA
+              ? runtime->pinned_ca
+              : NULL,
+      .host_pinned_ca_pem_bytes = runtime->pinned_ca_bytes,
+      .wall_clock_trusted = runtime->wall_clock_trusted,
+      .wall_clock_context = runtime->wall_clock_context,
+  };
+  if (pocketjs_net_esp_transport_validate_config(&transport_config) != ESP_OK) {
+    memset(runtime->pinned_ca, 0, sizeof(runtime->pinned_ca));
+    free(runtime);
+    return ESP_ERR_INVALID_ARG;
+  }
   runtime->magic = POCKETJS_NET_ESP_RUNTIME_MAGIC;
   runtime->owner_task = xTaskGetCurrentTaskHandle();
   runtime->guest = config->guest;
   runtime->context = pocketjs_esp_guest_context(config->guest);
   if (runtime->context == NULL) {
     runtime->magic = 0U;
+    memset(runtime->pinned_ca, 0, sizeof(runtime->pinned_ca));
     free(runtime);
     return ESP_ERR_INVALID_STATE;
   }
   runtime->phase = POCKETJS_NET_ESP_RUNTIME_PHASE_RUNNING;
   runtime->runtime_generation = config->runtime_generation;
   memcpy(runtime->plan_hash, config->plan_hash, sizeof(runtime->plan_hash));
-  runtime->feature_ids[0] = config->feature_ids[0];
+  memcpy(runtime->feature_ids, config->feature_ids,
+         sizeof(runtime->feature_ids[0]) * config->feature_count);
   runtime->feature_count = config->feature_count;
   runtime->max_operations = config->max_operations;
   runtime->limits = config->limits;
@@ -985,6 +1062,7 @@ pocketjs_net_esp_runtime_create(const pocketjs_net_esp_runtime_config_t *config,
   esp_err_t result = pocketjs_net_esp_runtime_create_binding(runtime);
   if (result != ESP_OK) {
     runtime->magic = 0U;
+    memset(runtime->pinned_ca, 0, sizeof(runtime->pinned_ca));
     free(runtime);
     return result;
   }
@@ -1279,6 +1357,7 @@ pocketjs_net_esp_runtime_destroy(pocketjs_net_esp_runtime_t *runtime) {
     slot->initialized = false;
   }
   pocketjs_net_esp_runtime_revoke_binding(runtime);
+  memset(runtime->pinned_ca, 0, sizeof(runtime->pinned_ca));
   runtime->magic = 0U;
   free(runtime);
   return ESP_OK;

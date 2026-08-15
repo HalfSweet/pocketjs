@@ -610,6 +610,91 @@ static bool parse_limits(JSContext *context, JSValueConst metadata,
   return valid;
 }
 
+static bool parse_base_tls_metadata(
+    JSContext *context, JSValueConst tls,
+    pocketjs_net_esp_runtime_http_command_t *command) {
+  if (JS_IsNull(tls)) {
+    command->tls_present = false;
+    return true;
+  }
+  JSValue alpn = JS_UNDEFINED;
+  uint32_t alpn_count = 0U;
+  uint16_t minimum_version = 0U;
+  uint16_t maximum_version = 0U;
+  uint16_t client_certificate = 0U;
+  uint16_t verification = 0U;
+  uint16_t revocation = 0U;
+  uint32_t custom_ca_bytes = 0U;
+  bool valid =
+      object_latin1(context, tls, "serverName", command->tls_server_name,
+                    sizeof(command->tls_server_name),
+                    &command->tls_server_name_length, true, true) &&
+      object_u16(context, tls, "minVersion", UINT16_MAX,
+                 &minimum_version) &&
+      object_u16(context, tls, "maxVersion", UINT16_MAX,
+                 &maximum_version) &&
+      own_data_property(context, tls, "alpn", &alpn) &&
+      array_length(context, alpn, 8U, &alpn_count) &&
+      object_latin1(context, tls, "credential", command->tls_credential,
+                    sizeof(command->tls_credential),
+                    &command->tls_credential_length, true, true) &&
+      object_u16(context, tls, "clientCertificate", UINT16_MAX,
+                 &client_certificate) &&
+      object_u16(context, tls, "verification", UINT16_MAX, &verification) &&
+      object_u16(context, tls, "revocation", UINT16_MAX, &revocation) &&
+      object_u32(context, tls, "customCaBytes", UINT32_MAX,
+                 &custom_ca_bytes);
+  JS_FreeValue(context, alpn);
+  if (!valid) {
+    return false;
+  }
+  command->tls_present = true;
+  command->tls_policy = (pocketjs_net_http_client_tls_policy_t){
+      .server_name = {.data = command->tls_server_name,
+                      .length = command->tls_server_name_length},
+      .minimum_version =
+          minimum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_2
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2
+              : minimum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
+                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
+                    : 0,
+      .maximum_version =
+          maximum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_2
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2
+              : maximum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
+                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
+                    : 0,
+      .alpn_count = alpn_count,
+      .credential = {.data = command->tls_credential,
+                     .length = command->tls_credential_length},
+      .client_certificate =
+          client_certificate == POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_NONE
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE
+              : client_certificate ==
+                        POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_OPTIONAL
+                    ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_OPTIONAL
+                    : client_certificate ==
+                              POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_REQUIRED
+                          ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_REQUIRED
+                          : 0,
+      .verification =
+          verification == POCKETJS_NETWORK_V1_TLS_VERIFICATION_FULL
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL
+              : verification ==
+                        POCKETJS_NETWORK_V1_TLS_VERIFICATION_DEVELOPMENT_INSECURE
+                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_DEVELOPMENT_INSECURE
+                    : 0,
+      .revocation =
+          revocation == POCKETJS_NETWORK_V1_TLS_REVOCATION_HOST_DEFAULT
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT
+              : revocation == POCKETJS_NETWORK_V1_TLS_REVOCATION_REQUIRED
+                    ? POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_REQUIRED
+                    : 0,
+      .custom_ca_bytes = custom_ca_bytes,
+  };
+  return true;
+}
+
 static bool url_has_https_scheme(const uint8_t *url, size_t length) {
   static const char scheme[] = "https:";
   if (url == NULL || length < sizeof(scheme) - 1U) {
@@ -650,10 +735,11 @@ parse_http_command(JSContext *context, JSValueConst command_value,
       parse_timeouts(context, metadata, command) &&
       parse_limits(context, metadata, command) &&
       object_bool(context, metadata, "ref", &command->ref) &&
-      own_data_property(context, metadata, "tls", &tls);
+      own_data_property(context, metadata, "tls", &tls) &&
+      parse_base_tls_metadata(context, tls, command);
   if (valid) {
     command->tls_requested =
-        !JS_IsNull(tls) ||
+        command->tls_present ||
         url_has_https_scheme(command->url, command->url_length);
     valid =
         command->redirect_mode == POCKETJS_NETWORK_V1_HTTP_REDIRECT_FOLLOW ||
@@ -935,6 +1021,26 @@ core_error(const pocketjs_net_esp_runtime_slot_t *slot) {
   case POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY:
     error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_PROTOCOL;
     error.code = POCKETJS_NETWORK_V1_ERROR_HTTP_PROTOCOL_ERROR;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_CERTIFICATE_INVALID:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_TLS;
+    error.code = POCKETJS_NETWORK_V1_ERROR_TLS_CERTIFICATE_INVALID;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HOSTNAME_MISMATCH:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_TLS;
+    error.code = POCKETJS_NETWORK_V1_ERROR_TLS_HOSTNAME_MISMATCH;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_HANDSHAKE_FAILED:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_TLS;
+    error.code = POCKETJS_NETWORK_V1_ERROR_TLS_HANDSHAKE_FAILED;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_VERSION_UNSUPPORTED:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_TLS;
+    error.code = POCKETJS_NETWORK_V1_ERROR_TLS_VERSION_UNSUPPORTED;
+    break;
+  case POCKETJS_NET_HTTP_CLIENT_ERROR_TLS_ALERT:
+    error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_TLS;
+    error.code = POCKETJS_NETWORK_V1_ERROR_TLS_ALERT;
     break;
   default:
     error.category = POCKETJS_NETWORK_V1_ERROR_CATEGORY_RUNTIME;
@@ -1391,6 +1497,19 @@ static JSValue new_limit_entry(JSContext *context, const char *name,
   return entry;
 }
 
+static bool set_feature_projection(
+    JSContext *context, JSValueConst array,
+    const pocketjs_net_esp_runtime_t *runtime) {
+  for (uint32_t index = 0U; index < runtime->feature_count; ++index) {
+    if (!set_array_property(
+            context, array, index,
+            JS_NewUint32(context, runtime->feature_ids[index]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static JSValue binding_get_limits(JSContext *context, JSValueConst this_value,
                                   int argument_count, JSValueConst *arguments,
                                   int magic, void *opaque) {
@@ -1454,9 +1573,7 @@ static JSValue binding_get_limits(JSContext *context, JSValueConst this_value,
       }
       JS_FreeValue(context, entry);
     }
-    if (!set_array_property(
-            context, features, 0U,
-            JS_NewUint32(context, POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT))) {
+    if (!set_feature_projection(context, features, runtime)) {
       JS_FreeValue(context, features);
       JS_FreeValue(context, values);
       return JS_EXCEPTION;
@@ -1559,9 +1676,7 @@ pocketjs_net_esp_runtime_create_binding(pocketjs_net_esp_runtime_t *runtime) {
   JSValue table = JS_NewObject(context);
   if (JS_IsException(feature_ids) || JS_IsException(plan_hash) ||
       JS_IsException(handshake) || JS_IsException(table) ||
-      !set_array_property(
-          context, feature_ids, 0U,
-          JS_NewUint32(context, POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT)) ||
+      !set_feature_projection(context, feature_ids, runtime) ||
       !freeze(context, feature_ids) ||
       !set_property(context, handshake, "abiMajor",
                     JS_NewUint32(context, POCKETJS_NETWORK_V1_ABI_MAJOR)) ||

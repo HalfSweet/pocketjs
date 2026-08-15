@@ -82,7 +82,13 @@ typedef struct {
       headers[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_HEADERS];
   size_t header_count;
   bool has_body;
+  bool tls_present;
   bool tls_requested;
+  uint8_t tls_server_name[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_HOST_BYTES];
+  size_t tls_server_name_length;
+  uint8_t tls_credential[128U];
+  size_t tls_credential_length;
+  pocketjs_net_http_client_tls_policy_t tls_policy;
   bool borrowed_input_present;
   bool has_timeout_overrides;
   bool has_limit_overrides;
@@ -108,7 +114,8 @@ struct pocketjs_net_esp_runtime {
   pocketjs_net_esp_runtime_phase_t phase;
   uint32_t runtime_generation;
   uint8_t plan_hash[POCKETJS_NETWORK_V1_PLAN_HASH_BYTES];
-  pocketjs_network_v1_feature_id_t feature_ids[1];
+  pocketjs_network_v1_feature_id_t
+      feature_ids[POCKETJS_NET_ESP_RUNTIME_MAX_FEATURES];
   uint16_t feature_count;
   uint16_t max_operations;
   pocketjs_net_esp_runtime_limits_t limits;
@@ -116,6 +123,12 @@ struct pocketjs_net_esp_runtime {
   uint64_t headers_timeout_us;
   uint64_t idle_timeout_us;
   uint64_t total_timeout_us;
+  bool tls_enabled;
+  pocketjs_net_esp_tls_trust_source_t tls_trust_source;
+  uint8_t pinned_ca[POCKETJS_NET_ESP_TRANSPORT_MAX_PINNED_CA_PEM_BYTES + 1U];
+  size_t pinned_ca_bytes;
+  pocketjs_net_esp_wall_clock_trusted_fn wall_clock_trusted;
+  void *wall_clock_context;
   pocketjs_net_esp_runtime_wake_fn wake;
   void *wake_context;
   pocketjs_net_esp_runtime_permission_fn allow_endpoint;

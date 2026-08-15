@@ -70,6 +70,13 @@ static uint64_t teardown_order;
 static uint64_t last_transport_destroy_order;
 static size_t poisoned_transport_destroys;
 static size_t poisoned_events_abandoned;
+static bool expect_tls_profile;
+static bool expect_tls_request;
+static const uint8_t *tls_ca_source;
+static pocketjs_net_http_client_scheme_t expected_permission_scheme =
+    POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP;
+static unsigned tls_clock_context;
+static const uint8_t EXPECTED_TLS_CA[] = {'t', 'e', 's', 't', '-', 'c', 'a'};
 
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return OWNER_TASK; }
 
@@ -89,16 +96,48 @@ fake_permission(void *context,
                 const pocketjs_net_http_client_endpoint_t *endpoint) {
   assert(context == &permission_count);
   assert(endpoint != NULL);
-  assert(endpoint->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP);
+  assert(endpoint->scheme == expected_permission_scheme);
   ++permission_count;
   return true;
+}
+
+static bool fake_wall_clock_trusted(void *context) {
+  assert(context == &tls_clock_context);
+  return true;
+}
+
+esp_err_t pocketjs_net_esp_transport_validate_config(
+    const pocketjs_net_esp_transport_config_t *config) {
+  if (config == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (!expect_tls_profile) {
+    return config->tls_trust_source ==
+                       POCKETJS_NET_ESP_TLS_TRUST_DISABLED &&
+                   config->host_pinned_ca_pem == NULL &&
+                   config->host_pinned_ca_pem_bytes == 0U &&
+                   config->wall_clock_trusted == NULL
+               ? ESP_OK
+               : ESP_ERR_INVALID_ARG;
+  }
+  return config->tls_trust_source ==
+                     POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA &&
+                 config->host_pinned_ca_pem != NULL &&
+                 config->host_pinned_ca_pem != tls_ca_source &&
+                 config->host_pinned_ca_pem_bytes == sizeof(EXPECTED_TLS_CA) &&
+                 memcmp(config->host_pinned_ca_pem, EXPECTED_TLS_CA,
+                        sizeof(EXPECTED_TLS_CA)) == 0 &&
+                 config->wall_clock_trusted == fake_wall_clock_trusted &&
+                 config->wall_clock_context == &tls_clock_context
+             ? ESP_OK
+             : ESP_ERR_INVALID_ARG;
 }
 
 esp_err_t pocketjs_net_esp_transport_create(
     const pocketjs_net_esp_transport_config_t *config,
     pocketjs_net_esp_transport_t **out_transport) {
   assert(config != NULL);
-  assert(config->tls_trust_source == POCKETJS_NET_ESP_TLS_TRUST_DISABLED);
+  assert(pocketjs_net_esp_transport_validate_config(config) == ESP_OK);
   assert(out_transport != NULL && *out_transport == NULL);
   *out_transport = calloc(1U, sizeof(**out_transport));
   if (*out_transport == NULL) {
@@ -166,6 +205,7 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_init(
   struct pocketjs_net_http_client_core *core = (void *)storage;
   memset(core, 0, sizeof(*core));
   core->config = *config;
+  assert(core->config.allow_https == expect_tls_profile);
   core->poison_on_shutdown = next_core_poison_on_shutdown;
   core->transport_destroys_at_init = transport_destroys;
   next_core_poison_on_shutdown = false;
@@ -181,17 +221,30 @@ pocketjs_net_http_client_start_result_t pocketjs_net_http_client_core_start(
   assert(request->operation_token != 0U);
   assert(request->body_kind == POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE ||
          request->body_kind == POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING);
+  const bool tls = request->tls != NULL;
+  assert(tls == expect_tls_request);
+  if (tls) {
+    assert(request->tls->minimum_version ==
+               POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2 &&
+           request->tls->maximum_version ==
+               POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2 &&
+           request->tls->server_name.length ==
+               sizeof("example.test") - 1U &&
+           memcmp(request->tls->server_name.data, "example.test",
+                  sizeof("example.test") - 1U) == 0);
+  }
   const pocketjs_net_http_client_endpoint_t hostname = {
       .phase = POCKETJS_NET_HTTP_CLIENT_PERMISSION_HOSTNAME,
-      .scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP,
+      .scheme = tls ? POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS
+                    : POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP,
       .hostname = "example.test",
-      .port = 80U,
+      .port = tls ? 443U : 80U,
   };
   const pocketjs_net_http_client_endpoint_t numeric = {
       .phase = POCKETJS_NET_HTTP_CLIENT_PERMISSION_NUMERIC_CANDIDATE,
-      .scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP,
+      .scheme = hostname.scheme,
       .hostname = "example.test",
-      .port = 80U,
+      .port = hostname.port,
       .ipv4_be = UINT32_C(0x7f000001),
   };
   if (!core->config.allow_endpoint(core->config.permission_context,
@@ -871,6 +924,118 @@ static void test_poisoned_core_retained_transport_teardown(
   fail_event_retirement_persistently = false;
 }
 
+static void test_tls_profile_snapshot(
+    const pocketjs_net_esp_runtime_config_t *plain_config) {
+  const pocketjs_network_v1_feature_id_t tls_features[] = {
+      POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT,
+      POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT_TLS,
+  };
+  pocketjs_net_esp_runtime_config_t tls_config = *plain_config;
+  tls_config.feature_ids = tls_features;
+  tls_config.feature_count = 2U;
+
+  pocketjs_net_esp_runtime_t *runtime = NULL;
+  assert(pocketjs_net_esp_runtime_create(&tls_config, &runtime) ==
+         ESP_ERR_INVALID_ARG);
+  assert(runtime == NULL);
+
+  uint8_t mutable_ca[sizeof(EXPECTED_TLS_CA)];
+  memcpy(mutable_ca, EXPECTED_TLS_CA, sizeof(mutable_ca));
+  tls_config.tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA;
+  tls_config.host_pinned_ca_pem = mutable_ca;
+  tls_config.host_pinned_ca_pem_bytes = sizeof(mutable_ca);
+  tls_config.wall_clock_trusted = fake_wall_clock_trusted;
+  tls_config.wall_clock_context = &tls_clock_context;
+  expect_tls_profile = true;
+  expect_tls_request = true;
+  tls_ca_source = mutable_ca;
+  expected_permission_scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS;
+
+  const size_t creates_before = transport_creates;
+  const size_t destroys_before = transport_destroys;
+  const size_t starts_before = core_starts;
+  assert(pocketjs_net_esp_runtime_create(&tls_config, &runtime) == ESP_OK);
+  assert(runtime != NULL && runtime->tls_enabled &&
+         runtime->feature_count == 2U &&
+         runtime->pinned_ca_bytes == sizeof(EXPECTED_TLS_CA));
+  mutable_ca[0] = 'X';
+
+  pocketjs_net_esp_runtime_http_command_t command = {
+      .url = "https://example.test/",
+      .url_length = sizeof("https://example.test/") - 1U,
+      .method = "GET",
+      .method_length = 3U,
+      .tls_present = true,
+      .tls_requested = true,
+      .tls_server_name = "example.test",
+      .tls_server_name_length = sizeof("example.test") - 1U,
+      .redirect_mode = POCKETJS_NETWORK_V1_HTTP_REDIRECT_MANUAL,
+      .max_redirects = 5U,
+      .ref = true,
+  };
+  command.tls_policy = (pocketjs_net_http_client_tls_policy_t){
+      .server_name = {command.tls_server_name,
+                      command.tls_server_name_length},
+      .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .client_certificate =
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE,
+      .verification = POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL,
+      .revocation = POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT,
+  };
+  pocketjs_net_esp_runtime_error_t error = {0};
+  pocketjs_network_v1_command_identity_t request_identity =
+      identity(1U, (pocketjs_network_v1_handle_t){0U, 0U}, 1U);
+  assert(pocketjs_net_esp_runtime_start_http(runtime, &request_identity,
+                                             &command, &error));
+  assert(transport_creates == creates_before + 1U &&
+         core_starts == starts_before + 1U);
+  pocketjs_net_esp_runtime_slot_t *slot = &runtime->slots[0];
+  queue_event(slot->core,
+              (pocketjs_net_http_client_event_t){
+                  .type = POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE,
+                  .sequence = 601U,
+              });
+  pocketjs_net_esp_runtime_slot_t *selected = NULL;
+  assert(pocketjs_net_esp_runtime_peek_event(runtime, &selected) &&
+         selected == slot);
+  assert(pocketjs_net_esp_runtime_retire_nonlease_event(runtime, slot));
+
+  expect_tls_request = false;
+  expected_permission_scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP;
+  command.tls_present = false;
+  command.tls_requested = false;
+  memcpy(command.url, "http://example.test/",
+         sizeof("http://example.test/"));
+  command.url_length = sizeof("http://example.test/") - 1U;
+  request_identity =
+      identity(2U, (pocketjs_network_v1_handle_t){0U, 0U}, 2U);
+  assert(pocketjs_net_esp_runtime_start_http(runtime, &request_identity,
+                                             &command, &error));
+  assert(transport_creates == creates_before + 1U &&
+         core_starts == starts_before + 2U);
+  queue_event(slot->core,
+              (pocketjs_net_http_client_event_t){
+                  .type = POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE,
+                  .sequence = 602U,
+              });
+  assert(pocketjs_net_esp_runtime_peek_event(runtime, &selected) &&
+         selected == slot);
+  assert(pocketjs_net_esp_runtime_retire_nonlease_event(runtime, slot));
+  assert(pocketjs_net_esp_runtime_begin_shutdown(runtime, 16000U) == ESP_OK);
+  pocketjs_net_esp_runtime_service_result_t service_result = {0};
+  assert(pocketjs_net_esp_runtime_service(runtime, 17000U, 1U, 1U, 1U, 16U,
+                                          &service_result) == ESP_OK);
+  assert(pocketjs_net_esp_runtime_is_ready_to_destroy(runtime));
+  assert(pocketjs_net_esp_runtime_destroy(runtime) == ESP_OK);
+  assert(transport_destroys == destroys_before + 1U);
+
+  expect_tls_profile = false;
+  expect_tls_request = false;
+  tls_ca_source = NULL;
+  expected_permission_scheme = POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTP;
+}
+
 int main(void) {
   const pocketjs_network_v1_feature_id_t features[] = {
       POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT,
@@ -1114,6 +1279,8 @@ int main(void) {
   test_held_lease_shutdown_cleanup(&config, &command);
   test_poisoned_core_retained_transport_teardown(&config, &command);
   assert(transport_creates == 5U && transport_destroys == 5U);
+  test_tls_profile_snapshot(&config);
+  assert(transport_creates == 6U && transport_destroys == 6U);
   assert(!fail_next_event_retirement && !fail_next_dispatcher_call);
   return 0;
 }

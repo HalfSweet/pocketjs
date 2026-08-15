@@ -7,9 +7,19 @@
 bool pocketjs_net_esp_runtime_feature_projection_valid(
     const pocketjs_network_v1_feature_id_t *feature_ids,
     uint16_t feature_count) {
-  /* This plaintext candidate implements exactly the HTTP client base role. */
-  return feature_ids != NULL && feature_count == 1U &&
+  return feature_ids != NULL &&
+         (feature_count == 1U ||
+          (feature_count == 2U &&
+           feature_ids[1] == POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT_TLS)) &&
          feature_ids[0] == POCKETJS_NETWORK_V1_FEATURE_HTTP_CLIENT;
+}
+
+bool pocketjs_net_esp_runtime_feature_projection_has_tls(
+    const pocketjs_network_v1_feature_id_t *feature_ids,
+    uint16_t feature_count) {
+  return pocketjs_net_esp_runtime_feature_projection_valid(feature_ids,
+                                                            feature_count) &&
+         feature_count == 2U;
 }
 
 bool pocketjs_net_esp_runtime_next_sequence(uint64_t *sequence) {
