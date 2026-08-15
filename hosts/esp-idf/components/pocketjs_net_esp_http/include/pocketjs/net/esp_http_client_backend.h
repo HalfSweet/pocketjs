@@ -34,6 +34,8 @@ extern "C" {
 #define POCKETJS_NET_ESP_HTTP_DEFAULT_WORKER_STACK_BYTES (8U * 1024U)
 #define POCKETJS_NET_ESP_HTTP_DEFAULT_IO_TIMEOUT_MS 5000U
 #define POCKETJS_NET_ESP_HTTP_MAX_IO_TIMEOUT_MS 120000U
+#define POCKETJS_NET_ESP_HTTP_MAX_HOST_PINNED_CA_PEM_BYTES 4096U
+#define POCKETJS_NET_ESP_HTTP_MAX_HOST_PINNED_CA_CERTIFICATES 1U
 
 typedef struct pocketjs_net_esp_http_client pocketjs_net_esp_http_client_t;
 
@@ -51,6 +53,8 @@ typedef enum {
   POCKETJS_NET_ERROR_TLS_CERTIFICATE_INVALID,
   POCKETJS_NET_ERROR_TLS_HOSTNAME_MISMATCH,
   POCKETJS_NET_ERROR_TLS_HANDSHAKE_FAILED,
+  POCKETJS_NET_ERROR_TLS_VERSION_UNSUPPORTED,
+  POCKETJS_NET_ERROR_TLS_ALERT,
   POCKETJS_NET_ERROR_HTTP_PROTOCOL_ERROR,
   POCKETJS_NET_ERROR_SYSTEM,
 } pocketjs_net_error_code_t;
@@ -95,10 +99,31 @@ typedef struct {
 typedef void (*pocketjs_net_wake_fn)(void *context);
 typedef bool (*pocketjs_net_wall_clock_trusted_fn)(void *context);
 
+/**
+ * Trust is selected by the product Host, not by Guest input. CERTIFICATE_BUNDLE
+ * uses ESP-IDF's compiled certificate bundle. HOST_PINNED_CA_PEM uses exactly
+ * one bounded PEM CA certificate as this Host profile's trust store; it does
+ * not implement the public custom-CA append capability.
+ */
+typedef enum {
+  POCKETJS_NET_ESP_HTTP_TLS_TRUST_DISABLED = 0,
+  POCKETJS_NET_ESP_HTTP_TLS_TRUST_CERTIFICATE_BUNDLE,
+  POCKETJS_NET_ESP_HTTP_TLS_TRUST_HOST_PINNED_CA_PEM,
+} pocketjs_net_esp_http_tls_trust_source_t;
+
 typedef struct {
   pocketjs_net_wake_fn wake;
   void *wake_context;
   bool allow_https;
+  pocketjs_net_esp_http_tls_trust_source_t tls_trust_source;
+  /** Required only for HOST_PINNED_CA_PEM. The byte count excludes a trailing
+   * NUL. Creation validates exactly one CA certificate and snapshots the bytes
+   * into bounded internal memory. */
+  const uint8_t *host_pinned_ca_pem;
+  size_t host_pinned_ca_pem_bytes;
+  /** Required when allow_https is true. The fixed worker calls it immediately
+   * before native request setup; it must be non-blocking, and any Host state it
+   * reads must be published safely to that worker. */
   pocketjs_net_wall_clock_trusted_fn wall_clock_trusted;
   void *wall_clock_context;
   const char *worker_task_name;
@@ -125,6 +150,28 @@ typedef struct {
 } pocketjs_net_esp_http_limits_t;
 
 typedef struct {
+  bool compiled;
+  bool tls_1_2;
+  bool tls_1_3;
+  bool host_trust;
+  bool hostname_verification;
+  bool sni;
+  bool certificate_bundle;
+  bool host_pinned_ca;
+  bool custom_ca_append;
+  bool client_auth;
+  bool custom_alpn;
+  bool revocation;
+  bool insecure_verification;
+  bool plaintext_fallback;
+  bool bounded_handshake_memory;
+  size_t max_host_pinned_ca_bytes;
+  size_t max_host_pinned_ca_certificates;
+  size_t max_custom_ca_bytes;
+  size_t max_custom_ca_certificates;
+} pocketjs_net_esp_http_tls_descriptor_t;
+
+typedef struct {
   const char *id;
   const char *protocol_version;
   const char *implementation_version;
@@ -133,6 +180,7 @@ typedef struct {
   bool automatic_redirects_disabled;
   bool automatic_auth_retries_disabled;
   bool internal_tls_compiled;
+  pocketjs_net_esp_http_tls_descriptor_t internal_tls;
   bool duplicate_response_headers;
   bool manual_connection_close;
   bool bounded_response_parser;
@@ -165,6 +213,7 @@ typedef struct {
       pocketjs_net_error_code_t code;
       esp_err_t cause_code;
       int tls_code;
+      uint32_t tls_certificate_flags;
       bool temporary;
     } error;
   } detail;
@@ -256,6 +305,13 @@ void pocketjs_net_esp_http_client_destroy(
     pocketjs_net_esp_http_client_t *client);
 
 const char *pocketjs_net_error_code_name(pocketjs_net_error_code_t code);
+
+#if defined(POCKETJS_NET_ESP_HTTP_TEST_INTERNALS)
+/** Build-smoke seam for deterministic native TLS error mapping checks. */
+pocketjs_net_error_code_t
+pocketjs_net_esp_http_map_native_error(esp_err_t cause, int socket_errno,
+                                       int tls_code, int tls_flags, bool https);
+#endif
 
 #ifdef __cplusplus
 }

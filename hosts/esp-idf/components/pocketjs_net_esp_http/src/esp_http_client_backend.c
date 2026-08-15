@@ -14,7 +14,9 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/ssl.h"
 #include "mbedtls/x509.h"
+#include "mbedtls/x509_crt.h"
 #include "sdkconfig.h"
 
 #if CONFIG_ESP_HTTP_CLIENT_EVENT_POST_TIMEOUT != 0
@@ -33,15 +35,58 @@
 #error                                                                         \
     "PocketJS net copies response headers and requires saved headers disabled"
 #endif
+#if defined(CONFIG_ESP_TLS_INSECURE) && CONFIG_ESP_TLS_INSECURE
+#error "PocketJS net production TLS rejects ESP-TLS insecure build options"
+#endif
+#if defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) &&                         \
+    CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+#error "PocketJS net TLS requires server certificate verification"
+#endif
 
 #if defined(CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS) &&                            \
     CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS &&                                     \
-    defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) &&                              \
-    CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+    defined(CONFIG_ESP_TLS_USING_MBEDTLS) && CONFIG_ESP_TLS_USING_MBEDTLS &&   \
+    defined(CONFIG_MBEDTLS_SSL_PROTO_TLS1_2) &&                                \
+    CONFIG_MBEDTLS_SSL_PROTO_TLS1_2
 #include "esp_crt_bundle.h"
 #define POCKETJS_NET_ESP_HTTP_INTERNAL_TLS 1
 #else
 #define POCKETJS_NET_ESP_HTTP_INTERNAL_TLS 0
+#endif
+
+#if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS &&                                      \
+    defined(CONFIG_MBEDTLS_SSL_RENEGOTIATION) &&                               \
+    CONFIG_MBEDTLS_SSL_RENEGOTIATION
+#error "PocketJS net TLS 1.2 requires renegotiation disabled"
+#endif
+#if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS &&                                      \
+    defined(CONFIG_MBEDTLS_ALLOW_WEAK_CERTIFICATE_VERIFICATION) &&             \
+    CONFIG_MBEDTLS_ALLOW_WEAK_CERTIFICATE_VERIFICATION
+#error "PocketJS net TLS rejects weak certificate verification"
+#endif
+#if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS && defined(CONFIG_MBEDTLS_DES_C) &&     \
+    CONFIG_MBEDTLS_DES_C
+#error "PocketJS net TLS rejects DES and 3DES ciphersuites"
+#endif
+#if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS &&                                      \
+    (defined(MBEDTLS_SSL_NULL_CIPHERSUITES) || defined(MBEDTLS_ARC4_C) ||      \
+     defined(MBEDTLS_KEY_EXCHANGE_DH_ANON_ENABLED) ||                          \
+     defined(MBEDTLS_KEY_EXCHANGE_ECDH_ANON_ENABLED))
+#error "PocketJS net TLS rejects NULL, RC4 and anonymous ciphersuites"
+#endif
+
+#if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS &&                                      \
+    defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) &&                              \
+    CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+#define POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE 1
+#else
+#define POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE 0
+#endif
+
+#if POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE &&                                \
+    defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEPRECATED_LIST) &&              \
+    CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEPRECATED_LIST
+#error "PocketJS net TLS rejects deprecated roots in the Host bundle"
 #endif
 
 #define POCKETJS_NET_ESP_HTTP_EVENT_QUEUE_LENGTH                               \
@@ -137,6 +182,9 @@ struct pocketjs_net_esp_http_client {
   pocketjs_net_wake_fn wake;
   void *wake_context;
   bool allow_https;
+  pocketjs_net_esp_http_tls_trust_source_t tls_trust_source;
+  uint8_t *host_pinned_ca_pem;
+  size_t host_pinned_ca_pem_bytes;
   pocketjs_net_wall_clock_trusted_fn wall_clock_trusted;
   void *wall_clock_context;
 
@@ -156,6 +204,30 @@ static const pocketjs_net_esp_http_backend_descriptor_t s_descriptor = {
     .automatic_redirects_disabled = true,
     .automatic_auth_retries_disabled = true,
     .internal_tls_compiled = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+    .internal_tls =
+        {
+            .compiled = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .tls_1_2 = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .tls_1_3 = false,
+            .host_trust = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .hostname_verification = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .sni = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .certificate_bundle = POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE,
+            .host_pinned_ca = POCKETJS_NET_ESP_HTTP_INTERNAL_TLS,
+            .custom_ca_append = false,
+            .client_auth = false,
+            .custom_alpn = false,
+            .revocation = false,
+            .insecure_verification = false,
+            .plaintext_fallback = false,
+            .bounded_handshake_memory = false,
+            .max_host_pinned_ca_bytes =
+                POCKETJS_NET_ESP_HTTP_MAX_HOST_PINNED_CA_PEM_BYTES,
+            .max_host_pinned_ca_certificates =
+                POCKETJS_NET_ESP_HTTP_MAX_HOST_PINNED_CA_CERTIFICATES,
+            .max_custom_ca_bytes = 0,
+            .max_custom_ca_certificates = 0,
+        },
     .duplicate_response_headers = true,
     .manual_connection_close = true,
     .bounded_response_parser = false,
@@ -204,6 +276,132 @@ static size_t bounded_string_length(const char *value, size_t maximum) {
     ++length;
   }
   return length;
+}
+
+static bool is_ascii_whitespace(uint8_t byte) {
+  return byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n';
+}
+
+static const uint8_t *find_bytes(const uint8_t *bytes, size_t length,
+                                 const char *needle, size_t needle_length) {
+  if (needle_length == 0 || needle_length > length) {
+    return NULL;
+  }
+  for (size_t index = 0; index <= length - needle_length; ++index) {
+    if (memcmp(bytes + index, needle, needle_length) == 0) {
+      return bytes + index;
+    }
+  }
+  return NULL;
+}
+
+static bool is_single_ca_pem_envelope(const uint8_t *pem, size_t length) {
+  static const char begin[] = "-----BEGIN CERTIFICATE-----";
+  static const char end[] = "-----END CERTIFICATE-----";
+
+  size_t start = 0;
+  while (start < length && is_ascii_whitespace(pem[start])) {
+    ++start;
+  }
+  if (length - start < sizeof(begin) - 1U ||
+      memcmp(pem + start, begin, sizeof(begin) - 1U) != 0) {
+    return false;
+  }
+
+  size_t content_start = start + sizeof(begin) - 1U;
+  const uint8_t *end_marker = find_bytes(
+      pem + content_start, length - content_start, end, sizeof(end) - 1U);
+  if (end_marker == NULL) {
+    return false;
+  }
+  size_t after_end = (size_t)(end_marker - pem) + sizeof(end) - 1U;
+  while (after_end < length && is_ascii_whitespace(pem[after_end])) {
+    ++after_end;
+  }
+  return after_end == length;
+}
+
+static esp_err_t
+configure_tls(pocketjs_net_esp_http_client_t *client,
+              const pocketjs_net_esp_http_client_config_t *config) {
+  bool allow_https = config != NULL && config->allow_https;
+  pocketjs_net_esp_http_tls_trust_source_t trust_source =
+      config == NULL ? POCKETJS_NET_ESP_HTTP_TLS_TRUST_DISABLED
+                     : config->tls_trust_source;
+  const uint8_t *pinned_ca = config == NULL ? NULL : config->host_pinned_ca_pem;
+  size_t pinned_ca_bytes =
+      config == NULL ? 0 : config->host_pinned_ca_pem_bytes;
+
+  if (!allow_https) {
+    if (trust_source != POCKETJS_NET_ESP_HTTP_TLS_TRUST_DISABLED ||
+        pinned_ca != NULL || pinned_ca_bytes != 0) {
+      return ESP_ERR_INVALID_ARG;
+    }
+    client->tls_trust_source = POCKETJS_NET_ESP_HTTP_TLS_TRUST_DISABLED;
+    return ESP_OK;
+  }
+  if (!POCKETJS_NET_ESP_HTTP_INTERNAL_TLS) {
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+  if (config->wall_clock_trusted == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (trust_source == POCKETJS_NET_ESP_HTTP_TLS_TRUST_CERTIFICATE_BUNDLE) {
+    if (!POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE) {
+      return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (pinned_ca != NULL || pinned_ca_bytes != 0) {
+      return ESP_ERR_INVALID_ARG;
+    }
+  } else if (trust_source ==
+             POCKETJS_NET_ESP_HTTP_TLS_TRUST_HOST_PINNED_CA_PEM) {
+    if (pinned_ca == NULL || pinned_ca_bytes == 0 ||
+        pinned_ca_bytes > POCKETJS_NET_ESP_HTTP_MAX_HOST_PINNED_CA_PEM_BYTES ||
+        memchr(pinned_ca, '\0', pinned_ca_bytes) != NULL ||
+        !is_single_ca_pem_envelope(pinned_ca, pinned_ca_bytes)) {
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t *snapshot = heap_caps_malloc(pinned_ca_bytes + 1U,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (snapshot == NULL) {
+      return ESP_ERR_NO_MEM;
+    }
+    memcpy(snapshot, pinned_ca, pinned_ca_bytes);
+    snapshot[pinned_ca_bytes] = '\0';
+
+    mbedtls_x509_crt parsed;
+    mbedtls_x509_crt_init(&parsed);
+    int parse_result =
+        mbedtls_x509_crt_parse(&parsed, snapshot, pinned_ca_bytes + 1U);
+    size_t certificate_count = 0;
+    for (const mbedtls_x509_crt *certificate = &parsed;
+         certificate != NULL && certificate->raw.p != NULL;
+         certificate = certificate->next) {
+      ++certificate_count;
+    }
+    int is_ca =
+        certificate_count == 1U ? mbedtls_x509_crt_get_ca_istrue(&parsed) : 0;
+    mbedtls_x509_crt_free(&parsed);
+    if (parse_result != 0 || certificate_count != 1U || is_ca != 1) {
+      heap_caps_free(snapshot);
+      return parse_result == MBEDTLS_ERR_X509_ALLOC_FAILED
+                 ? ESP_ERR_NO_MEM
+                 : ESP_ERR_INVALID_ARG;
+    }
+
+    client->host_pinned_ca_pem = snapshot;
+    client->host_pinned_ca_pem_bytes = pinned_ca_bytes;
+  } else {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  client->allow_https = true;
+  client->tls_trust_source = trust_source;
+  client->wall_clock_trusted = config->wall_clock_trusted;
+  client->wall_clock_context = config->wall_clock_context;
+  return ESP_OK;
 }
 
 static bool ascii_equal_ignore_case(const char *left, size_t left_length,
@@ -644,11 +842,23 @@ static esp_err_t enqueue_body_lease(execution_context_t *context,
   return enqueue_data_event(context->client, &event);
 }
 
-static pocketjs_net_error_code_t map_native_error(esp_err_t cause,
-                                                  int socket_errno,
-                                                  int tls_code, int tls_flags,
-                                                  bool https) {
+static bool tls_code_matches(int observed, int mbedtls_error) {
+  return observed == mbedtls_error || observed == -mbedtls_error;
+}
+
+pocketjs_net_error_code_t
+pocketjs_net_esp_http_map_native_error(esp_err_t cause, int socket_errno,
+                                       int tls_code, int tls_flags, bool https);
+
+pocketjs_net_error_code_t
+pocketjs_net_esp_http_map_native_error(esp_err_t cause, int socket_errno,
+                                       int tls_code, int tls_flags,
+                                       bool https) {
   if (cause == ESP_ERR_NO_MEM) {
+    return POCKETJS_NET_ERROR_RESOURCE_LIMIT;
+  }
+  if (https && (tls_code_matches(tls_code, MBEDTLS_ERR_SSL_ALLOC_FAILED) ||
+                tls_code_matches(tls_code, MBEDTLS_ERR_X509_ALLOC_FAILED))) {
     return POCKETJS_NET_ERROR_RESOURCE_LIMIT;
   }
   if (cause == ESP_ERR_HTTP_EAGAIN || cause == ESP_ERR_HTTP_READ_TIMEOUT ||
@@ -656,7 +866,8 @@ static pocketjs_net_error_code_t map_native_error(esp_err_t cause,
       cause == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT ||
       cause == ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT ||
       socket_errno == ETIMEDOUT || socket_errno == EAGAIN ||
-      socket_errno == EWOULDBLOCK) {
+      socket_errno == EWOULDBLOCK ||
+      (https && tls_code_matches(tls_code, MBEDTLS_ERR_SSL_TIMEOUT))) {
     return POCKETJS_NET_ERROR_TIMED_OUT;
   }
   if (cause == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
@@ -677,6 +888,24 @@ static pocketjs_net_error_code_t map_native_error(esp_err_t cause,
   }
 #endif
   if (https && tls_flags != 0) {
+    return POCKETJS_NET_ERROR_TLS_CERTIFICATE_INVALID;
+  }
+  if (https &&
+      (tls_code_matches(tls_code, MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION) ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_SSL_VERSION_MISMATCH))) {
+    return POCKETJS_NET_ERROR_TLS_VERSION_UNSUPPORTED;
+  }
+  if (https &&
+      (tls_code_matches(tls_code, MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE) ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_SSL_NON_FATAL) ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_SSL_UNRECOGNIZED_NAME))) {
+    return POCKETJS_NET_ERROR_TLS_ALERT;
+  }
+  if (https &&
+      (cause == ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_SSL_BAD_CERTIFICATE) ||
+       tls_code_matches(tls_code, MBEDTLS_ERR_SSL_CA_CHAIN_REQUIRED))) {
     return POCKETJS_NET_ERROR_TLS_CERTIFICATE_INVALID;
   }
   if (https && (tls_code != 0 || (cause >= ESP_ERR_ESP_TLS_BASE &&
@@ -709,7 +938,7 @@ static void snapshot_native_error(esp_http_client_handle_t handle,
 
 static pocketjs_net_error_code_t
 execute_request(pocketjs_net_esp_http_client_t *client, esp_err_t *out_cause,
-                int *out_tls_code) {
+                int *out_tls_code, uint32_t *out_tls_certificate_flags) {
   request_snapshot_t *request = &client->request;
   execution_context_t context = {
       .client = client,
@@ -726,7 +955,16 @@ execute_request(pocketjs_net_esp_http_client_t *client, esp_err_t *out_cause,
   if (cancellation_requested(client)) {
     *out_cause = ESP_ERR_INVALID_STATE;
     *out_tls_code = 0;
+    *out_tls_certificate_flags = 0;
     return POCKETJS_NET_ERROR_ABORTED;
+  }
+  if (request->https &&
+      (client->wall_clock_trusted == NULL ||
+       !client->wall_clock_trusted(client->wall_clock_context))) {
+    *out_cause = ESP_ERR_INVALID_STATE;
+    *out_tls_code = 0;
+    *out_tls_certificate_flags = 0;
+    return POCKETJS_NET_ERROR_TLS_CERTIFICATE_INVALID;
   }
 
   esp_http_client_config_t config = {
@@ -742,12 +980,24 @@ execute_request(pocketjs_net_esp_http_client_t *client, esp_err_t *out_cause,
       .buffer_size_tx = (int)POCKETJS_NET_ESP_HTTP_TX_BUFFER_BYTES,
       .user_data = &context,
       .skip_cert_common_name_check = false,
+      .tls_version = ESP_HTTP_CLIENT_TLS_VER_TLS_1_2,
       .keep_alive_enable = false,
       .addr_type = HTTP_ADDR_TYPE_INET,
   };
 #if POCKETJS_NET_ESP_HTTP_INTERNAL_TLS
   if (request->https) {
-    config.crt_bundle_attach = esp_crt_bundle_attach;
+    if (client->tls_trust_source ==
+        POCKETJS_NET_ESP_HTTP_TLS_TRUST_CERTIFICATE_BUNDLE) {
+#if POCKETJS_NET_ESP_HTTP_CERTIFICATE_BUNDLE
+      config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+    } else if (client->tls_trust_source ==
+               POCKETJS_NET_ESP_HTTP_TLS_TRUST_HOST_PINNED_CA_PEM) {
+      config.cert_pem = (const char *)client->host_pinned_ca_pem;
+      /* ESP-IDF v6.0.2 treats a nonzero cert_len as DER. The Host-pinned
+       * snapshot is NUL-terminated and remains owned by the client. */
+      config.cert_len = 0;
+    }
   }
 #endif
 
@@ -956,6 +1206,7 @@ finish:
   }
 
   *out_tls_code = tls_code;
+  *out_tls_certificate_flags = (uint32_t)tls_flags;
   if (cancellation_requested(client) ||
       context.failure == POCKETJS_NET_ERROR_ABORTED) {
     *out_cause =
@@ -968,8 +1219,8 @@ finish:
   }
   if (operation_result != ESP_OK) {
     *out_cause = operation_result;
-    return map_native_error(operation_result, socket_errno, tls_code, tls_flags,
-                            request->https);
+    return pocketjs_net_esp_http_map_native_error(
+        operation_result, socket_errno, tls_code, tls_flags, request->https);
   }
 
   *out_cause = ESP_OK;
@@ -979,7 +1230,8 @@ finish:
 static void enqueue_terminal_event(pocketjs_net_esp_http_client_t *client,
                                    uint32_t operation_id,
                                    pocketjs_net_error_code_t result,
-                                   esp_err_t cause, int tls_code) {
+                                   esp_err_t cause, int tls_code,
+                                   uint32_t tls_certificate_flags) {
   /* Terminal claim shares the owner-state mutex with cancel, terminal receive,
    * and start. A successful cancel that wins this lock therefore changes the
    * settlement to ABORTED; once this claim wins, later cancel returns
@@ -990,6 +1242,7 @@ static void enqueue_terminal_event(pocketjs_net_esp_http_client_t *client,
       result = POCKETJS_NET_ERROR_ABORTED;
       cause = ESP_ERR_INVALID_STATE;
       tls_code = 0;
+      tls_certificate_flags = 0;
     }
     client->state = CLIENT_STATE_TERMINAL_QUEUED;
     if (result == POCKETJS_NET_ERROR_NONE) {
@@ -1012,6 +1265,7 @@ static void enqueue_terminal_event(pocketjs_net_esp_http_client_t *client,
     event.detail.error.code = result;
     event.detail.error.cause_code = cause;
     event.detail.error.tls_code = tls_code;
+    event.detail.error.tls_certificate_flags = tls_certificate_flags;
     event.detail.error.temporary = error_is_temporary(result);
   }
 
@@ -1043,9 +1297,11 @@ static void http_worker(void *argument) {
     }
     esp_err_t cause = ESP_OK;
     int tls_code = 0;
+    uint32_t tls_certificate_flags = 0;
     pocketjs_net_error_code_t result =
-        execute_request(client, &cause, &tls_code);
-    enqueue_terminal_event(client, operation_id, result, cause, tls_code);
+        execute_request(client, &cause, &tls_code, &tls_certificate_flags);
+    enqueue_terminal_event(client, operation_id, result, cause, tls_code,
+                           tls_certificate_flags);
   }
 
   xSemaphoreGive(client->stopped);
@@ -1084,6 +1340,11 @@ esp_err_t pocketjs_net_esp_http_client_create(
   if (client == NULL) {
     return ESP_ERR_NO_MEM;
   }
+  esp_err_t tls_result = configure_tls(client, config);
+  if (tls_result != ESP_OK) {
+    heap_caps_free(client);
+    return tls_result;
+  }
   client->lease_storage =
       heap_caps_calloc(POCKETJS_NET_ESP_HTTP_BUFFER_LEASES,
                        POCKETJS_NET_ESP_HTTP_BODY_CHUNK_BYTES,
@@ -1111,11 +1372,6 @@ esp_err_t pocketjs_net_esp_http_client_create(
   client->state = CLIENT_STATE_IDLE;
   client->wake = config == NULL ? NULL : config->wake;
   client->wake_context = config == NULL ? NULL : config->wake_context;
-  client->allow_https = config != NULL && config->allow_https;
-  client->wall_clock_trusted =
-      config == NULL ? NULL : config->wall_clock_trusted;
-  client->wall_clock_context =
-      config == NULL ? NULL : config->wall_clock_context;
   atomic_init(&client->cancel_requested, false);
   atomic_init(&client->closing, false);
   atomic_init(&client->active_operation_id, 0);
@@ -1152,6 +1408,7 @@ allocation_failed:
   if (client->commands != NULL) {
     vQueueDelete(client->commands);
   }
+  heap_caps_free(client->host_pinned_ca_pem);
   heap_caps_free(client->lease_storage);
   heap_caps_free(client);
   return ESP_ERR_NO_MEM;
@@ -1200,9 +1457,9 @@ esp_err_t pocketjs_net_esp_http_client_start(
   if (result != ESP_OK) {
     return result;
   }
-  if (https && (!POCKETJS_NET_ESP_HTTP_INTERNAL_TLS || !client->allow_https ||
-                client->wall_clock_trusted == NULL ||
-                !client->wall_clock_trusted(client->wall_clock_context))) {
+  if (https &&
+      (!POCKETJS_NET_ESP_HTTP_INTERNAL_TLS || !client->allow_https ||
+       client->tls_trust_source == POCKETJS_NET_ESP_HTTP_TLS_TRUST_DISABLED)) {
     return ESP_ERR_NOT_SUPPORTED;
   }
 
@@ -1393,6 +1650,7 @@ void pocketjs_net_esp_http_client_destroy(
   vQueueDelete(client->free_leases);
   vQueueDelete(client->events);
   vQueueDelete(client->commands);
+  heap_caps_free(client->host_pinned_ca_pem);
   heap_caps_free(client->lease_storage);
   heap_caps_free(client);
 }
@@ -1425,6 +1683,10 @@ const char *pocketjs_net_error_code_name(pocketjs_net_error_code_t code) {
     return "tls_hostname_mismatch";
   case POCKETJS_NET_ERROR_TLS_HANDSHAKE_FAILED:
     return "tls_handshake_failed";
+  case POCKETJS_NET_ERROR_TLS_VERSION_UNSUPPORTED:
+    return "tls_version_unsupported";
+  case POCKETJS_NET_ERROR_TLS_ALERT:
+    return "tls_alert";
   case POCKETJS_NET_ERROR_HTTP_PROTOCOL_ERROR:
     return "http_protocol_error";
   case POCKETJS_NET_ERROR_SYSTEM:
