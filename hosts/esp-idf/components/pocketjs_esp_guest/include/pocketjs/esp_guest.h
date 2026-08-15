@@ -84,6 +84,18 @@ esp_err_t pocketjs_esp_guest_call_frame(pocketjs_esp_guest_t *guest,
                                         JSValueConst *arguments);
 
 /**
+ * Call a borrowed Guest function under the same interrupt-check and monotonic
+ * timeout guard used by bundle, frame, and job execution. The receiver and
+ * arguments are borrowed. A non-NULL out_result receives an owned JSValue on
+ * success; it is set to JS_UNDEFINED on entry and remains so on failure.
+ * phase is a Host-selected non-sensitive diagnostic label.
+ */
+esp_err_t pocketjs_esp_guest_call_function(
+    pocketjs_esp_guest_t *guest, const char *phase, JSValueConst function,
+    JSValueConst receiver, size_t argument_count, JSValueConst *arguments,
+    JSValue *out_result);
+
+/**
  * Execute at most max_jobs pending Promise jobs on the owner task. A zero
  * max_jobs is invalid. out_executed and out_pending may be NULL. A true
  * out_pending means the caller must schedule another bounded checkpoint.

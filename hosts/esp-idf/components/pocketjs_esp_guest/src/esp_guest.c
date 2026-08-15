@@ -496,6 +496,38 @@ esp_err_t pocketjs_esp_guest_call_frame(pocketjs_esp_guest_t *guest,
   return guest_end_execution(guest, false);
 }
 
+esp_err_t pocketjs_esp_guest_call_function(
+    pocketjs_esp_guest_t *guest, const char *phase, JSValueConst function,
+    JSValueConst receiver, size_t argument_count, JSValueConst *arguments,
+    JSValue *out_result) {
+  if (out_result != NULL) {
+    *out_result = JS_UNDEFINED;
+  }
+  if (!guest_is_owner(guest) || phase == NULL ||
+      !JS_IsFunction(guest->context, function) || argument_count > INT32_MAX ||
+      (argument_count != 0 && arguments == NULL)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t error = guest_begin_execution(guest);
+  if (error != ESP_OK) {
+    return error;
+  }
+  JSValue result = JS_Call(guest->context, function, receiver,
+                           (int)argument_count, arguments);
+  if (JS_IsException(result)) {
+    log_context_exception(guest->context, phase);
+    JS_FreeValue(guest->context, result);
+    return guest_end_execution(guest, true);
+  }
+  if (out_result != NULL) {
+    *out_result = result;
+  } else {
+    JS_FreeValue(guest->context, result);
+  }
+  return guest_end_execution(guest, false);
+}
+
 esp_err_t pocketjs_esp_guest_execute_jobs(pocketjs_esp_guest_t *guest,
                                           size_t max_jobs, size_t *out_executed,
                                           bool *out_pending) {
