@@ -20,6 +20,24 @@ import {
   type NetworkPrivateBuildContext,
 } from "../framework/compiler/network-private.ts";
 import { jsxPlugin, transformFile } from "../framework/compiler/jsx-plugin.ts";
+import {
+  NETWORK_V1_ABI_MAJOR,
+  NETWORK_V1_ABI_MINOR,
+  NETWORK_V1_LIMIT_PROTOCOL_ANY,
+  NETWORK_V1_LIMIT_ROLE_ANY,
+  NetworkV1CommandOpcode,
+  NetworkV1CompletionPollStatus,
+  NetworkV1DispatchStatus,
+  NetworkV1LimitProtocol,
+  NetworkV1LimitRole,
+  type NetworkV1AsyncCommand,
+  type NetworkV1BindingTable,
+  type NetworkV1BufferLeaseReadIntoCommand,
+  type NetworkV1BufferLeaseTakeCommand,
+  type NetworkV1FeatureId,
+  type NetworkV1LimitsQuery,
+  type NetworkV1ServiceDispatcher,
+} from "../contracts/spec/network/network-v1.ts";
 
 const MARKER = "__pocketNetworkFactoryTestMarker";
 const ROOT = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -87,6 +105,72 @@ function networkContext(): NetworkPrivateBuildContext {
   return createNetworkFactoryBuildContext(finalizeBuildPlan(content(true)));
 }
 
+function formalBinding(
+  context: NetworkPrivateBuildContext,
+  hooks: Readonly<{
+    dispatch?: (
+      this: NetworkV1BindingTable,
+      command: NetworkV1AsyncCommand,
+    ) => void;
+    register?: (dispatcher: NetworkV1ServiceDispatcher) => void;
+  }> = {},
+): NetworkV1BindingTable {
+  const featureIds = Object.freeze(
+    [...context.featureIds] as NetworkV1FeatureId[],
+  );
+  const handshake = Object.freeze({
+    abiMajor: NETWORK_V1_ABI_MAJOR,
+    abiMinor: NETWORK_V1_ABI_MINOR,
+    runtimeGeneration: 1,
+    planHash: Uint8Array.from(context.planHashBytes),
+    featureIds,
+  });
+  return Object.freeze({
+    handshake,
+    getLimits(query: NetworkV1LimitsQuery) {
+      const inProtocol = query.protocol === NETWORK_V1_LIMIT_PROTOCOL_ANY ||
+        query.protocol === NetworkV1LimitProtocol.Http;
+      const inRole = query.role === NETWORK_V1_LIMIT_ROLE_ANY ||
+        query.role === NetworkV1LimitRole.Client;
+      return Object.freeze({
+        runtimeGeneration: 1,
+        protocol: query.protocol,
+        role: query.role,
+        values: Object.freeze([]),
+        featureIds: Object.freeze(inProtocol && inRole ? [...featureIds] : []),
+      });
+    },
+    dispatch(command: NetworkV1AsyncCommand) {
+      hooks.dispatch?.call(this, command);
+      return Object.freeze({ status: NetworkV1DispatchStatus.Accepted });
+    },
+    nextCompletion() {
+      return Object.freeze({
+        status: NetworkV1CompletionPollStatus.Drained,
+        payloadBytesDelivered: 0 as const,
+      });
+    },
+    leaseTake(command: NetworkV1BufferLeaseTakeCommand) {
+      return Object.freeze({
+        status: NetworkV1DispatchStatus.Completed,
+        byteLength: command.byteLength,
+      });
+    },
+    leaseReadInto(command: NetworkV1BufferLeaseReadIntoCommand) {
+      return Object.freeze({
+        status: NetworkV1DispatchStatus.Completed,
+        bytesCopied: command.maxBytes,
+      });
+    },
+    leaseRelease() {
+      return Object.freeze({ status: NetworkV1DispatchStatus.Completed });
+    },
+    registerServiceDispatcher(dispatcher: NetworkV1ServiceDispatcher) {
+      hooks.register?.(dispatcher);
+    },
+  });
+}
+
 async function bundleNetworkEntry(
   entry: string,
   context: NetworkPrivateBuildContext,
@@ -96,6 +180,17 @@ async function bundleNetworkEntry(
     format: "iife",
     target: "browser",
     plugins: [jsxPlugin("solid", { entry, networkPrivate: context })],
+  });
+}
+
+async function bundlePlainEntry(
+  entry: string,
+): Promise<ReturnType<typeof Bun.build> extends Promise<infer Result> ? Result : never> {
+  return await Bun.build({
+    entrypoints: [entry],
+    format: "iife",
+    target: "browser",
+    plugins: [jsxPlugin("solid", { entry })],
   });
 }
 
@@ -198,12 +293,7 @@ describe("network factory artifact", () => {
       expect((factory as Function).length).toBe(0);
       expect(globals()[MARKER]).toBeUndefined();
 
-      const binding = Object.freeze({
-        abiMajor: 1,
-        abiMinor: 0,
-        featureSet: Object.freeze(["network.http.client"]),
-        start: () => ({}),
-      });
+      const binding = formalBinding(context);
       expect((factory as (binding: object) => unknown)(binding)).toBeUndefined();
       expect(globals()[MARKER]).toMatchObject({
         reserved: "undefined",
@@ -237,9 +327,12 @@ describe("network factory artifact", () => {
   test("rejects application imports of every compiler-only internal form", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-private-import-"));
     const privateBindingPath = join(ROOT, "framework/src/net/http-binding.ts");
+    const privateLimitsPath = join(ROOT, "framework/src/net/network-limits.ts");
     const linkPath = join(directory, "binding-link.ts");
+    const limitsLinkPath = join(directory, "limits-link.ts");
     try {
       await symlink(privateBindingPath, linkPath);
+      await symlink(privateLimitsPath, limitsLinkPath);
       const context = networkContext();
       const javascriptAttack = join(directory, "derived-attack.js");
       await Bun.write(javascriptAttack, `void ${context.bindingIdentifier};`);
@@ -261,6 +354,12 @@ describe("network factory artifact", () => {
         `require(${JSON.stringify(privateBindingPath)});`,
         `import ${JSON.stringify(linkPath)};`,
         `import "./binding-link.ts";`,
+        `import ${JSON.stringify(privateLimitsPath)};`,
+        `void import(${JSON.stringify(privateLimitsPath)});`,
+        `require(${JSON.stringify(privateLimitsPath)});`,
+        `import "./limits-link.ts";`,
+        `void import("./limits-link.ts");`,
+        `require("./limits-link.ts");`,
         `void ${NETWORK_BINDING_RESERVED_IDENTIFIER};`,
         `void arguments[0];`,
         `import "./derived-attack.js";`,
@@ -276,6 +375,41 @@ describe("network factory artifact", () => {
         let message = "";
         try {
           const result = await bundleNetworkEntry(entry, context);
+          expect(result.success, `${attacks[index]} unexpectedly built`).toBe(false);
+          message = buildMessages(result);
+        } catch (error) {
+          const errors = (error as { errors?: readonly { message?: string }[] }).errors;
+          message = errors
+            ? errors.map((item) => item.message ?? String(item)).join("\n")
+            : error instanceof Error ? error.message : String(error);
+        }
+        expect(message).toContain("private network binding");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects private limits installers in non-network artifacts too", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pocketjs-network-limits-private-"));
+    const privateLimitsPath = join(ROOT, "framework/src/net/network-limits.ts");
+    const linkPath = join(directory, "limits-link.ts");
+    try {
+      await symlink(privateLimitsPath, linkPath);
+      const attacks = [
+        `import ${JSON.stringify(privateLimitsPath)};`,
+        `void import(${JSON.stringify(privateLimitsPath)});`,
+        `require(${JSON.stringify(privateLimitsPath)});`,
+        `import "./limits-link.ts";`,
+        `void import("./limits-link.ts");`,
+        `require("./limits-link.ts");`,
+      ];
+      for (let index = 0; index < attacks.length; index += 1) {
+        const entry = join(directory, `plain-attack-${index}.ts`);
+        await Bun.write(entry, attacks[index]!);
+        let message = "";
+        try {
+          const result = await bundlePlainEntry(entry);
           expect(result.success, `${attacks[index]} unexpectedly built`).toBe(false);
           message = buildMessages(result);
         } catch (error) {
@@ -323,7 +457,7 @@ describe("network factory artifact", () => {
           return 1;
         },
       }));
-      expect(() => factory(hostile)).toThrow("must use data properties");
+      expect(() => factory(hostile)).toThrow("handshake must be an own data property");
       expect(getterCalls).toBe(0);
       expect(globals()[MARKER]).toBeUndefined();
     } finally {
@@ -348,13 +482,13 @@ describe("network factory artifact", () => {
       expect(bundled).not.toMatch(/\bimport\s+[^;]*pocketjs:internal\//);
 
       const factory = evaluateArtifact(wrapNetworkBundleFactory(bundled, context));
-      let binding!: Readonly<Record<string, unknown>>;
-      binding = Object.freeze({
-        abiMajor: 1,
-        abiMinor: 0,
-        featureSet: Object.freeze(["network.http.client"]),
-        start(this: unknown) {
-          globals().__bindingStartCheckpoint = this === binding ? "framework-captured" : "wrong-this";
+      let binding!: NetworkV1BindingTable;
+      binding = formalBinding(context, {
+        dispatch(this: NetworkV1BindingTable, command) {
+          if (command.opcode !== NetworkV1CommandOpcode.HttpRequestStart) return;
+          globals().__bindingStartCheckpoint = this === binding
+            ? "framework-captured"
+            : "wrong-this";
           throw new Error("expected test stop");
         },
       });
@@ -452,14 +586,8 @@ describe("network factory artifact", () => {
       });
       expect(globals().frame).toBeUndefined();
 
-      const binding = Object.freeze({
-        abiMajor: 1,
-        abiMinor: 0,
-        featureSet: Object.freeze(["network.http.client"]),
-        start: () => {
-          throw new Error("unused test binding");
-        },
-      });
+      const context = createNetworkFactoryBuildContext(plan);
+      const binding = formalBinding(context);
       expect((factory as (value: object) => unknown)(binding)).toBeUndefined();
       expect(globals()[MARKER]).toEqual({
         initializers: 1,
