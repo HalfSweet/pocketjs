@@ -13,6 +13,7 @@ static const char PROBE_SCRIPT[] =
     "  globalThis.pocketProbe = 0;"
     "  globalThis.frame = () => { frames += 1; globalThis.pocketFrames = "
     "frames; };"
+    "  globalThis.pocketCall = (value) => value + 1;"
     "  Promise.resolve(21).then((value) => { globalThis.pocketProbe = value * "
     "2; });"
     "})";
@@ -57,6 +58,18 @@ void app_main(void) {
   assert(JS_ToInt32(context, &probe, value) == 0);
   assert(probe == 2);
   JS_FreeValue(context, value);
+  JSValue call_function = JS_GetPropertyStr(context, global, "pocketCall");
+  assert(JS_IsFunction(context, call_function));
+  JSValue call_argument = JS_NewInt32(context, 41);
+  JSValue call_result = JS_UNDEFINED;
+  ESP_ERROR_CHECK(pocketjs_esp_guest_call_function(
+      guest, "build_smoke_call", call_function, JS_UNDEFINED, 1,
+      &call_argument, &call_result));
+  assert(JS_ToInt32(context, &probe, call_result) == 0);
+  assert(probe == 42);
+  JS_FreeValue(context, call_result);
+  JS_FreeValue(context, call_argument);
+  JS_FreeValue(context, call_function);
   JS_FreeValue(context, global);
 
   pocketjs_esp_guest_stats_t stats = {0};
