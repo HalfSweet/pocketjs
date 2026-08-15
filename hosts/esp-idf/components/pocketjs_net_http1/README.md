@@ -8,8 +8,9 @@ expose the PocketJS `fetch()` capability.
 The parser preserves the wire reason phrase for the synchronous status
 callback and reports every initial field line separately, including duplicate
 non-framing fields. It rejects ambiguous framing, obsolete folding, malformed
-chunk coding, and forbidden trailer fields. Valid trailers are parsed,
-validated, counted, and discarded.
+chunk coding, and forbidden trailer fields. `Content-Encoding` is forbidden in
+trailers so a late field cannot reinterpret already delivered identity body
+bytes. Valid trailers are parsed, validated, counted, and discarded.
 
 Response body bytes point directly into the caller's input buffer. The parser
 will not consume body bytes without explicit credit. A `PAUSED` result leaves
