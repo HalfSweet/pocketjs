@@ -105,7 +105,7 @@ The success paths are:
 | Request | Response contract |
 |---|---|
 | `GET /health` | HTTP 200, bounded JSON body, explicit `Content-Length` |
-| `POST /echo` | HTTP 200, exact binary request body, explicit `Content-Length` |
+| `POST /echo` | HTTP 200, exact binary request body, explicit response `Content-Length` |
 | `GET /chunked?fragment_ms=10` | Three chunks followed by a valid non-framing trailer |
 | `GET /status/404` or `/status/500` | Exact 4xx/5xx status without transport failure |
 | `GET /redirect?status=302&to=/health` | One visible redirect response |
@@ -141,6 +141,13 @@ The retry-once counter must remain one after a single PocketJS request when
 hidden retries are disabled. A redirect result depends on the resolved endpoint
 permission and redirect policy; the peer itself never follows a redirect.
 
+`POST /echo` accepts either one valid `Content-Length` or one HTTP/1.1
+`Transfer-Encoding: chunked`. **Chunked request decoding is cumulative and
+bounded by `--body-limit`; transfer-coding lists, chunk extensions, declared or
+actual trailers, `Content-Length` conflicts, malformed framing, and oversized
+bodies fail before a `request` event is emitted.** This strict subset is the
+wire peer for the formal PocketJS streaming request-body path.
+
 ## Mac client to ESP server
 
 The probe independently checks an ESP HTTP server's health endpoint, exact
@@ -168,7 +175,8 @@ python3 -m unittest tools/net-conformance-peer/test_http_peer.py
 ```
 
 The tests generate PKI in a temporary directory and cover plaintext behavior,
-a TLS 1.2 health/echo connection, SNI capture, unknown CA, bad signature,
-hostname mismatch, expired certificate, and not-yet-valid certificate. The
-fixture does not by itself cover DNS candidates, permission decisions, abort
-races, target resource limits, long soak, or hardware/runtime assertions.
+bounded chunked uploads and connection reuse, a TLS 1.2 health/echo connection,
+SNI capture, unknown CA, bad signature, hostname mismatch, expired certificate,
+and not-yet-valid certificate. The fixture does not by itself cover DNS
+candidates, permission decisions, abort races, target resource limits, long
+soak, or hardware/runtime assertions.
