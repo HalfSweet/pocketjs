@@ -70,31 +70,44 @@ function frozenBinding(
   start: HttpClientPrivateBinding["start"],
   features: readonly string[] = [HTTP_FEATURE],
   alpnProtocols?: readonly string[],
+  limitDefaults: Readonly<Partial<Record<
+    | "http.bufferedBodyBytes"
+    | "http.headerBytes"
+    | "http.maxBodyChunkBytes"
+    | "http.maxOperations"
+    | "runtime.nativeBufferBytes",
+    number
+  >>> = {},
 ): HttpClientPrivateBinding {
   const featureSet = Object.freeze([...features]);
   const values = Object.freeze([
     Object.freeze({
       name: "http.bufferedBodyBytes",
-      default: 8 * 1024 * 1024,
+      default: limitDefaults["http.bufferedBodyBytes"] ?? 8 * 1024 * 1024,
       hard: 8 * 1024 * 1024,
       minimum: 1,
     }),
     Object.freeze({
       name: "http.headerBytes",
-      default: 64 * 1024,
+      default: limitDefaults["http.headerBytes"] ?? 64 * 1024,
       hard: 64 * 1024,
       minimum: 1,
     }),
     Object.freeze({
       name: "http.maxBodyChunkBytes",
-      default: 64 * 1024,
+      default: limitDefaults["http.maxBodyChunkBytes"] ?? 64 * 1024,
       hard: 64 * 1024,
       minimum: 1,
     }),
-    Object.freeze({ name: "http.maxOperations", default: 8, hard: 8, minimum: 1 }),
+    Object.freeze({
+      name: "http.maxOperations",
+      default: limitDefaults["http.maxOperations"] ?? 8,
+      hard: 8,
+      minimum: 1,
+    }),
     Object.freeze({
       name: "runtime.nativeBufferBytes",
-      default: 512 * 1024,
+      default: limitDefaults["runtime.nativeBufferBytes"] ?? 512 * 1024,
       hard: 512 * 1024,
       minimum: 1,
     }),
@@ -864,6 +877,16 @@ describe("private lexical HTTP binding seam", () => {
     const mutable = { ...frozenBinding(() => { throw new Error("unused"); }) };
     expect(() => installHttpClientBindingForTesting(mutable)).toThrow(/frozen/);
 
+    const incomplete = frozenBinding(() => { throw new Error("unused"); });
+    const incompleteLimits = Object.freeze({
+      values: Object.freeze(incomplete.httpClientLimits.values.slice(1)),
+      features: incomplete.httpClientLimits.features,
+    });
+    expect(() => installHttpClientBindingForTesting(Object.freeze({
+      ...incomplete,
+      httpClientLimits: incompleteLimits,
+    }))).toThrow(/omit required http\.bufferedBodyBytes/);
+
     const binding = frozenBinding(() => { throw new Error("unused"); });
     const cleanup = installHttpClientBindingForTesting(binding);
     expect(getHttpClientBinding()).not.toBe(binding);
@@ -1052,6 +1075,81 @@ describe("private lexical HTTP binding seam", () => {
       } finally {
         cleanup();
       }
+    }
+  });
+
+  test("applies admitted header, body, and operation limits before Host start", async () => {
+    let starts = 0;
+    const cleanup = installHttpClientBindingForTesting(frozenBinding(
+      (command) => {
+        starts++;
+        return okOperation(command);
+      },
+      [HTTP_FEATURE],
+      undefined,
+      {
+        "http.bufferedBodyBytes": 8,
+        "http.headerBytes": 24,
+        "http.maxBodyChunkBytes": 4,
+      },
+    ));
+    try {
+      await expect(http.fetch("http://example.test/", {
+        headers: [["x-large", "01234567890123456789"]],
+      })).rejects.toMatchObject({ code: "resource_limit" });
+      await expect(http.fetch("http://example.test/", {
+        method: "POST",
+        body: new Uint8Array(9),
+      })).rejects.toMatchObject({ code: "resource_limit" });
+      await expect(http.fetch("http://example.test/", {
+        limits: { "http.maxBodyChunkBytes": 5 },
+      })).rejects.toThrow(/admitted minimum\/default range/);
+      await expect(http.fetch("http://example.test/", {
+        limits: { "http.unknown": 1 },
+      })).rejects.toThrow(/admitted minimum\/default range/);
+      expect(starts).toBe(0);
+
+      const response = await http.fetch("http://example.test/", {
+        limits: { "http.maxBodyChunkBytes": 4 },
+      });
+      expect(response.status).toBe(200);
+      expect(starts).toBe(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("lowers response helper credits and ceilings to admitted defaults", async () => {
+    const observedCredits: number[] = [];
+    let offset = 0;
+    const body: BodyStream = {
+      async readInto(destination) {
+        observedCredits.push(destination.byteLength);
+        if (offset === 7) return { bytes: 0, done: true };
+        const count = Math.min(destination.byteLength, 7 - offset);
+        destination.fill(0x61, 0, count);
+        offset += count;
+        return { bytes: count, done: false };
+      },
+      async cancel() {},
+      async *[Symbol.asyncIterator]() {},
+    };
+    const cleanup = installHttpClientBindingForTesting(frozenBinding(
+      (command) => okOperation(command, { body, bufferedBodyBytes: 6 }),
+      [HTTP_FEATURE],
+      undefined,
+      {
+        "http.bufferedBodyBytes": 6,
+        "http.maxBodyChunkBytes": 2,
+      },
+    ));
+    try {
+      const response = await http.fetch("http://example.test/");
+      await expect(response.text()).rejects.toMatchObject({ code: "resource_limit" });
+      expect(observedCredits.length).toBeGreaterThan(0);
+      expect(observedCredits.every((credit) => credit <= 2)).toBe(true);
+    } finally {
+      cleanup();
     }
   });
 

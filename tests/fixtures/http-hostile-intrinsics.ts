@@ -19,9 +19,33 @@ const cleanup = installHttpClientBindingForTesting(Object.freeze({
   httpClientLimits: Object.freeze({
     values: Object.freeze([
       Object.freeze({
+        name: "http.bufferedBodyBytes",
+        default: 8 * 1024 * 1024,
+        hard: 8 * 1024 * 1024,
+        minimum: 1,
+      }),
+      Object.freeze({
+        name: "http.headerBytes",
+        default: 64 * 1024,
+        hard: 64 * 1024,
+        minimum: 1,
+      }),
+      Object.freeze({
         name: "http.maxBodyChunkBytes",
         default: 64 * 1024,
         hard: 64 * 1024,
+        minimum: 1,
+      }),
+      Object.freeze({
+        name: "http.maxOperations",
+        default: 8,
+        hard: 8,
+        minimum: 1,
+      }),
+      Object.freeze({
+        name: "runtime.nativeBufferBytes",
+        default: 512 * 1024,
+        hard: 512 * 1024,
         minimum: 1,
       }),
     ]),
