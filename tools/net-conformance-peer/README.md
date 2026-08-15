@@ -52,7 +52,16 @@ that name through its controlled DNS fixture; PocketJS v1 does not treat
 production trust anchors.** The generator replaces only its known files when
 `--force` is present.
 
-Start the valid TLS peer:
+Create a fresh private evidence directory as the normal desktop user. Do not
+run either peer with `sudo`:
+
+```sh
+export POCKETJS_PEER_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pocketjs-peer.XXXXXX")"
+chmod 700 "$POCKETJS_PEER_RUN_DIR"
+echo "$POCKETJS_PEER_RUN_DIR" # copy this path into the other peer terminals
+```
+
+Start the valid TLS peer and lock both ends of the version range to TLS 1.2:
 
 ```sh
 python3 "$PEER_DIR/http_peer.py" serve \
@@ -60,14 +69,16 @@ python3 "$PEER_DIR/http_peer.py" serve \
   --port 8443 \
   --tls-cert "$PEER_DIR/.pki/server.cert.pem" \
   --tls-key "$PEER_DIR/.pki/server.key.pem" \
-  --events /tmp/pocketjs-tls-peer.ndjson
+  --tls-min-version 1.2 \
+  --tls-max-version 1.2 \
+  --events "$POCKETJS_PEER_RUN_DIR/tls.ndjson"
 ```
 
-**The server accepts TLS 1.2 and newer by default.** Use
-`--tls-max-version 1.2` to lock a TLS 1.2 positive test, or
-`--tls-min-version 1.3` for a version-rejection test. Configure the ESP client
-with `https://MAC_IPV4:8443` and the generated `ca.cert.pem` trust anchor. The
-certificate must contain the exact DNS name or IP address used by the URL.
+**The command above accepts only TLS 1.2.** Without `--tls-max-version`, the
+server accepts TLS 1.2 and newer by default. Use `--tls-min-version 1.3` for a
+version-rejection test. Configure the ESP client with `https://MAC_IPV4:8443`
+and the generated `ca.cert.pem` trust anchor. The certificate must contain the
+exact DNS name or IP address used by the URL.
 
 The HTTPS probe exercises the same verified path from a Mac client. It has no
 insecure mode:
@@ -99,6 +110,128 @@ no SNI, and emits `tls_handshake_error` when the peer observes the TLS alert.
 The wrong-host, expired, not-yet-valid, and bad-signature profiles are signed by
 the trusted test CA, so each isolates its stated verification decision. The
 unknown-CA profile has matching SANs and isolates trust-chain rejection.
+
+## Controlled DNS for TLS hostname and SNI
+
+`dns_peer.py` is a bounded IPv4 authoritative fixture for the TLS test name.
+It serves UDP and TCP on the same port and has no upstream resolver. The LAN
+configuration used by the ESP test boards is:
+
+| Setting | Value |
+|---|---|
+| DNS server | `172.16.10.126:53` |
+| Exact A record | `pocketjs.test. 30 IN A 172.16.10.126` |
+| HTTPS URL and SNI | `https://pocketjs.test:8443` |
+| Trust anchor | Host-fixed `.pki/ca.cert.pem` |
+
+Use the fresh `POCKETJS_PEER_RUN_DIR` created above in every peer terminal.
+Start the fixture on the Mac Wi-Fi interface:
+
+```sh
+PEER_DIR=tools/net-conformance-peer
+python3 "$PEER_DIR/dns_peer.py" serve \
+  --host 0.0.0.0 \
+  --port 53 \
+  --interface en1 \
+  --allow-cidr 172.16.10.0/24 \
+  --name pocketjs.test \
+  --address 172.16.10.126 \
+  --events "$POCKETJS_PEER_RUN_DIR/dns.ndjson"
+```
+
+On Darwin, `--interface en1` applies `IP_BOUND_IF` to both sockets before the
+wildcard bind. On platforms that cannot enforce the requested interface, the
+fixture fails startup. The source CIDR is checked again for every UDP datagram
+and TCP connection. Only RFC1918 and loopback subnets are accepted; public
+CIDRs and ranges assembled from broad prefixes are rejected by both the CLI
+and the server constructor.
+
+On the current Darwin test host, the exact wildcard-plus-`IP_BOUND_IF=en1`
+command was verified at UID 501 on UDP and TCP port 53 without `sudo`. Direct
+non-root binds to `127.0.0.1:53` and `172.16.10.126:53` returned `EACCES`; this
+is why the local parser smoke below uses loopback port 1053. Do not remove the
+interface constraint or add privilege based on the loopback result.
+
+**This fixture is not an open recursive resolver.** It sets `RA=0`, never sends
+an upstream query, and silently drops sources outside the allowlist. The exact
+`A/IN` question receives the one configured answer. Descendants of
+`pocketjs.test` receive authoritative `NXDOMAIN`; unrelated names, other types,
+and other classes receive `REFUSED`. A client may set `RD`, as normal stub
+resolvers do, but it does not change those decisions. Messages without a usable
+DNS header, responses sent to the server, and messages above 1232 bytes are
+dropped. Other malformed requests receive `FORMERR` when a bounded reply is
+possible.
+
+The fixed non-EDNS positive exchange is a 31-byte query and a 47-byte response,
+so it is not described as zero amplification. Interface binding, private-source
+allowlisting, the single fixed answer, and the absence of recursion prevent it
+from serving as a public reflection endpoint.
+
+The parser accepts one structurally valid EDNS record, caps the advertised UDP
+payload at 1232 bytes, does not echo options, and returns `BADVERS` for a
+nonzero EDNS version. Compression in a query name, additional records other
+than the single EDNS record, and incomplete UDP or TCP framing are rejected.
+
+The en1-constrained listener is intended to receive queries from the two ESP
+boards. macOS routes its own `172.16.10.126` destination through `lo0`, so test
+the parser locally with a separate loopback instance instead of removing the
+interface constraint from the LAN listener. Start that instance in one terminal:
+
+```sh
+python3 "$PEER_DIR/dns_peer.py" serve \
+  --host 127.0.0.1 \
+  --port 1053 \
+  --allow-cidr 127.0.0.0/8
+```
+
+Query both transports from another terminal:
+
+```sh
+dig @127.0.0.1 -p 1053 pocketjs.test A +noall +comments +answer
+dig @127.0.0.1 -p 1053 pocketjs.test A +tcp +noall +comments +answer
+```
+
+After DHCP and trusted-clock establishment, both ESP projects must set their
+DNS server to `172.16.10.126`, retain `pocketjs.test` as the URL hostname, and
+load `.pki/ca.cert.pem` as a Host-owned test trust anchor. The DNS answer must
+not replace the URL hostname before ESP-TLS performs hostname verification and
+constructs SNI. Use separate terminals for the two board projects:
+
+```sh
+# AtomS3R; select the port whose USB serial is 98:88:E0:0F:34:A0.
+idf.py -C "$ATOM_S3_PROJECT" -p "$ATOM_S3_PORT" flash monitor
+
+# Tab5; select the port whose USB serial is E8:F6:0A:E2:F6:46.
+idf.py -C "$TAB5_P4_PROJECT" -p "$TAB5_P4_PORT" flash monitor
+```
+
+The fixture emits bounded metadata in `dns_ready`, `dns_query`, `dns_drop`, and
+error records as NDJSON. Metadata includes the allowed source address and a
+validated query name, but no raw packet or EDNS option data. It creates the
+event file with mode `0600`, or appends only when an existing file is regular,
+owned by the current user, and inaccessible to group and other users. Symbolic
+links are refused. The private run directory also protects the HTTP peer's
+event path. Do not substitute a predictable shared `/tmp/*.ndjson` path.
+
+Run one board at a time and create a new private run directory before each
+acceptance run. Treat the `dns_ready` and `peer_ready` records as the beginning
+of that run; do not append evidence to a directory from an earlier run. Let
+`BOARD_IPV4` be the DHCP address of the board under test. A positive result
+requires this ordered evidence within that run's monotonic time window:
+
+1. `dns_query` has `outcome=answer`, `query_name=pocketjs.test`, and
+   `peer_ipv4=BOARD_IPV4`.
+2. A later `tls_client_hello` has `server_name=pocketjs.test` and the same
+   `peer_ipv4`.
+3. The next matching `connection_open` has the same `peer_ipv4`,
+   `tls_server_name=pocketjs.test`, and `tls_version=TLSv1.2`.
+4. The expected `/health` and `/echo` request records use that
+   `connection_id`.
+
+Separate DNS and TLS records without the same board address and ordering are
+not acceptance evidence. Do not use `.local` for this test: it invokes mDNS
+rather than the ordinary DNS path. Do not install a packet-filter redirect or
+expose this fixture beyond the controlled LAN.
 
 The success paths are:
 
@@ -172,11 +305,14 @@ does not follow redirects and does not log response bodies.
 ```sh
 openssl version
 python3 -m unittest tools/net-conformance-peer/test_http_peer.py
+python3 -m unittest tools/net-conformance-peer/test_dns_peer.py
 ```
 
 The tests generate PKI in a temporary directory and cover plaintext behavior,
 bounded chunked uploads and connection reuse, a TLS 1.2 health/echo connection,
 SNI capture, unknown CA, bad signature, hostname mismatch, expired certificate,
-and not-yet-valid certificate. The fixture does not by itself cover DNS
-candidates, permission decisions, abort races, target resource limits, long
-soak, or hardware/runtime assertions.
+and not-yet-valid certificate. The DNS tests cover UDP and TCP answers, source
+allowlisting, no-recursion behavior, `NXDOMAIN`, `REFUSED`, malformed and
+oversized messages, and EDNS bounds. The fixtures do not by themselves cover
+permission decisions, abort races, target resource limits, long soak, or
+hardware/runtime assertions.
