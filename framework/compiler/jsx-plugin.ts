@@ -116,6 +116,13 @@ const NETWORK_PRIVATE_FRAMEWORK_SOURCES = new Set([
   NETWORK_V1_BINDING_FRAMEWORK_SOURCE,
   NETWORK_LIMITS_FRAMEWORK_SOURCE,
 ]);
+const NETWORK_PUBLIC_FRAMEWORK_SPECIFIER_BY_SOURCE = new Map<string, string>([
+  [realpathSync(new URL("../src/net/http.ts", import.meta.url).pathname), `${PACKAGE_NAME}/net/http`],
+  [realpathSync(new URL("../src/net/websocket.ts", import.meta.url).pathname), `${PACKAGE_NAME}/net/websocket`],
+  [realpathSync(new URL("../src/net/mqtt.ts", import.meta.url).pathname), `${PACKAGE_NAME}/net/mqtt`],
+  [realpathSync(new URL("../src/net/tcp.ts", import.meta.url).pathname), `${PACKAGE_NAME}/net/tcp`],
+  [realpathSync(new URL("../src/net/udp.ts", import.meta.url).pathname), `${PACKAGE_NAME}/net/udp`],
+]);
 const FRAMEWORK_SOURCE_ROOT = realpathSync(new URL("../src/", import.meta.url).pathname);
 const NETWORK_PRIVATE_NAMESPACE = "pocketjs-network-private-v1";
 
@@ -386,10 +393,23 @@ function makeNetworkDemandGate(features: BuildFeatures | undefined): PluginObj {
         checkSurface(path, source, null);
       },
       CallExpression(path) {
-        if (path.node.callee.type !== "Import" || path.node.arguments.length !== 1) return;
-        const argument = path.node.arguments[0];
-        if (argument?.type !== "StringLiteral") return;
-        checkSurface(path, argument.value, null);
+        const dynamicImport = path.node.callee.type === "Import";
+        const commonJsRequire = path.node.callee.type === "Identifier" &&
+          path.node.callee.name === "require";
+        if (!dynamicImport && !commonJsRequire) return;
+
+        const argumentPaths = path.get("arguments");
+        const argumentPath = Array.isArray(argumentPaths) && argumentPaths.length === 1
+          ? argumentPaths[0]
+          : undefined;
+        const evaluated = argumentPath?.evaluate();
+        if (!evaluated?.confident || typeof evaluated.value !== "string") {
+          throw path.buildCodeFrameError(
+            "PocketJS: dynamic import and require specifiers must be compile-time strings; " +
+              "an unresolved specifier could bypass network capability admission.",
+          );
+        }
+        checkSurface(path, evaluated.value, null);
       },
     },
   };
@@ -955,9 +975,15 @@ export function jsxPlugin(
         const resolved = resolveFileLikeSpecifier(args.path, args.resolveDir);
         if (resolved === null) return undefined;
         const target = canonicalFile(resolved);
-        if (target === null || !NETWORK_PRIVATE_FRAMEWORK_SOURCES.has(target)) {
-          return undefined;
+        if (target === null) return undefined;
+        const publicSpecifier = NETWORK_PUBLIC_FRAMEWORK_SPECIFIER_BY_SOURCE.get(target);
+        if (publicSpecifier !== undefined) {
+          throw new TypeError(
+            `PocketJS: application resolver rejected direct access to ${publicSpecifier}; ` +
+              `import the canonical ${publicSpecifier} package surface so capability demand can be verified.`,
+          );
         }
+        if (!NETWORK_PRIVATE_FRAMEWORK_SOURCES.has(target)) return undefined;
         if (isAllowedPrivateNetworkSourceImport(target, args.importer)) return undefined;
         throw new TypeError(
           "PocketJS: application resolver rejected direct access to a private network binding module.",
