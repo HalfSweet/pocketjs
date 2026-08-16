@@ -91,16 +91,13 @@ handshake failure.
 
 The descriptor deliberately reports the following gaps:
 
-- **ESP-IDF v6.0.2 `esp_tls_conn_new_async` performs an internal `select`.** A
-  zero timeout waits forever, so its first TCP step uses a one millisecond
-  timeout and reports `nonblocking_tls_steps=false`. IDF reuses a consumed
-  `fd_set` after timeout; this adapter instead polls the retained socket with a
-  zero timeout and re-enters ESP-TLS only after TCP readiness. Socket allocation,
-  crypto work, and scheduler contention still have no proven per-step wall-time
-  bound.
-- **ESP-TLS invokes its private `getaddrinfo` path for the already-numeric IPv4
-  candidate.** This cannot issue hostname DNS, but its native allocation is not
-  caller-owned or byte-bounded.
+- **Native step wall time is not proven.** The adapter now creates and connects
+  the numeric IPv4 socket itself, polls it with zero timeout, and transfers the
+  connected `O_NONBLOCK` descriptor through ESP-TLS's public socket/state APIs.
+  This bypasses ESP-TLS's private `getaddrinfo` and internal TCP-connect
+  `select`; each Mbed TLS handshake call returns on `WANT_READ`/`WANT_WRITE`.
+  Socket allocation, cryptographic work, and scheduler contention still have no
+  proven per-step wall-time bound.
 - **lwIP DNS tables, socket/netconn objects, TCP buffers, callback MEMP entries,
   and ESP-TLS/Mbed TLS handshake objects are native allocations whose byte peak
   is not proven by the fixed PocketJS pools.** The descriptor reports each as

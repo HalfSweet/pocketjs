@@ -212,17 +212,17 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
      * generation ticket and revalidate it under the transport lock. */
     .dns_cancel_generation_cleanup = true,
     .synchronous_getaddrinfo_for_hostname = false,
-    /* esp_tls_conn_new_async still runs its private getaddrinfo helper on the
-     * already-numeric candidate. It cannot issue DNS, but its allocation is a
-     * native admission blocker until ESP-TLS accepts a caller-owned socket. */
-    .esp_tls_numeric_getaddrinfo_internal = true,
+    /* The adapter creates and connects the numeric IPv4 socket, then transfers
+     * it through ESP-TLS's public socket/state setters. ESP-TLS never resolves
+     * the candidate or performs its internal TCP-connect select. */
+    .esp_tls_numeric_getaddrinfo_internal = false,
     .nonblocking_plain_tcp_steps = true,
-    /* IDF 6.0.2's first esp_tls_conn_new_async step calls select(). A zero
-     * timeout means infinite wait, so this adapter permits one 1 ms step and
-     * then takes over TCP readiness with zero-time poll. */
-    .nonblocking_tls_steps = false,
-    /* The select wait is bounded, but socket allocation, crypto work, and
-     * scheduler contention have no proven wall-time bound. */
+    /* TCP readiness is polled with a zero timeout. ESP-TLS is entered at its
+     * CONNECTING state over the already-connected O_NONBLOCK socket, so each
+     * Mbed TLS handshake call returns on WANT_READ/WANT_WRITE. */
+    .nonblocking_tls_steps = true,
+    /* Socket allocation, crypto work, and scheduler contention still have no
+     * proven per-step wall-time bound. */
     .bounded_native_step_wall_time = false,
     .esp_tls_internal_select_timeout_ms =
         POCKETJS_NET_ESP_TRANSPORT_TLS_STEP_TIMEOUT_MS,
@@ -1443,7 +1443,10 @@ static bool make_tls_config(pocketjs_net_esp_transport_t *transport,
     return false;
   }
   memset(configuration, 0, sizeof(*configuration));
-  configuration->non_block = true;
+  /* The adapter has already connected an O_NONBLOCK socket and enters
+   * ESP-TLS at ESP_TLS_CONNECTING. false skips ESP-TLS's internal select;
+   * it does not change the already-configured socket flags. */
+  configuration->non_block = false;
   configuration->timeout_ms = POCKETJS_NET_ESP_TRANSPORT_TLS_STEP_TIMEOUT_MS;
   configuration->common_name = operation->hostname;
   configuration->skip_common_name = false;
@@ -1485,78 +1488,133 @@ static void finish_connected(pocketjs_net_esp_transport_t *transport,
   }
 }
 
-static void pump_plain_connect(pocketjs_net_esp_transport_t *transport,
-                               operation_slot_t *operation,
-                               connection_slot_t *connection) {
-  if (operation->phase == OP_PHASE_INITIAL) {
-    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd < 0) {
-      int cause = errno;
-      connection_native_close(connection);
-      enqueue_error(transport, operation, map_errno(cause), cause, 0, 0U,
-                    cause == ENOBUFS || cause == ENOMEM);
-      return;
-    }
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-      int cause = errno;
-      close(fd);
-      connection_native_close(connection);
-      enqueue_error(transport, operation,
-                    POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED, cause, 0, 0U,
-                    false);
-      return;
-    }
-    connection->fd = fd;
-    struct sockaddr_in address = {
-        .sin_family = AF_INET,
-        .sin_port = htons(operation->port),
-        .sin_addr.s_addr = operation->ipv4_be,
-    };
-    int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
-    if (result == 0) {
-      finish_connected(transport, operation, connection);
-      return;
-    }
-    if (errno != EINPROGRESS) {
-      int cause = errno;
-      connection_native_close(connection);
-      enqueue_error(transport, operation, map_errno(cause), cause, 0, 0U,
-                    cause == ENETUNREACH || cause == EHOSTUNREACH);
-      return;
-    }
-    operation->phase = OP_PHASE_TCP_CONNECT_WAIT;
-    return;
-  }
+typedef enum socket_connect_progress {
+  SOCKET_CONNECT_FAILED = 0,
+  SOCKET_CONNECT_PENDING,
+  SOCKET_CONNECT_READY,
+} socket_connect_progress_t;
 
+static socket_connect_progress_t
+start_socket_connect(pocketjs_net_esp_transport_t *transport,
+                     operation_slot_t *operation,
+                     connection_slot_t *connection) {
+  int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0) {
+    int cause = errno;
+    connection_native_close(connection);
+    enqueue_error(transport, operation, map_errno(cause), cause, 0, 0U,
+                  cause == ENOBUFS || cause == ENOMEM);
+    return SOCKET_CONNECT_FAILED;
+  }
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    int cause = errno;
+    close(fd);
+    connection_native_close(connection);
+    enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED,
+                  cause, 0, 0U, false);
+    return SOCKET_CONNECT_FAILED;
+  }
+  connection->fd = fd;
+  struct sockaddr_in address = {
+      .sin_family = AF_INET,
+      .sin_port = htons(operation->port),
+      .sin_addr.s_addr = operation->ipv4_be,
+  };
+  if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
+    return SOCKET_CONNECT_READY;
+  }
+  if (errno != EINPROGRESS) {
+    int cause = errno;
+    connection_native_close(connection);
+    enqueue_error(transport, operation, map_errno(cause), cause, 0, 0U,
+                  cause == ENETUNREACH || cause == EHOSTUNREACH);
+    return SOCKET_CONNECT_FAILED;
+  }
+  operation->phase = OP_PHASE_TCP_CONNECT_WAIT;
+  return SOCKET_CONNECT_PENDING;
+}
+
+static socket_connect_progress_t
+poll_socket_connect(pocketjs_net_esp_transport_t *transport,
+                    operation_slot_t *operation,
+                    connection_slot_t *connection) {
   struct pollfd descriptor = {
       .fd = connection->fd,
       .events = POLLOUT,
   };
   int poll_result = poll(&descriptor, 1U, 0);
   if (poll_result == 0) {
-    return;
+    return SOCKET_CONNECT_PENDING;
   }
   if (poll_result < 0) {
     int cause = errno;
     connection_native_close(connection);
     enqueue_error(transport, operation, map_errno(cause), cause, 0, 0U, false);
-    return;
+    return SOCKET_CONNECT_FAILED;
   }
   int socket_error = 0;
-  socklen_t error_length = sizeof(socket_error);
-  if (getsockopt(connection->fd, SOL_SOCKET, SO_ERROR, &socket_error,
-                 &error_length) < 0) {
-    socket_error = errno;
+  if ((descriptor.revents & POLLNVAL) != 0) {
+    socket_error = EBADF;
+  } else {
+    socklen_t error_length = sizeof(socket_error);
+    if (getsockopt(connection->fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                   &error_length) < 0) {
+      socket_error = errno;
+    }
   }
   if (socket_error != 0) {
     connection_native_close(connection);
     enqueue_error(transport, operation, map_errno(socket_error), socket_error,
                   0, 0U,
                   socket_error == ENETUNREACH || socket_error == EHOSTUNREACH);
-    return;
+    return SOCKET_CONNECT_FAILED;
   }
-  finish_connected(transport, operation, connection);
+  return SOCKET_CONNECT_READY;
+}
+
+static void pump_plain_connect(pocketjs_net_esp_transport_t *transport,
+                               operation_slot_t *operation,
+                               connection_slot_t *connection) {
+  socket_connect_progress_t progress =
+      operation->phase == OP_PHASE_INITIAL
+          ? start_socket_connect(transport, operation, connection)
+          : poll_socket_connect(transport, operation, connection);
+  if (progress == SOCKET_CONNECT_READY) {
+    finish_connected(transport, operation, connection);
+  }
+}
+
+static bool
+attach_tls_to_connected_socket(pocketjs_net_esp_transport_t *transport,
+                               operation_slot_t *operation,
+                               connection_slot_t *connection) {
+  esp_tls_t *tls = esp_tls_init();
+  if (tls == NULL) {
+    connection_native_close(connection);
+    enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_RESOURCE_LIMIT,
+                  ENOMEM, 0, 0U, true);
+    return false;
+  }
+  if (esp_tls_set_conn_sockfd(tls, connection->fd) != ESP_OK) {
+    esp_tls_conn_destroy(tls);
+    connection_native_close(connection);
+    enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED,
+                  EBADF, 0, 0U, false);
+    return false;
+  }
+
+  /* Ownership transfers to ESP-TLS as soon as the socket setter succeeds. */
+  connection->tls = tls;
+  connection->fd = -1;
+  if (esp_tls_set_conn_state(tls, ESP_TLS_CONNECTING) != ESP_OK) {
+    connection_native_close(connection);
+    enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED,
+                  EINVAL, 0, 0U, false);
+    return false;
+  }
+  operation->phase = OP_PHASE_TLS_HANDSHAKE;
+  return true;
 }
 
 static void pump_tls_connect(pocketjs_net_esp_transport_t *transport,
@@ -1571,85 +1629,31 @@ static void pump_tls_connect(pocketjs_net_esp_transport_t *transport,
     return;
   }
   if (connection->tls == NULL) {
-    connection->tls = esp_tls_init();
-    if (connection->tls == NULL) {
-      connection_native_close(connection);
-      enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_RESOURCE_LIMIT,
-                    ENOMEM, 0, 0U, true);
+    socket_connect_progress_t progress =
+        operation->phase == OP_PHASE_INITIAL
+            ? start_socket_connect(transport, operation, connection)
+            : poll_socket_connect(transport, operation, connection);
+    if (progress != SOCKET_CONNECT_READY) {
+      return;
+    }
+    if (!attach_tls_to_connected_socket(transport, operation, connection)) {
       return;
     }
   }
 
-  /* IDF 6.0.2 does not rebuild the fd_sets consumed by a timed-out select in
-   * ESP_TLS_CONNECTING. After its first bounded async step, poll the retained
-   * socket ourselves. Once ready, re-enter ESP-TLS with non_block=false so it
-   * skips the broken select branch; the socket itself remains O_NONBLOCK for
-   * every Mbed TLS handshake step. */
-  if (operation->phase == OP_PHASE_TCP_CONNECT_WAIT) {
-    int fd = -1;
-    if (esp_tls_get_conn_sockfd(connection->tls, &fd) != ESP_OK || fd < 0) {
-      connection_native_close(connection);
-      enqueue_error(transport, operation,
-                    POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED, EBADF, 0, 0U,
-                    false);
-      return;
-    }
-    struct pollfd descriptor = {
-        .fd = fd,
-        .events = POLLOUT,
-    };
-    int poll_result = poll(&descriptor, 1U, 0);
-    if (poll_result == 0) {
-      return;
-    }
-    int socket_error = 0;
-    if (poll_result < 0) {
-      socket_error = errno;
-    } else if ((descriptor.revents & POLLNVAL) != 0) {
-      socket_error = EBADF;
-    } else {
-      socklen_t error_length = sizeof(socket_error);
-      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) <
-          0) {
-        socket_error = errno;
-      }
-    }
-    if (socket_error != 0) {
-      connection_native_close(connection);
-      enqueue_error(
-          transport, operation, map_errno(socket_error), socket_error, 0, 0U,
-          socket_error == ENETUNREACH || socket_error == EHOSTUNREACH);
-      return;
-    }
-    configuration.non_block = false;
-  } else if (operation->phase == OP_PHASE_TLS_HANDSHAKE) {
-    configuration.non_block = false;
-  }
-
-  struct in_addr address = {.s_addr = operation->ipv4_be};
-  char numeric[INET_ADDRSTRLEN];
-  if (inet_ntop(AF_INET, &address, numeric, sizeof(numeric)) == NULL) {
-    connection_native_close(connection);
-    enqueue_error(transport, operation, POCKETJS_NET_ESP_ERROR_INVALID_ARGUMENT,
-                  errno, 0, 0U, false);
-    return;
-  }
-
-  int result =
-      esp_tls_conn_new_async(numeric, (int)strlen(numeric), operation->port,
-                             &configuration, connection->tls);
+  int result = esp_tls_conn_new_async(
+      operation->hostname, (int)strlen(operation->hostname), operation->port,
+      &configuration, connection->tls);
   if (result == 0) {
     esp_tls_conn_state_t state = ESP_TLS_INIT;
     if (esp_tls_get_conn_state(connection->tls, &state) != ESP_OK ||
-        (state != ESP_TLS_CONNECTING && state != ESP_TLS_HANDSHAKE)) {
+        state != ESP_TLS_HANDSHAKE) {
       connection_native_close(connection);
       enqueue_error(transport, operation,
                     POCKETJS_NET_ESP_ERROR_TLS_HANDSHAKE_FAILED, 0, 0, 0U,
                     false);
       return;
     }
-    operation->phase = state == ESP_TLS_CONNECTING ? OP_PHASE_TCP_CONNECT_WAIT
-                                                   : OP_PHASE_TLS_HANDSHAKE;
     return;
   }
   if (result == 1) {

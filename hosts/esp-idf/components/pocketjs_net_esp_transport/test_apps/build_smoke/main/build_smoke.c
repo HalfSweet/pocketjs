@@ -38,11 +38,11 @@ void app_main(void) {
   assert(descriptor->rejects_saturated_dns_candidate_prefix);
   assert(descriptor->dns_cancel_generation_cleanup);
   assert(!descriptor->synchronous_getaddrinfo_for_hostname);
-  assert(descriptor->esp_tls_numeric_getaddrinfo_internal);
+  assert(!descriptor->esp_tls_numeric_getaddrinfo_internal);
   assert(descriptor->nonblocking_plain_tcp_steps);
-  assert(!descriptor->nonblocking_tls_steps);
+  assert(descriptor->nonblocking_tls_steps);
   assert(!descriptor->bounded_native_step_wall_time);
-  assert(descriptor->esp_tls_internal_select_timeout_ms == 1U);
+  assert(descriptor->esp_tls_internal_select_timeout_ms == 0U);
   assert(descriptor->monotonic_deadlines);
   assert(descriptor->cancel_between_native_steps);
   assert(!descriptor->worker_or_callback_calls_quickjs);
