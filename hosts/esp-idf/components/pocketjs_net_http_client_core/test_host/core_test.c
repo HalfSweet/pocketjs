@@ -1349,6 +1349,33 @@ static void test_chunked_body_and_valid_trailer(void) {
   retire_event(&fixture, complete);
 }
 
+static void test_protocol_error_selected_before_body_pull(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  connect_and_write_get(&fixture, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&fixture.fake,
+                     "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     "Z\r\ninvalid\r\n",
+                     false);
+  pump(&fixture);
+  pocketjs_net_http_client_event_t headers =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(&fixture, headers);
+
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  assert(
+      pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 16U));
+  assert(
+      !pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 16U));
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL);
+  retire_event(&fixture, error);
+}
+
 static void test_eof_delimited_body(void) {
   fixture_t fixture;
   fixture_init(&fixture);
@@ -2875,6 +2902,7 @@ int main(void) {
   test_all_candidates_checked_before_denial();
   test_protocol_error_closes_before_terminal();
   test_chunked_body_and_valid_trailer();
+  test_protocol_error_selected_before_body_pull();
   test_eof_delimited_body();
   test_205_has_no_body();
   test_content_coding_fails_closed();

@@ -2881,16 +2881,18 @@ bool pocketjs_net_http_client_core_grant_body_credit(
         !ascii_equal_case(core->method, core->method_length, "HEAD") &&
         core->response_status != 204U && core->response_status != 205U &&
         core->response_status != 304U;
-    if (!core->terminal_success || !core->parser_complete ||
-        !response_exposes_body || core->terminal_body_pull_active) {
+    if (!response_exposes_body || core->terminal_body_pull_active ||
+        (core->terminal_success && !core->parser_complete)) {
       return false;
     }
     /*
-     * The last non-empty body lease is not itself an EOF marker. Accept one
-     * final downstream pull while the successful terminal is closing or
-     * queued so the binding can wait for BODY_END without mistaking normal
-     * end-of-stream for an invalid state. Dedicated one-shot state rejects
-     * duplicates until terminal retirement resets the operation.
+     * A terminal may be selected after headers and before the Guest issues its
+     * next pull. Accept one final downstream pull while that terminal is
+     * closing or queued so the binding can wait for BODY_END/BODY_ERROR rather
+     * than replacing the selected outcome with invalid_state. For successful
+     * responses this is also the EOF pull after the last non-empty body lease.
+     * Dedicated one-shot state rejects duplicates until terminal retirement
+     * resets the operation.
      */
     core->terminal_body_pull_active = true;
     return true;
