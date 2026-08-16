@@ -358,6 +358,10 @@ class TLSPeerTest(unittest.TestCase):
         ready = json.loads(ready_line)
         self.assertEqual(ready["event"], "peer_ready")
         self.assertEqual(ready["socket_timeout_ms"], 5000)
+        self.assertEqual(
+            ready["tls_certificate_der_sha256"],
+            http_peer.certificate_der_sha256(self.pki[cert_name]),
+        )
         return process, ready
 
     def stop_cli_profile(

@@ -450,3 +450,43 @@ Run the deterministic evidence-parser regressions with:
 ```sh
 python3 -m unittest tools/net-conformance-peer/test_phase1b_version_reject.py
 ```
+
+## Phase 1B certificate-rejection gate
+
+Run one board and one certificate profile at a time in a fresh private evidence
+directory. Lock the TLS peer to 1.2 and keep `--observe-tls-close-notify` set,
+even though the rejected handshake must never reach an opened connection. The
+peer records the public certificate's DER SHA-256 in `peer_ready`, so the
+validator can prove which fixture produced the wire evidence.
+
+Use the board harness's `hostname_reject` mode with
+`wrong-host.cert.pem`/`wrong-host.key.pem`. Use `certificate_reject` with one of
+`untrusted-server`, `expired-server`, `not-yet-valid-server`, or
+`bad-signature-server`. After the board reports its negative pass, stop the
+monitor and both peers and validate all three streams together:
+
+```sh
+python3 tools/net-conformance-peer/phase1b_certificate_reject.py \
+  --board s3 \
+  --profile hostname-mismatch \
+  --board-log "$POCKETJS_PEER_RUN_DIR/board.log" \
+  --dns-events "$POCKETJS_PEER_RUN_DIR/dns.ndjson" \
+  --tls-events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --board-ipv4 172.16.10.231 \
+  --peer-ipv4 172.16.10.126
+```
+
+The other profile names are `unknown-ca`, `expired`, `not-yet-valid`, and
+`bad-signature`. Use `--board p4 --board-ipv4 172.16.10.145` for Tab5. The gate
+requires the exact fixture fingerprint, one controlled DNS answer, one
+ClientHello with SNI `pocketjs.test`, one failed handshake, zero opened TLS
+connections or HTTP requests, cooperative Guest-owner yielding, balanced
+leases, zero poison, and completed shutdown. Hostname mismatch must surface as
+`tls_hostname_mismatch`; every other listed certificate failure must surface as
+`tls_certificate_invalid`.
+
+Run the deterministic evidence-parser regressions with:
+
+```sh
+python3 -m unittest tools/net-conformance-peer/test_phase1b_certificate_reject.py
+```

@@ -8,6 +8,7 @@ PocketJS code or share an HTTP parser with a PocketJS backend.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import socket
@@ -815,6 +816,12 @@ def create_server_tls_context(
     return context
 
 
+def certificate_der_sha256(cert_path: Path) -> str:
+    pem = cert_path.read_text(encoding="ascii")
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    return hashlib.sha256(der).hexdigest()
+
+
 def tls_version(value: str) -> ssl.TLSVersion:
     return {
         "1.2": ssl.TLSVersion.TLSv1_2,
@@ -931,16 +938,19 @@ def run_server(args: argparse.Namespace) -> int:
     if args.tls_handshake_delay_ms > args.delay_ceiling_ms:
         raise ValueError("--tls-handshake-delay-ms exceeds --delay-ceiling-ms")
     tls_context = None
+    tls_certificate_der_sha256 = None
     if args.tls_cert:
         if args.tls_max_version and tls_version(
             args.tls_max_version
         ) < tls_version(args.tls_min_version):
             raise ValueError("--tls-max-version must not be below --tls-min-version")
+        cert_path = Path(args.tls_cert).expanduser()
         tls_context = create_server_tls_context(
-            Path(args.tls_cert).expanduser(),
+            cert_path,
             Path(args.tls_key).expanduser(),
             args.tls_min_version,
         )
+        tls_certificate_der_sha256 = certificate_der_sha256(cert_path)
         if args.tls_max_version:
             tls_context.maximum_version = tls_version(args.tls_max_version)
 
@@ -969,6 +979,7 @@ def run_server(args: argparse.Namespace) -> int:
         tls_max_version=(
             args.tls_max_version if tls_context is not None else None
         ),
+        tls_certificate_der_sha256=tls_certificate_der_sha256,
         observe_tls_close_notify=args.observe_tls_close_notify,
         tls_handshake_delay_ms=args.tls_handshake_delay_ms,
         socket_timeout_ms=args.socket_timeout_ms,
