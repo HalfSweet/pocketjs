@@ -309,20 +309,20 @@ static void fake_complete_unexpected_read(
     ++fake->read_lease_generation;
     fake->read_lease_active = true;
   }
-  fake_queue(fake,
-             (pocketjs_net_http_client_transport_completion_t){
-                 .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
-                 .detail.read =
-                     {
-                         .connection = connection,
-                         .lease = {.slot = 0U,
-                                   .generation = length == 0U
-                                                     ? 0U
-                                                     : fake->read_lease_generation},
-                         .byte_count = length,
-                         .eof = eof,
-                     },
-             });
+  fake_queue(fake, (pocketjs_net_http_client_transport_completion_t){
+                       .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
+                       .detail.read =
+                           {
+                               .connection = connection,
+                               .lease = {.slot = 0U,
+                                         .generation =
+                                             length == 0U
+                                                 ? 0U
+                                                 : fake->read_lease_generation},
+                               .byte_count = length,
+                               .eof = eof,
+                           },
+                   });
 }
 
 static void fake_complete_read(fake_transport_t *fake, const char *bytes,
@@ -377,8 +377,7 @@ allow_endpoint(void *context,
            POCKETJS_NET_HTTP_CLIENT_START_REENTRANT);
     assert(!pocketjs_net_http_client_core_abort(log->core, 1U));
     assert(!pocketjs_net_http_client_core_pump(log->core, 1U, 1U, 1U));
-    assert(!pocketjs_net_http_client_core_grant_body_credit(log->core, 1U,
-                                                            1U));
+    assert(!pocketjs_net_http_client_core_grant_body_credit(log->core, 1U, 1U));
     static const uint8_t request_body_byte[] = "x";
     assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
         log->core, 1U, 1U, 1U, request_body_byte, 1U));
@@ -390,8 +389,7 @@ allow_endpoint(void *context,
     assert(!pocketjs_net_http_client_core_retire_event(log->core, 1U));
     assert(!pocketjs_net_http_client_core_body_lease_view(log->core, lease,
                                                           &body, &body_length));
-    assert(!pocketjs_net_http_client_core_release_body_lease(log->core,
-                                                             lease));
+    assert(!pocketjs_net_http_client_core_release_body_lease(log->core, lease));
     assert(!pocketjs_net_http_client_core_get_status(log->core, &status));
     assert(!pocketjs_net_http_client_core_begin_shutdown(log->core, 1U));
     assert(!pocketjs_net_http_client_core_is_quiescent(log->core));
@@ -404,7 +402,7 @@ allow_endpoint(void *context,
             log->core, 1U));
     assert(!pocketjs_net_http_client_core_deinit(log->core));
     assert(pocketjs_net_http_client_core_init(log->storage, log->config,
-                                               &reinitialized) ==
+                                              &reinitialized) ==
            POCKETJS_NET_HTTP_CLIENT_START_BUSY);
     assert(reinitialized == NULL);
     ++log->reentrancy_calls;
@@ -432,8 +430,9 @@ typedef struct {
   uint64_t now;
 } fixture_t;
 
-static void fixture_init_with_options(fixture_t *fixture, size_t limit,
-                                      bool allow_https) {
+static void fixture_init_with_options_and_reuse(fixture_t *fixture,
+                                                size_t limit, bool allow_https,
+                                                bool enable_reuse) {
   memset(fixture, 0, sizeof(*fixture));
   fixture->now = 1000000U;
   fixture->permissions.allow_hostname = true;
@@ -450,6 +449,7 @@ static void fixture_init_with_options(fixture_t *fixture, size_t limit,
       .idle_timeout_us = 100000U,
       .total_timeout_us = 1000000U,
       .allow_https = allow_https,
+      .enable_connection_reuse = enable_reuse,
       .response_header_bytes_limit = limit,
   };
   assert(pocketjs_net_http_client_core_init(&fixture->storage, &fixture->config,
@@ -458,6 +458,15 @@ static void fixture_init_with_options(fixture_t *fixture, size_t limit,
   fixture->permissions.core = fixture->core;
   fixture->permissions.storage = &fixture->storage;
   fixture->permissions.config = &fixture->config;
+}
+
+static void fixture_init_with_options(fixture_t *fixture, size_t limit,
+                                      bool allow_https) {
+  fixture_init_with_options_and_reuse(fixture, limit, allow_https, false);
+}
+
+static void fixture_init_with_reuse(fixture_t *fixture, bool allow_https) {
+  fixture_init_with_options_and_reuse(fixture, 0U, allow_https, true);
 }
 
 static void fixture_init_with_response_header_limit(fixture_t *fixture,
@@ -483,6 +492,27 @@ static pocketjs_net_http_client_request_t make_get(uint64_t token,
       .url = {.data = (const uint8_t *)url, .length = strlen(url)},
       .method = {.data = get, .length = sizeof(get) - 1U},
   };
+}
+
+static pocketjs_net_http_client_request_t
+make_tls_get(uint64_t token, const char *url, const char *hostname) {
+  static pocketjs_net_http_client_tls_policy_t policy;
+  pocketjs_net_http_client_request_t request = make_get(token, url);
+  policy = (pocketjs_net_http_client_tls_policy_t){
+      .server_name =
+          {
+              .data = (const uint8_t *)hostname,
+              .length = strlen(hostname),
+          },
+      .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
+      .client_certificate =
+          POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE,
+      .verification = POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL,
+      .revocation = POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT,
+  };
+  request.tls = &policy;
+  return request;
 }
 
 static pocketjs_net_http_client_event_t take_event(fixture_t *fixture,
@@ -605,20 +635,19 @@ start_streaming_request(fixture_t *fixture,
                        "POST /upload HTTP/1.1\r\n"));
   if (request->streaming_content_length_known) {
     char expected[64];
-    int length = snprintf(expected, sizeof(expected), "Content-Length: %llu\r\n",
-                          (unsigned long long)request->streaming_content_length);
+    int length =
+        snprintf(expected, sizeof(expected), "Content-Length: %llu\r\n",
+                 (unsigned long long)request->streaming_content_length);
     assert(length > 0 && (size_t)length < sizeof(expected));
-    assert(bytes_contain(fixture->fake.write_bytes,
-                         fixture->fake.write_length, expected));
-    assert(!bytes_contain(fixture->fake.write_bytes,
-                          fixture->fake.write_length,
+    assert(bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
+                         expected));
+    assert(!bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
                           "Transfer-Encoding: chunked\r\n"));
   } else {
-    assert(bytes_contain(fixture->fake.write_bytes,
-                         fixture->fake.write_length,
+    assert(bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
                          "Transfer-Encoding: chunked\r\n"));
-    assert(!bytes_contain(fixture->fake.write_bytes,
-                          fixture->fake.write_length, "Content-Length:"));
+    assert(!bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
+                          "Content-Length:"));
   }
   fake_complete_write(&fixture->fake);
   pump(fixture);
@@ -649,8 +678,7 @@ static void retire_request_body_pull(fixture_t *fixture,
 
 static void finish_empty_response(fixture_t *fixture) {
   assert(fixture->fake.active_kind == FAKE_READ);
-  fake_complete_read(&fixture->fake, "HTTP/1.1 204 No Content\r\n\r\n",
-                     false);
+  fake_complete_read(&fixture->fake, "HTTP/1.1 204 No Content\r\n\r\n", false);
   pump(fixture);
   pocketjs_net_http_client_event_t headers =
       take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -1115,8 +1143,7 @@ static void test_https_and_permissions_fail_before_io(void) {
   fixture_init_with_options(&tls, 0U, true);
   static const uint8_t server_name[] = "example.com";
   static const pocketjs_net_http_client_tls_policy_t tls_policy = {
-      .server_name = {.data = server_name,
-                      .length = sizeof(server_name) - 1U},
+      .server_name = {.data = server_name, .length = sizeof(server_name) - 1U},
       .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .client_certificate =
@@ -1165,8 +1192,7 @@ static void test_https_base_policy_is_fail_closed(void) {
   static const uint8_t server_name[] = "example.com";
   static const uint8_t wrong_name[] = "other.example";
   pocketjs_net_http_client_tls_policy_t policy = {
-      .server_name = {.data = server_name,
-                      .length = sizeof(server_name) - 1U},
+      .server_name = {.data = server_name, .length = sizeof(server_name) - 1U},
       .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .client_certificate =
@@ -1201,8 +1227,7 @@ static void assert_tls_error_mapping(
   fixture_init_with_options(&fixture, 0U, true);
   static const uint8_t server_name[] = "example.com";
   static const pocketjs_net_http_client_tls_policy_t policy = {
-      .server_name = {.data = server_name,
-                      .length = sizeof(server_name) - 1U},
+      .server_name = {.data = server_name, .length = sizeof(server_name) - 1U},
       .minimum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .maximum_version = POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2,
       .client_certificate =
@@ -1503,8 +1528,7 @@ static void test_read_bytes_with_eof_waits_for_full_consumption(void) {
   fixture_init(&fixture);
   connect_and_write_get(&fixture, 1U, "http://example.com:8080/x?q=1");
   fake_complete_read(&fixture.fake,
-                     "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-                     true);
+                     "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", true);
   pump(&fixture);
   pocketjs_net_http_client_event_t headers =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -1512,8 +1536,7 @@ static void test_read_bytes_with_eof_waits_for_full_consumption(void) {
 
   const uint8_t *bytes = NULL;
   size_t length = 0U;
-  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U,
-                                                          3U));
+  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 3U));
   pump(&fixture);
   pocketjs_net_http_client_event_t body =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
@@ -1524,8 +1547,7 @@ static void test_read_bytes_with_eof_waits_for_full_consumption(void) {
       fixture.core, body.detail.body.lease));
   retire_event(&fixture, body);
 
-  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U,
-                                                          2U));
+  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 2U));
   pump(&fixture);
   body = take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
   assert(pocketjs_net_http_client_core_body_lease_view(
@@ -1543,16 +1565,14 @@ static void test_read_bytes_with_eof_waits_for_full_consumption(void) {
 
   fixture_t eof_delimited;
   fixture_init(&eof_delimited);
-  connect_and_write_get(&eof_delimited, 1U,
-                        "http://example.com:8080/x?q=1");
-  fake_complete_read(&eof_delimited.fake, "HTTP/1.1 200 OK\r\n\r\nabc",
-                     true);
+  connect_and_write_get(&eof_delimited, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&eof_delimited.fake, "HTTP/1.1 200 OK\r\n\r\nabc", true);
   pump(&eof_delimited);
   headers = take_event(&eof_delimited,
                        POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
   retire_event(&eof_delimited, headers);
-  assert(pocketjs_net_http_client_core_grant_body_credit(eof_delimited.core,
-                                                          1U, 3U));
+  assert(pocketjs_net_http_client_core_grant_body_credit(eof_delimited.core, 1U,
+                                                         3U));
   pump(&eof_delimited);
   body = take_event(&eof_delimited, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
   assert(pocketjs_net_http_client_core_body_lease_view(
@@ -1564,8 +1584,8 @@ static void test_read_bytes_with_eof_waits_for_full_consumption(void) {
   assert(eof_delimited.fake.active_kind == FAKE_CLOSE);
   fake_complete_close(&eof_delimited.fake);
   pump(&eof_delimited);
-  complete = take_event(&eof_delimited,
-                        POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  complete =
+      take_event(&eof_delimited, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
   retire_event(&eof_delimited, complete);
 }
 
@@ -1582,8 +1602,7 @@ static void test_head_informational_and_304_are_bodyless(void) {
   connect_and_write_request(&head_fixture, &head_request,
                             "HEAD /x?q=1 HTTP/1.1\r\n");
   fake_complete_read(&head_fixture.fake,
-                     "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n",
-                     true);
+                     "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n", true);
   pump(&head_fixture);
   pocketjs_net_http_client_event_t headers = take_event(
       &head_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -1698,14 +1717,12 @@ static void test_streaming_chunked_upload_exceeds_64k(void) {
     if (index == 0U) {
       body_generation = pull.detail.request_body_pull.body_generation;
     } else {
-      assert(pull.detail.request_body_pull.body_generation ==
-             body_generation);
+      assert(pull.detail.request_body_pull.body_generation == body_generation);
     }
     assert(pull.detail.request_body_pull.pull_generation >
            previous_pull_generation);
     assert(pull.sequence > previous_event_sequence);
-    previous_pull_generation =
-        pull.detail.request_body_pull.pull_generation;
+    previous_pull_generation = pull.detail.request_body_pull.pull_generation;
     previous_event_sequence = pull.sequence;
     retire_request_body_pull(&fixture, pull);
     assert(pocketjs_net_http_client_core_submit_request_body_chunk(
@@ -1715,8 +1732,8 @@ static void test_streaming_chunked_upload_exceeds_64k(void) {
     assert(fixture.fake.write_length == sizeof(chunk) + 7U);
     assert(memcmp(fixture.fake.write_bytes, "800\r\n", 5U) == 0);
     assert(memcmp(fixture.fake.write_bytes + 5U, chunk, sizeof(chunk)) == 0);
-    assert(memcmp(fixture.fake.write_bytes + 5U + sizeof(chunk), "\r\n",
-                  2U) == 0);
+    assert(memcmp(fixture.fake.write_bytes + 5U + sizeof(chunk), "\r\n", 2U) ==
+           0);
     pocketjs_net_http_client_core_status_t status = get_status(&fixture);
     assert(!status.request_body_credit_outstanding);
     fake_complete_write(&fixture.fake);
@@ -1751,8 +1768,7 @@ static void test_streaming_chunked_upload_exceeds_64k(void) {
          end_pull.detail.request_body_pull.pull_generation);
   retire_request_body_pull(&fixture, next_body_pull);
   assert(pocketjs_net_http_client_core_submit_request_body_end(
-      fixture.core, 2U,
-      next_body_pull.detail.request_body_pull.body_generation,
+      fixture.core, 2U, next_body_pull.detail.request_body_pull.body_generation,
       next_body_pull.detail.request_body_pull.pull_generation));
   fake_complete_write(&fixture.fake);
   pump(&fixture);
@@ -1775,8 +1791,7 @@ static void test_streaming_credit_is_hostile_input_safe(void) {
 
   pocketjs_net_http_client_event_t first = take_request_body_pull(
       &fixture, POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES);
-  uint64_t body_generation =
-      first.detail.request_body_pull.body_generation;
+  uint64_t body_generation = first.detail.request_body_pull.body_generation;
   uint64_t first_pull_generation =
       first.detail.request_body_pull.pull_generation;
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
@@ -1955,8 +1970,7 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
       pocketjs_net_http_client_core_retire_event(aborted.core, pull.sequence));
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       aborted.core, 1U, body_generation, pull_generation, x, 1U));
-  complete_streaming_error(&aborted,
-                           POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
+  complete_streaming_error(&aborted, POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
 
   fixture_t timed_out;
   fixture_init(&timed_out);
@@ -1973,8 +1987,8 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
   assert(!get_status(&timed_out).request_body_credit_outstanding);
   assert(!pocketjs_net_http_client_core_submit_request_body_end(
       timed_out.core, 1U, body_generation, pull_generation));
-  complete_streaming_error(&timed_out,
-                           POCKETJS_NET_HTTP_CLIENT_ERROR_TIMED_OUT, 0);
+  complete_streaming_error(&timed_out, POCKETJS_NET_HTTP_CLIENT_ERROR_TIMED_OUT,
+                           0);
 
   fixture_t producer_error;
   fixture_init(&producer_error);
@@ -1990,8 +2004,7 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
   assert(!pocketjs_net_http_client_core_submit_request_body_error(
       producer_error.core, 1U, body_generation, pull_generation, 99));
   complete_streaming_error(&producer_error,
-                           POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
-                           31337);
+                           POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY, 31337);
 
   fixture_t teardown;
   fixture_init(&teardown);
@@ -2004,11 +2017,11 @@ static void test_streaming_cancel_timeout_error_and_teardown(void) {
   retire_request_body_pull(&teardown, pull);
   ++teardown.now;
   assert(pocketjs_net_http_client_core_begin_shutdown(teardown.core,
-                                                       teardown.now));
+                                                      teardown.now));
   assert(!pocketjs_net_http_client_core_submit_request_body_chunk(
       teardown.core, 1U, body_generation, pull_generation, x, 1U));
-  complete_streaming_error(&teardown,
-                           POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
+  complete_streaming_error(&teardown, POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED,
+                           0);
   assert(pocketjs_net_http_client_core_is_quiescent(teardown.core));
   assert(pocketjs_net_http_client_core_deinit(teardown.core));
 }
@@ -2076,8 +2089,7 @@ static void test_request_body_mode_validation(void) {
                                              fixture.now) ==
          POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
   request.streaming_content_length = 0U;
-  request.body_kind =
-      (pocketjs_net_http_client_request_body_kind_t)UINT32_MAX;
+  request.body_kind = (pocketjs_net_http_client_request_body_kind_t)UINT32_MAX;
   assert(pocketjs_net_http_client_core_start(fixture.core, &request,
                                              fixture.now) ==
          POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT);
@@ -2091,18 +2103,17 @@ static void test_idle_stale_read_is_cleanup_only(void) {
   fixture.fake.read_length = 1U;
   fixture.fake.read_lease_generation = 1U;
   fixture.fake.read_lease_active = true;
-  fixture.fake.completion =
-      (pocketjs_net_http_client_transport_completion_t){
-          .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
-          .operation_token = 777U,
-          .detail.read =
-              {
-                  .connection = {.slot = 9U, .generation = 9U},
-                  .lease = {.slot = 0U, .generation = 1U},
-                  .byte_count = 1U,
-                  .eof = false,
-              },
-      };
+  fixture.fake.completion = (pocketjs_net_http_client_transport_completion_t){
+      .type = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_READ,
+      .operation_token = 777U,
+      .detail.read =
+          {
+              .connection = {.slot = 9U, .generation = 9U},
+              .lease = {.slot = 0U, .generation = 1U},
+              .byte_count = 1U,
+              .eof = false,
+          },
+  };
   fixture.fake.completion_queued = true;
   pump(&fixture);
   assert(fixture.fake.releases == 1U);
@@ -2132,8 +2143,8 @@ static void test_close_error_preserves_success_and_explicit_teardown(void) {
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
   retire_event(&fixture, headers);
   assert(fixture.fake.active_kind == FAKE_CLOSE);
-  fake_queue_error(&fixture.fake,
-                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO, 77);
+  fake_queue_error(&fixture.fake, POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO,
+                   77);
   pump(&fixture);
   pocketjs_net_http_client_event_t complete =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
@@ -2168,8 +2179,8 @@ static void test_close_error_preserves_protocol_failure(void) {
                      false);
   pump(&fixture);
   assert(fixture.fake.active_kind == FAKE_CLOSE);
-  fake_queue_error(&fixture.fake,
-                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO, 88);
+  fake_queue_error(&fixture.fake, POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO,
+                   88);
   pump(&fixture);
   pocketjs_net_http_client_event_t error =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
@@ -2184,12 +2195,11 @@ static void test_close_error_preserves_protocol_failure(void) {
 static void test_close_admission_does_not_replace_terminals(void) {
   fixture_t success_fixture;
   fixture_init(&success_fixture);
-  connect_and_write_get(&success_fixture, 1U,
-                        "http://example.com:8080/x?q=1");
+  connect_and_write_get(&success_fixture, 1U, "http://example.com:8080/x?q=1");
   success_fixture.fake.start_failure[FAKE_CLOSE] =
       POCKETJS_NET_HTTP_CLIENT_TRANSPORT_BUSY;
-  fake_complete_read(&success_fixture.fake,
-                     "HTTP/1.1 204 No Content\r\n\r\n", false);
+  fake_complete_read(&success_fixture.fake, "HTTP/1.1 204 No Content\r\n\r\n",
+                     false);
   pump(&success_fixture);
   pocketjs_net_http_client_event_t headers = take_event(
       &success_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -2204,8 +2214,7 @@ static void test_close_admission_does_not_replace_terminals(void) {
 
   fixture_t error_fixture;
   fixture_init(&error_fixture);
-  connect_and_write_get(&error_fixture, 1U,
-                        "http://example.com:8080/x?q=1");
+  connect_and_write_get(&error_fixture, 1U, "http://example.com:8080/x?q=1");
   error_fixture.fake.start_failure[FAKE_CLOSE] =
       POCKETJS_NET_HTTP_CLIENT_TRANSPORT_BUSY;
   fake_complete_read(&error_fixture.fake,
@@ -2233,8 +2242,7 @@ static void test_close_timeout_preserves_success(void) {
   retire_event(&fixture, headers);
   assert(fixture.fake.active_kind == FAKE_CLOSE);
   fixture.now += 1000001U;
-  assert(pocketjs_net_http_client_core_pump(fixture.core, fixture.now, 8U,
-                                            8U));
+  assert(pocketjs_net_http_client_core_pump(fixture.core, fixture.now, 8U, 8U));
   assert(fixture.fake.cancels == 1U);
   pocketjs_net_http_client_event_t complete =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
@@ -2249,16 +2257,14 @@ static void test_read_lease_release_failure_is_auditable(void) {
   fixture_init(&fixture);
   connect_and_write_get(&fixture, 1U, "http://example.com:8080/x?q=1");
   fake_complete_read(&fixture.fake,
-                     "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx",
-                     false);
+                     "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx", false);
   pump(&fixture);
   pocketjs_net_http_client_event_t headers =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
   retire_event(&fixture, headers);
   fixture.fake.lease_release_failure =
       POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
-  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U,
-                                                          1U));
+  assert(pocketjs_net_http_client_core_grant_body_credit(fixture.core, 1U, 1U));
   pump(&fixture);
   pocketjs_net_http_client_event_t body =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
@@ -2269,8 +2275,7 @@ static void test_read_lease_release_failure_is_auditable(void) {
   assert(pocketjs_net_http_client_core_release_body_lease(
       fixture.core, body.detail.body.lease));
   retire_event(&fixture, body);
-  fixture.fake.lease_release_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK;
+  fixture.fake.lease_release_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK;
   pump(&fixture);
   status = get_status(&fixture);
   assert(status.transport_read_leases_owned == 0U);
@@ -2372,8 +2377,7 @@ static void test_unexpected_read_payload_is_released_in_every_phase(void) {
 static void test_malformed_read_releases_and_view_failure_retains(void) {
   fixture_t malformed;
   fixture_init(&malformed);
-  connect_and_write_get(&malformed, 1U,
-                        "http://example.com:8080/x?q=1");
+  connect_and_write_get(&malformed, 1U, "http://example.com:8080/x?q=1");
   malformed.fake.read_bytes[0] = 'x';
   malformed.fake.read_length = 1U;
   ++malformed.fake.read_lease_generation;
@@ -2405,8 +2409,7 @@ static void test_malformed_read_releases_and_view_failure_retains(void) {
   fixture_t bad_view;
   fixture_init(&bad_view);
   connect_and_write_get(&bad_view, 1U, "http://example.com:8080/x?q=1");
-  bad_view.fake.lease_view_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_INVALID;
+  bad_view.fake.lease_view_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_INVALID;
   bad_view.fake.lease_release_failure =
       POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
   fake_complete_read(&bad_view.fake, "x", false);
@@ -2415,8 +2418,7 @@ static void test_malformed_read_releases_and_view_failure_retains(void) {
   assert(status.transport_read_leases_owned == 1U);
   assert((status.poison_flags &
           POCKETJS_NET_HTTP_CLIENT_POISON_READ_LEASE_RELEASE) != 0U);
-  bad_view.fake.lease_release_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK;
+  bad_view.fake.lease_release_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK;
   pump(&bad_view);
   status = get_status(&bad_view);
   assert(status.transport_read_leases_owned == 0U);
@@ -2439,8 +2441,7 @@ static void test_completion_retire_failure_is_poisoned_and_retried(void) {
          POCKETJS_NET_HTTP_CLIENT_START_OK);
   uint32_t address = 0x0100007fU;
   fake_complete_resolve(&fixture.fake, &address, 1U);
-  fixture.fake.retire_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
+  fixture.fake.retire_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
   pump(&fixture);
   pocketjs_net_http_client_core_status_t status = get_status(&fixture);
   assert(status.completion_retire_pending);
@@ -2459,8 +2460,7 @@ static void test_completion_retire_failure_is_poisoned_and_retried(void) {
 static void test_idle_transport_faults_do_not_publish(void) {
   fixture_t pump_failure;
   fixture_init(&pump_failure);
-  pump_failure.fake.pump_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
+  pump_failure.fake.pump_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
   pump(&pump_failure);
   pocketjs_net_http_client_core_status_t status = get_status(&pump_failure);
   assert((status.poison_flags &
@@ -2469,8 +2469,7 @@ static void test_idle_transport_faults_do_not_publish(void) {
 
   fixture_t take_failure;
   fixture_init(&take_failure);
-  take_failure.fake.take_failure =
-      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
+  take_failure.fake.take_failure = POCKETJS_NET_HTTP_CLIENT_TRANSPORT_FAILED;
   pump(&take_failure);
   status = get_status(&take_failure);
   assert((status.poison_flags &
@@ -2538,10 +2537,8 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
   fixture_init(&healthy);
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       healthy.core, 1U));
-  connect_and_write_get(&healthy, 1U,
-                        "http://example.com:8080/x?q=1");
-  fake_complete_read(&healthy.fake, "HTTP/1.1 204 No Content\r\n\r\n",
-                     false);
+  connect_and_write_get(&healthy, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&healthy.fake, "HTTP/1.1 204 No Content\r\n\r\n", false);
   pump(&healthy);
   pocketjs_net_http_client_event_t headers =
       take_event(&healthy, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -2551,7 +2548,7 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
   pocketjs_net_http_client_event_t complete =
       take_event(&healthy, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
   assert(pocketjs_net_http_client_core_begin_shutdown(healthy.core,
-                                                       ++healthy.now));
+                                                      ++healthy.now));
   assert(
       pocketjs_net_http_client_core_confirm_transport_shutdown(healthy.core));
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
@@ -2562,8 +2559,7 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
 
   fixture_t body_fixture;
   fixture_init(&body_fixture);
-  connect_and_write_get(&body_fixture, 1U,
-                        "http://example.com:8080/x?q=1");
+  connect_and_write_get(&body_fixture, 1U, "http://example.com:8080/x?q=1");
   fake_complete_read(&body_fixture.fake,
                      "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx", false);
   pump(&body_fixture);
@@ -2571,7 +2567,7 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
                        POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
   retire_event(&body_fixture, headers);
   assert(pocketjs_net_http_client_core_grant_body_credit(body_fixture.core, 1U,
-                                                          1U));
+                                                         1U));
   pump(&body_fixture);
   pocketjs_net_http_client_event_t body =
       take_event(&body_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_BODY);
@@ -2586,7 +2582,7 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       body_fixture.core, body.sequence));
   assert(pocketjs_net_http_client_core_begin_shutdown(body_fixture.core,
-                                                       ++body_fixture.now));
+                                                      ++body_fixture.now));
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       body_fixture.core, body.sequence));
   assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
@@ -2614,7 +2610,7 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
       pull_fixture.core, pull.sequence));
   assert(get_status(&pull_fixture).poisoned);
   assert(pocketjs_net_http_client_core_begin_shutdown(pull_fixture.core,
-                                                       ++pull_fixture.now));
+                                                      ++pull_fixture.now));
   assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
       pull_fixture.core));
   assert(pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
@@ -2628,10 +2624,9 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
 
   fixture_t terminal_fixture;
   fixture_init(&terminal_fixture);
-  connect_and_write_get(&terminal_fixture, 1U,
-                        "http://example.com:8080/x?q=1");
-  fake_complete_read(&terminal_fixture.fake,
-                     "HTTP/1.1 204 No Content\r\n\r\n", false);
+  connect_and_write_get(&terminal_fixture, 1U, "http://example.com:8080/x?q=1");
+  fake_complete_read(&terminal_fixture.fake, "HTTP/1.1 204 No Content\r\n\r\n",
+                     false);
   pump(&terminal_fixture);
   headers = take_event(&terminal_fixture,
                        POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
@@ -2642,17 +2637,191 @@ static void test_poison_shutdown_can_abandon_exact_host_event(void) {
   status = get_status(&terminal_fixture);
   assert(status.poisoned && status.event_outstanding);
   assert(pocketjs_net_http_client_core_begin_shutdown(terminal_fixture.core,
-                                                       ++terminal_fixture.now));
+                                                      ++terminal_fixture.now));
   assert(pocketjs_net_http_client_core_confirm_transport_shutdown(
       terminal_fixture.core));
   assert(!pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       terminal_fixture.core, status.operation_token));
-  complete = take_event(&terminal_fixture,
-                        POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  complete =
+      take_event(&terminal_fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
   assert(pocketjs_net_http_client_core_abandon_event_after_transport_shutdown(
       terminal_fixture.core, complete.sequence));
   assert(pocketjs_net_http_client_core_is_quiescent(terminal_fixture.core));
   assert(pocketjs_net_http_client_core_deinit(terminal_fixture.core));
+}
+
+static void start_first_reusable_get(fixture_t *fixture, uint64_t token,
+                                     const char *url,
+                                     const char *expected_target) {
+  const pocketjs_net_http_client_request_t request = make_get(token, url);
+  assert(pocketjs_net_http_client_core_start(fixture->core, &request,
+                                             fixture->now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(fixture->fake.active_kind == FAKE_RESOLVE);
+  const uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&fixture->fake, &address, 1U);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_CONNECT);
+  fake_complete_connect(&fixture->fake);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_WRITE);
+  assert(bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
+                       expected_target));
+  assert(!bytes_contain(fixture->fake.write_bytes, fixture->fake.write_length,
+                        "Connection: close\r\n"));
+  fake_complete_write(&fixture->fake);
+  pump(fixture);
+  assert(fixture->fake.active_kind == FAKE_READ);
+}
+
+static void cache_empty_response(fixture_t *fixture) {
+  fake_complete_read(&fixture->fake, "HTTP/1.1 204 No Content\r\n\r\n", false);
+  pump(fixture);
+  const pocketjs_net_http_client_event_t headers =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(fixture, headers);
+  assert(fixture->fake.active_kind == FAKE_NONE);
+  const pocketjs_net_http_client_event_t complete =
+      take_event(fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  assert(get_status(fixture).connection_reusable);
+  retire_event(fixture, complete);
+  const pocketjs_net_http_client_core_status_t status = get_status(fixture);
+  assert(status.connection_owned && status.connection_reusable &&
+         !status.request_active);
+}
+
+static void test_connection_reuse_is_same_origin_and_bounded(void) {
+  fixture_t fixture;
+  fixture_init_with_reuse(&fixture, false);
+  start_first_reusable_get(&fixture, 1U, "http://example.com:8080/one",
+                           "GET /one HTTP/1.1\r\n");
+  cache_empty_response(&fixture);
+  assert(fixture.fake.starts[FAKE_RESOLVE] == 1U);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+
+  const pocketjs_net_http_client_request_t second =
+      make_get(2U, "http://example.com:8080/two");
+  assert(
+      pocketjs_net_http_client_core_start(fixture.core, &second, fixture.now) ==
+      POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(fixture.fake.starts[FAKE_RESOLVE] == 1U);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+  assert(fixture.permissions.hostname_calls == 2U);
+  assert(fixture.permissions.numeric_calls == 2U);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /two HTTP/1.1\r\n"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Connection: close\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  fake_complete_read(
+      &fixture.fake,
+      "HTTP/1.1 204 No Content\r\nConnection: keep-alive, close\r\n\r\n",
+      false);
+  pump(&fixture);
+  const pocketjs_net_http_client_event_t headers =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_RESPONSE_HEADERS);
+  retire_event(&fixture, headers);
+  assert(fixture.fake.active_kind == FAKE_CLOSE);
+  fake_complete_close(&fixture.fake);
+  pump(&fixture);
+  const pocketjs_net_http_client_event_t complete =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_COMPLETE);
+  retire_event(&fixture, complete);
+  assert(!get_status(&fixture).connection_owned);
+}
+
+static void test_https_connection_reuse_preserves_tls_origin(void) {
+  fixture_t fixture;
+  fixture_init_with_reuse(&fixture, true);
+  pocketjs_net_http_client_request_t first =
+      make_tls_get(1U, "https://example.com/one", "example.com");
+  assert(
+      pocketjs_net_http_client_core_start(fixture.core, &first, fixture.now) ==
+      POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(fixture.fake.active_kind == FAKE_RESOLVE);
+  const uint32_t address = 0x0100007fU;
+  fake_complete_resolve(&fixture.fake, &address, 1U);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_CONNECT);
+  assert(fixture.fake.connect_tls);
+  assert(strcmp(fixture.fake.connect_hostname, "example.com") == 0);
+  fake_complete_connect(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /one HTTP/1.1\r\n"));
+  assert(!bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                        "Connection: close\r\n"));
+  fake_complete_write(&fixture.fake);
+  pump(&fixture);
+  cache_empty_response(&fixture);
+
+  pocketjs_net_http_client_request_t second =
+      make_tls_get(2U, "https://example.com/two", "example.com");
+  assert(
+      pocketjs_net_http_client_core_start(fixture.core, &second, fixture.now) ==
+      POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+  assert(fixture.fake.starts[FAKE_RESOLVE] == 1U);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+  assert(fixture.permissions.hostname_calls == 2U);
+  assert(fixture.permissions.numeric_calls == 2U);
+  assert(bytes_contain(fixture.fake.write_bytes, fixture.fake.write_length,
+                       "GET /two HTTP/1.1\r\n"));
+}
+
+static void test_connection_pool_replaces_origin_and_closes_on_shutdown(void) {
+  fixture_t replacement;
+  fixture_init_with_reuse(&replacement, false);
+  start_first_reusable_get(&replacement, 1U, "http://example.com/one",
+                           "GET /one HTTP/1.1\r\n");
+  cache_empty_response(&replacement);
+
+  const pocketjs_net_http_client_request_t other =
+      make_get(2U, "http://other.example/two");
+  assert(pocketjs_net_http_client_core_start(replacement.core, &other,
+                                             replacement.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  assert(replacement.fake.active_kind == FAKE_CLOSE);
+  assert(replacement.permissions.hostname_calls == 1U);
+  fake_complete_close(&replacement.fake);
+  pump(&replacement);
+  assert(replacement.fake.active_kind == FAKE_RESOLVE);
+  assert(strcmp(replacement.fake.resolve_hostname, "other.example") == 0);
+  assert(replacement.permissions.hostname_calls == 2U);
+
+  fixture_t shutdown;
+  fixture_init_with_reuse(&shutdown, false);
+  start_first_reusable_get(&shutdown, 1U, "http://example.com/one",
+                           "GET /one HTTP/1.1\r\n");
+  cache_empty_response(&shutdown);
+  assert(pocketjs_net_http_client_core_begin_shutdown(shutdown.core,
+                                                      ++shutdown.now));
+  assert(shutdown.fake.active_kind == FAKE_CLOSE);
+  pocketjs_net_http_client_event_t event;
+  assert(!pocketjs_net_http_client_core_take_event(shutdown.core, &event));
+  fake_complete_close(&shutdown.fake);
+  pump(&shutdown);
+  assert(pocketjs_net_http_client_core_is_quiescent(shutdown.core));
+  assert(!pocketjs_net_http_client_core_take_event(shutdown.core, &event));
+  assert(pocketjs_net_http_client_core_deinit(shutdown.core));
+
+  fixture_t expired;
+  fixture_init_with_reuse(&expired, false);
+  start_first_reusable_get(&expired, 1U, "http://example.com/one",
+                           "GET /one HTTP/1.1\r\n");
+  cache_empty_response(&expired);
+  expired.now += expired.config.idle_timeout_us;
+  pump(&expired);
+  assert(expired.fake.active_kind == FAKE_CLOSE);
+  assert(!get_status(&expired).connection_reusable);
+  assert(!pocketjs_net_http_client_core_take_event(expired.core, &event));
+  fake_complete_close(&expired.fake);
+  pump(&expired);
+  assert(!get_status(&expired).connection_owned);
+  assert(!pocketjs_net_http_client_core_take_event(expired.core, &event));
 }
 
 static void test_invalid_inputs(void) {
@@ -2736,6 +2905,9 @@ int main(void) {
   test_completion_only_pump_budget();
   test_empty_pump_budget_is_rejected_without_poison();
   test_poison_shutdown_can_abandon_exact_host_event();
+  test_connection_reuse_is_same_origin_and_bounded();
+  test_https_connection_reuse_preserves_tls_origin();
+  test_connection_pool_replaces_origin_and_closes_on_shutdown();
   test_invalid_inputs();
   puts("http client core host tests passed");
   return 0;

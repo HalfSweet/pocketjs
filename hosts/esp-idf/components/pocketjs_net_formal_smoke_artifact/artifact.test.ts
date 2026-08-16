@@ -77,6 +77,10 @@ describe("ESP formal network smoke artifact", () => {
       networkV1FeatureIdsFromBuildPlan(plan.features),
     ));
     expect(metadata.featureIds).toEqual([0x0100]);
+    expect(metadata.providers).toEqual({
+      httpClientBackendId: "pocketjs.net.http-client-core.v1.experimental",
+      netDriverId: "pocketjs.net.esp-idf.transport.v1.experimental",
+    });
     expect(plan.network?.policy.connect).toEqual([{
       protocol: "http",
       host: "172.16.10.126",
@@ -84,6 +88,10 @@ describe("ESP formal network smoke artifact", () => {
     }]);
     expect(metadata.endpoint.origin).toBe("http://172.16.10.126:8088");
     expect(metadataSource).toContain('asm("_binary_factory_js_bin_start")');
+    expect(metadataSource).toContain(
+      "pocketjs_net_formal_smoke_http_client_backend_id",
+    );
+    expect(metadataSource).toContain("pocketjs_net_formal_smoke_net_driver_id");
     expect(metadataSource).not.toContain("_binary_generated_factory_js_bin_start");
 
     const storage = new Uint8Array(binary);

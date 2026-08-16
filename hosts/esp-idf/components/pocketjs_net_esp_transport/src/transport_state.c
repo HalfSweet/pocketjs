@@ -153,7 +153,8 @@ bool pocketjs_net_operation_cancel_closes_connection(
     pocketjs_net_transport_operation_kind_t kind) {
   return kind == POCKETJS_NET_TRANSPORT_OPERATION_CONNECT ||
          kind == POCKETJS_NET_TRANSPORT_OPERATION_READ ||
-         kind == POCKETJS_NET_TRANSPORT_OPERATION_WRITE;
+         kind == POCKETJS_NET_TRANSPORT_OPERATION_WRITE ||
+         kind == POCKETJS_NET_TRANSPORT_OPERATION_CLOSE;
 }
 
 static bool tls_code_matches(int actual, int expected) {
@@ -191,6 +192,18 @@ pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
     return POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT;
   }
   return POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED;
+}
+
+pocketjs_net_tls_close_notify_outcome_t
+pocketjs_net_classify_tls_close_notify(int result, int want_read,
+                                       int want_write) {
+  if (result == 0) {
+    return POCKETJS_NET_TLS_CLOSE_NOTIFY_COMPLETE;
+  }
+  if (result == want_read || result == want_write) {
+    return POCKETJS_NET_TLS_CLOSE_NOTIFY_RETRY;
+  }
+  return POCKETJS_NET_TLS_CLOSE_NOTIFY_FAILED;
 }
 
 size_t pocketjs_net_round_robin_next(size_t current, size_t capacity) {

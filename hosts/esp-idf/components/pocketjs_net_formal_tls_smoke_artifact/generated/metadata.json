@@ -44,6 +44,11 @@
     256,
     257
   ],
+  "providers": {
+    "httpClientBackendId": "pocketjs.net.http-client-core.v1.experimental",
+    "netDriverId": "pocketjs.net.esp-idf.transport.v1.experimental",
+    "tlsProviderId": "pocketjs.net.esp-idf.esp-tls.v1.experimental"
+  },
   "factory": {
     "sourceBytes": 470917,
     "storageBytes": 470918,

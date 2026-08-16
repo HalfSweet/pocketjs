@@ -43,8 +43,11 @@ native subsystem therefore keeps the dedicated owner task in cleanup instead
 of returning with a dangling wake or permission context.
 
 This artifact validates the formal plaintext request path, default redirect
-mode admission, and board scheduler integration. It does not satisfy public
-HTTP admission: redirect URL differential conformance, connection reuse,
-descriptor aggregation, complete resource accounting, DNS candidate
-completeness, and the full hardware/conformance matrix remain required before
-the compiler or stock target registry can expose `network.http.client`.
+mode admission, one-entry-per-slot connection reuse, and board scheduler
+integration. Its generated metadata carries the exact backend and network
+driver selection from the verified Build Plan, and the runner passes those
+values into fail-closed runtime admission. It does not satisfy public HTTP
+admission: redirect URL differential conformance, executable full descriptor
+aggregation, complete resource accounting, DNS candidate completeness, and the
+full hardware/conformance matrix remain required before the compiler or stock
+target registry can expose `network.http.client`.

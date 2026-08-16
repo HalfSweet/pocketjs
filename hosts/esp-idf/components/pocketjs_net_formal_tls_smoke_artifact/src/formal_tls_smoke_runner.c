@@ -77,6 +77,7 @@ valid_config(const pocketjs_net_formal_tls_smoke_run_config_t *config,
              pocketjs_net_formal_tls_smoke_run_result_t *out_result) {
   const pocketjs_net_esp_runtime_descriptor_t *descriptor =
       pocketjs_net_esp_runtime_descriptor();
+  size_t required_native_bytes = 0U;
   return config != NULL && out_result != NULL &&
          config->configured_origin != NULL &&
          strcmp(config->configured_origin,
@@ -86,8 +87,16 @@ valid_config(const pocketjs_net_formal_tls_smoke_run_config_t *config,
          config->wall_clock_trusted != NULL && descriptor != NULL &&
          !descriptor->advertises_public_capability &&
          descriptor->https_explicit_opt_in &&
-         descriptor->exact_host_tls_profile &&
-         !descriptor->distinct_tls_errors &&
+         descriptor->exact_host_tls_profile && descriptor->connection_reuse &&
+         descriptor->bounded_connection_pool &&
+         descriptor->max_cached_connections == descriptor->max_operations &&
+         descriptor->pocketjs_owned_native_buffer_floor_enforced &&
+         pocketjs_net_esp_runtime_required_native_buffer_bytes(
+             FORMAL_TLS_SMOKE_MAX_OPERATIONS, &required_native_bytes) &&
+         required_native_bytes <= 524288U && !descriptor->distinct_tls_errors &&
+         descriptor->tls_close_notify &&
+         descriptor->tls_close_notify_uses_operation_deadline &&
+         !descriptor->tls_close_notify_waits_for_peer &&
          descriptor->tls_provider_id != NULL &&
          strcmp(descriptor->tls_provider_id,
                 pocketjs_net_formal_tls_smoke_tls_provider_id) == 0 &&
@@ -242,6 +251,17 @@ esp_err_t pocketjs_net_formal_tls_smoke_run(
       .runtime_generation = FORMAL_TLS_SMOKE_RUNTIME_GENERATION,
       .feature_ids = pocketjs_net_formal_tls_smoke_feature_ids,
       .feature_count = pocketjs_net_formal_tls_smoke_feature_count,
+      .providers =
+          {
+              .http_client_backend_id =
+                  pocketjs_net_formal_tls_smoke_http_client_backend_id,
+              .net_driver_id = pocketjs_net_formal_tls_smoke_net_driver_id,
+              .http_client_tls_source =
+                  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_PROVIDER,
+              .http_client_tls_id =
+                  pocketjs_net_formal_tls_smoke_tls_provider_id,
+          },
+      .admission = POCKETJS_NET_ESP_RUNTIME_ADMISSION_TEST_ONLY,
       .max_operations = FORMAL_TLS_SMOKE_MAX_OPERATIONS,
       .limits =
           {
@@ -249,7 +269,7 @@ esp_err_t pocketjs_net_formal_tls_smoke_run(
               .header_bytes = {4096U, 4096U, 8192U},
               .max_body_chunk_bytes = {512U, 2048U, 2048U},
               .max_operations = {1U, 1U, 1U},
-              .native_buffer_bytes = {65536U, 65536U, 524288U},
+              .native_buffer_bytes = {65536U, 524288U, 524288U},
           },
       .connect_timeout_us = FORMAL_TLS_SMOKE_CONNECT_TIMEOUT_US,
       .headers_timeout_us = FORMAL_TLS_SMOKE_HEADERS_TIMEOUT_US,

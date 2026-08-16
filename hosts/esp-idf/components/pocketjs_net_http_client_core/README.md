@@ -20,11 +20,19 @@ do not allocate.
 Only canonical ASCII DNS names and canonical dotted-decimal IPv4 literals are
 accepted. User information, fragments, IPv6, non-canonical numeric hosts,
 invalid percent escapes, and non-canonical ports are rejected before I/O.
-Requests use origin-form, add `Connection: close` and
-`Accept-Encoding: identity`, and reject caller-controlled connection,
-framing, proxy, upgrade, and content-coding fields. GET and HEAD request bodies
-are rejected. Every accepted request opens one connection and closes it after
-the response; there is no pooling or reuse.
+Requests use origin-form, add `Accept-Encoding: identity`, and reject
+caller-controlled connection, framing, proxy, upgrade, and content-coding
+fields. GET and HEAD request bodies are rejected. With
+`enable_connection_reuse=false`, every request also adds `Connection: close`
+and closes after the response. With reuse enabled, one Core retains at most one
+HTTP/1.1 connection after a completely parsed, self-delimited response that did
+not carry a `Connection: close` token. There is no pipelining. A later request
+reuses that connection only for the same canonical scheme, DNS name, port, and
+selected numeric address, after repeating both permission checks. HTTP/1.0,
+EOF-delimited responses, an explicit close token, a changed origin, redirect,
+error, cancellation, timeout, or shutdown closes the connection first. The
+same configured idle timeout also bounds how long an unused cached connection
+is retained.
 
 Unknown-length request streams use strict HTTP/1.1 chunked coding: one
 lowercase hexadecimal size, CRLF, the credited non-empty payload, and CRLF per
@@ -112,7 +120,8 @@ and strips `Authorization`, `Proxy-Authorization`, and `Cookie` across origins.
 A fixed body can be replayed for 307/308. **A consumed streaming body is never
 buffered or replayed; a redirect that must preserve it fails with
 `invalid_state` before the next hop.** Redirect response bodies and trailers
-are abandoned only because `Connection: close` prevents reuse.
+are abandoned by explicitly closing the current connection before the next
+hop; they are never placed into the one-entry reuse cache.
 
 Redirect resolution currently accepts bounded ASCII HTTP(S) references,
 including absolute, scheme-relative, root-relative, path-relative,
@@ -161,8 +170,8 @@ The current Core additionally has these gaps:
   admission matrix remain incomplete even though the formal runtime smoke
   artifacts now exercise this Core on both targets.
 
-Until those gaps are resolved, this component must not enter a formal Build
-Plan and must not advertise `network.http.client` or
+Until those gaps are resolved, this component must not enter a production or
+publicly admitted Build Plan and must not advertise `network.http.client` or
 `network.http.client.tls`.
 
 ## Verification
@@ -188,6 +197,11 @@ underflow and overflow, abort, timeout, producer error, shutdown, and
 generation non-reuse. It is compiled with `-Wall -Wextra -Werror` plus
 AddressSanitizer and UndefinedBehaviorSanitizer and is also checked with Clang
 Static Analyzer.
+
+Reuse cases cover same-origin plaintext and TLS requests without another DNS
+or connect operation, permission rechecks on every request, close-token
+handling, changed-origin replacement, and idle cached-connection shutdown.
+The descriptor exposes a bounded one-entry cache per Core.
 
 `test_apps/build_smoke` links the Core, wire codec, and real ESP transport under
 the pinned ESP-IDF v6.0.2 tree. It builds for both `esp32s3` and `esp32p4` with

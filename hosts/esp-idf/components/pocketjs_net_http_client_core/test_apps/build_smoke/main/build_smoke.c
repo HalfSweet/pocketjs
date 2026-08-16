@@ -32,6 +32,9 @@ void app_main(void) {
   assert(descriptor->headers_first);
   assert(descriptor->explicit_body_credit);
   assert(descriptor->explicit_body_lease);
+  assert(descriptor->connection_reuse);
+  assert(descriptor->bounded_connection_pool);
+  assert(descriptor->max_cached_connections == 1U);
   assert(descriptor->redirects_followed);
   assert(descriptor->redirect_manual);
   assert(descriptor->redirect_error);

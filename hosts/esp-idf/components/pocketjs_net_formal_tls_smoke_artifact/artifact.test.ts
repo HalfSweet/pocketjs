@@ -130,6 +130,11 @@ describe("ESP formal TLS network smoke artifact", () => {
       networkV1FeatureIdsFromBuildPlan(plan.features),
     ));
     expect(metadata.featureIds).toEqual([0x0100, 0x0101]);
+    expect(metadata.providers).toEqual({
+      httpClientBackendId: "pocketjs.net.http-client-core.v1.experimental",
+      netDriverId: "pocketjs.net.esp-idf.transport.v1.experimental",
+      tlsProviderId: "pocketjs.net.esp-idf.esp-tls.v1.experimental",
+    });
     expect(plan.network?.policy.connect).toEqual([{
       protocol: "https",
       host: "pocketjs.test",
@@ -161,6 +166,12 @@ describe("ESP formal TLS network smoke artifact", () => {
       .toBe(EXPECTED_CA_DER_SHA256);
     expect(metadata.tls.caPemBytes).toBe(Buffer.byteLength(pem));
     expect(metadataSource).toContain("pocketjs_net_formal_tls_smoke_ca_pem");
+    expect(metadataSource).toContain(
+      "pocketjs_net_formal_tls_smoke_http_client_backend_id",
+    );
+    expect(metadataSource).toContain(
+      "pocketjs_net_formal_tls_smoke_net_driver_id",
+    );
     expect(metadataSource).toContain(EXPECTED_CA_DER_SHA256);
 
     const storage = new Uint8Array(binary);

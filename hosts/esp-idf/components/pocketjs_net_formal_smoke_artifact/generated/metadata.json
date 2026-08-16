@@ -43,6 +43,10 @@
   "featureIds": [
     256
   ],
+  "providers": {
+    "httpClientBackendId": "pocketjs.net.http-client-core.v1.experimental",
+    "netDriverId": "pocketjs.net.esp-idf.transport.v1.experimental"
+  },
   "factory": {
     "sourceBytes": 470591,
     "storageBytes": 470592,

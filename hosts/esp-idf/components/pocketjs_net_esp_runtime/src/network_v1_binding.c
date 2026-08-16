@@ -15,11 +15,6 @@
 #define POCKETJS_NET_ESP_RUNTIME_MAX_OPERATION_LABEL_BYTES 64U
 #define POCKETJS_NET_ESP_RUNTIME_MAX_CAUSE_CODE_BYTES 64U
 
-struct pocketjs_net_esp_runtime_binding_state {
-  pocketjs_net_esp_runtime_t *runtime;
-  uint32_t references;
-};
-
 static void binding_state_release(void *opaque) {
   pocketjs_net_esp_runtime_binding_state_t *state = opaque;
   if (state == NULL || state->references == 0U) {
@@ -330,25 +325,20 @@ static bool typed_array_window(JSContext *context, JSValueConst value,
   return valid;
 }
 
-static JSValue new_latin1_string(JSContext *context, const uint8_t *bytes,
-                                 size_t length) {
+static JSValue new_latin1_string(JSContext *context,
+                                 pocketjs_net_esp_runtime_t *runtime,
+                                 const uint8_t *bytes, size_t length) {
   if (length == 0U) {
     return JS_NewStringLen(context, "", 0U);
   }
   if (length > POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES ||
-      length > SIZE_MAX / sizeof(uint16_t)) {
+      runtime == NULL) {
     return JS_ThrowRangeError(context, "ByteString exceeds native bound");
   }
-  uint16_t *characters = malloc(length * sizeof(*characters));
-  if (characters == NULL) {
-    return JS_ThrowOutOfMemory(context);
-  }
   for (size_t index = 0U; index < length; ++index) {
-    characters[index] = bytes[index];
+    runtime->latin1_scratch[index] = bytes[index];
   }
-  JSValue result = JS_NewStringUTF16(context, characters, length);
-  free(characters);
-  return result;
+  return JS_NewStringUTF16(context, runtime->latin1_scratch, length);
 }
 
 static JSValue new_handle(JSContext *context,
@@ -629,10 +619,8 @@ parse_base_tls_metadata(JSContext *context, JSValueConst tls,
       object_latin1(context, tls, "serverName", command->tls_server_name,
                     sizeof(command->tls_server_name),
                     &command->tls_server_name_length, true, true) &&
-      object_u16(context, tls, "minVersion", UINT16_MAX,
-                 &minimum_version) &&
-      object_u16(context, tls, "maxVersion", UINT16_MAX,
-                 &maximum_version) &&
+      object_u16(context, tls, "minVersion", UINT16_MAX, &minimum_version) &&
+      object_u16(context, tls, "maxVersion", UINT16_MAX, &maximum_version) &&
       own_data_property(context, tls, "alpn", &alpn) &&
       array_length(context, alpn, 8U, &alpn_count) &&
       object_latin1(context, tls, "credential", command->tls_credential,
@@ -642,8 +630,7 @@ parse_base_tls_metadata(JSContext *context, JSValueConst tls,
                  &client_certificate) &&
       object_u16(context, tls, "verification", UINT16_MAX, &verification) &&
       object_u16(context, tls, "revocation", UINT16_MAX, &revocation) &&
-      object_u32(context, tls, "customCaBytes", UINT32_MAX,
-                 &custom_ca_bytes);
+      object_u32(context, tls, "customCaBytes", UINT32_MAX, &custom_ca_bytes);
   JS_FreeValue(context, alpn);
   if (!valid) {
     return false;
@@ -655,41 +642,41 @@ parse_base_tls_metadata(JSContext *context, JSValueConst tls,
       .minimum_version =
           minimum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_2
               ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2
-              : minimum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
-                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
-                    : 0,
+          : minimum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
+              : 0,
       .maximum_version =
           maximum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_2
               ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_2
-              : maximum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
-                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
-                    : 0,
+          : maximum_version == POCKETJS_NETWORK_V1_TLS_VERSION_V1_3
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERSION_1_3
+              : 0,
       .alpn_count = alpn_count,
       .credential = {.data = command->tls_credential,
                      .length = command->tls_credential_length},
       .client_certificate =
           client_certificate == POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_NONE
               ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_NONE
-              : client_certificate ==
-                        POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_OPTIONAL
-                    ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_OPTIONAL
-                    : client_certificate ==
-                              POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_REQUIRED
-                          ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_REQUIRED
-                          : 0,
+          : client_certificate ==
+                  POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_OPTIONAL
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_OPTIONAL
+          : client_certificate ==
+                  POCKETJS_NETWORK_V1_CLIENT_CERTIFICATE_REQUIRED
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_CLIENT_CERTIFICATE_REQUIRED
+              : 0,
       .verification =
           verification == POCKETJS_NETWORK_V1_TLS_VERIFICATION_FULL
               ? POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_FULL
-              : verification ==
-                        POCKETJS_NETWORK_V1_TLS_VERIFICATION_DEVELOPMENT_INSECURE
-                    ? POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_DEVELOPMENT_INSECURE
-                    : 0,
+          : verification ==
+                  POCKETJS_NETWORK_V1_TLS_VERIFICATION_DEVELOPMENT_INSECURE
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_VERIFICATION_DEVELOPMENT_INSECURE
+              : 0,
       .revocation =
           revocation == POCKETJS_NETWORK_V1_TLS_REVOCATION_HOST_DEFAULT
               ? POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_HOST_DEFAULT
-              : revocation == POCKETJS_NETWORK_V1_TLS_REVOCATION_REQUIRED
-                    ? POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_REQUIRED
-                    : 0,
+          : revocation == POCKETJS_NETWORK_V1_TLS_REVOCATION_REQUIRED
+              ? POCKETJS_NET_HTTP_CLIENT_TLS_REVOCATION_REQUIRED
+              : 0,
       .custom_ca_bytes = custom_ca_bytes,
   };
   return true;
@@ -1061,6 +1048,7 @@ core_error(const pocketjs_net_esp_runtime_slot_t *slot) {
 }
 
 static JSValue new_headers(JSContext *context,
+                           pocketjs_net_esp_runtime_t *runtime,
                            const pocketjs_net_http_client_header_t *headers,
                            size_t count) {
   JSValue array = JS_NewArray(context);
@@ -1071,10 +1059,12 @@ static JSValue new_headers(JSContext *context,
     JSValue entry = JS_NewObject(context);
     if (JS_IsException(entry) ||
         !set_property(context, entry, "name",
-                      new_latin1_string(context, headers[index].name.data,
+                      new_latin1_string(context, runtime,
+                                        headers[index].name.data,
                                         headers[index].name.length)) ||
         !set_property(context, entry, "value",
-                      new_latin1_string(context, headers[index].value.data,
+                      new_latin1_string(context, runtime,
+                                        headers[index].value.data,
                                         headers[index].value.length)) ||
         !freeze(context, entry) ||
         !set_array_property(context, array, (uint32_t)index,
@@ -1103,10 +1093,12 @@ static JSValue new_response_metadata(JSContext *context,
           JS_NewUint32(context, event->detail.response.status_code)) ||
       !set_property(
           context, object, "statusText",
-          new_latin1_string(context, event->detail.response.status_text.data,
+          new_latin1_string(context, runtime,
+                            event->detail.response.status_text.data,
                             event->detail.response.status_text.length)) ||
       !set_property(context, object, "headers",
-                    new_headers(context, event->detail.response.headers,
+                    new_headers(context, runtime,
+                                event->detail.response.headers,
                                 event->detail.response.header_count)) ||
       !set_property(context, object, "url",
                     JS_NewStringLen(

@@ -183,6 +183,8 @@ typedef struct {
   uint64_t total_timeout_us;
   /** HTTPS stays pre-I/O fail-closed unless the selected Host opts in. */
   bool allow_https;
+  /** Retain one fully delimited same-origin HTTP/1.1 connection per Core. */
+  bool enable_connection_reuse;
   /** Final response fields as name + value + ": " + CRLF; zero uses max. */
   size_t response_header_bytes_limit;
 } pocketjs_net_http_client_core_config_t;
@@ -253,12 +255,14 @@ typedef struct {
   pocketjs_net_http_client_request_body_kind_t body_kind;
   /* Used only by FIXED. The Core snapshots these bytes before native I/O. */
   pocketjs_net_http_client_slice_t body;
-  /* Used only by STREAMING. Unknown-length streams use strict chunked coding. */
+  /* Used only by STREAMING. Unknown-length streams use strict chunked coding.
+   */
   bool streaming_content_length_known;
   uint64_t streaming_content_length;
   pocketjs_net_http_client_redirect_mode_t redirect_mode;
   uint16_t max_redirects;
-  /** Required for HTTPS and forbidden for plaintext HTTP. Snapshotted by start. */
+  /** Required for HTTPS and forbidden for plaintext HTTP. Snapshotted by start.
+   */
   const pocketjs_net_http_client_tls_policy_t *tls;
 } pocketjs_net_http_client_request_t;
 
@@ -307,6 +311,7 @@ typedef struct {
   bool completion_retire_pending;
   bool event_outstanding;
   bool request_body_credit_outstanding;
+  bool connection_reusable;
   size_t transport_read_leases_owned;
   uint32_t poison_flags;
   int32_t first_poison_cause_code;
@@ -403,6 +408,8 @@ typedef struct {
   bool headers_first;
   bool explicit_body_credit;
   bool explicit_body_lease;
+  bool connection_reuse;
+  bool bounded_connection_pool;
   bool redirects_followed;
   bool redirect_manual;
   bool redirect_error;
@@ -427,6 +434,7 @@ typedef struct {
   size_t max_fixed_request_body_bytes;
   size_t max_request_body_chunk_bytes;
   size_t body_lease_bytes;
+  size_t max_cached_connections;
 } pocketjs_net_http_client_core_descriptor_t;
 
 const pocketjs_net_http_client_core_descriptor_t *
@@ -479,8 +487,8 @@ bool pocketjs_net_http_client_core_grant_body_credit(
 bool pocketjs_net_http_client_core_submit_request_body_chunk(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,
-    uint64_t body_generation, uint64_t pull_generation,
-    const uint8_t *bytes, size_t length);
+    uint64_t body_generation, uint64_t pull_generation, const uint8_t *bytes,
+    size_t length);
 
 bool pocketjs_net_http_client_core_submit_request_body_end(
     pocketjs_net_http_client_core_t *core,
@@ -490,8 +498,7 @@ bool pocketjs_net_http_client_core_submit_request_body_end(
 bool pocketjs_net_http_client_core_submit_request_body_error(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,
-    uint64_t body_generation, uint64_t pull_generation,
-    int32_t cause_code);
+    uint64_t body_generation, uint64_t pull_generation, int32_t cause_code);
 
 bool pocketjs_net_http_client_core_take_event(
     pocketjs_net_http_client_core_t *core,

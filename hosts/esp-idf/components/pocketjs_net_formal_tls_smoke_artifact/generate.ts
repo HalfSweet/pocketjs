@@ -112,6 +112,11 @@ interface GeneratedMetadata {
   readonly planHash: string;
   readonly planHashBytes: readonly number[];
   readonly featureIds: readonly number[];
+  readonly providers: {
+    readonly httpClientBackendId: string;
+    readonly netDriverId: string;
+    readonly tlsProviderId: string;
+  };
   readonly factory: {
     readonly sourceBytes: number;
     readonly storageBytes: number;
@@ -213,6 +218,11 @@ ${cFeatureIds(metadata.featureIds)}
 const uint16_t pocketjs_net_formal_tls_smoke_feature_count =
     ${metadata.featureIds.length}U;
 
+const char pocketjs_net_formal_tls_smoke_http_client_backend_id[] =
+    ${cString(metadata.providers.httpClientBackendId)};
+const char pocketjs_net_formal_tls_smoke_net_driver_id[] =
+    ${cString(metadata.providers.netDriverId)};
+
 const char pocketjs_net_formal_tls_smoke_factory_sha256[] =
     ${cString(metadata.factory.sha256)};
 const uint8_t pocketjs_net_formal_tls_smoke_factory_sha256_bytes[32] = {
@@ -238,7 +248,7 @@ const size_t pocketjs_net_formal_tls_smoke_ca_pem_storage_length =
 const char pocketjs_net_formal_tls_smoke_ca_der_sha256[] =
     ${cString(metadata.tls.caDerSha256)};
 const char pocketjs_net_formal_tls_smoke_tls_provider_id[] =
-    ${cString(metadata.tls.providerId)};
+    ${cString(metadata.providers.tlsProviderId)};
 
 const char pocketjs_net_formal_tls_smoke_report_global[] =
     ${cString(metadata.reportGlobal)};
@@ -277,6 +287,8 @@ export async function resolvePlan(): Promise<ResolvedBuildPlan> {
     throw new Error("formal TLS smoke plan escaped its exact test-only identity");
   }
   const connect = result.plan.network.policy.connect;
+  const backend = result.plan.network.providers.backendByRole["http.client"];
+  const driver = result.plan.network.providers.netDriverId;
   const tlsProvider = result.plan.network.providers.tlsByRole["http.client"];
   if (
     connect.length !== 1 ||
@@ -284,6 +296,10 @@ export async function resolvePlan(): Promise<ResolvedBuildPlan> {
     connect[0]?.host !== HOST ||
     connect[0]?.port.min !== PORT ||
     connect[0]?.port.max !== PORT ||
+    backend !== "pocketjs.net.http-client-core.v1.experimental" ||
+    driver !== "pocketjs.net.esp-idf.transport.v1.experimental" ||
+    Object.keys(result.plan.network.providers.backendByRole).length !== 1 ||
+    Object.keys(result.plan.network.providers.tlsByRole).length !== 1 ||
     tlsProvider?.source !== "provider" ||
     tlsProvider.id !== TLS_PROVIDER_ID
   ) {
@@ -366,6 +382,13 @@ async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
     planHash: plan.planHash,
     planHashBytes: Array.from(networkV1PlanHashBytes(plan.planHash)),
     featureIds,
+    providers: {
+      httpClientBackendId:
+        plan.network!.providers.backendByRole["http.client"]!,
+      netDriverId: plan.network!.providers.netDriverId,
+      tlsProviderId:
+        plan.network!.providers.tlsByRole["http.client"]!.id,
+    },
     factory: {
       sourceBytes: source.length,
       storageBytes: factory.length,
@@ -380,7 +403,8 @@ async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
       echoUrl: `${ORIGIN}/echo`,
     },
     tls: {
-      providerId: TLS_PROVIDER_ID,
+      providerId:
+        plan.network!.providers.tlsByRole["http.client"]!.id,
       trustSource: "host-pinned-ca",
       minVersion: "1.2",
       maxVersion: "1.2",

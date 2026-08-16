@@ -72,7 +72,14 @@ allow_endpoint(void *context,
 
 static bool valid_config(const pocketjs_net_formal_smoke_run_config_t *config,
                          pocketjs_net_formal_smoke_run_result_t *out_result) {
-  return config != NULL && out_result != NULL &&
+  const pocketjs_net_esp_runtime_descriptor_t *descriptor =
+      pocketjs_net_esp_runtime_descriptor();
+  size_t required_native_bytes = 0U;
+  return config != NULL && out_result != NULL && descriptor != NULL &&
+         descriptor->pocketjs_owned_native_buffer_floor_enforced &&
+         pocketjs_net_esp_runtime_required_native_buffer_bytes(
+             FORMAL_SMOKE_MAX_OPERATIONS, &required_native_bytes) &&
+         required_native_bytes <= 524288U &&
          config->configured_origin != NULL &&
          strcmp(config->configured_origin,
                 pocketjs_net_formal_smoke_endpoint.origin) == 0 &&
@@ -218,6 +225,15 @@ esp_err_t pocketjs_net_formal_smoke_run(
       .runtime_generation = FORMAL_SMOKE_RUNTIME_GENERATION,
       .feature_ids = pocketjs_net_formal_smoke_feature_ids,
       .feature_count = pocketjs_net_formal_smoke_feature_count,
+      .providers =
+          {
+              .http_client_backend_id =
+                  pocketjs_net_formal_smoke_http_client_backend_id,
+              .net_driver_id = pocketjs_net_formal_smoke_net_driver_id,
+              .http_client_tls_source =
+                  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_NONE,
+          },
+      .admission = POCKETJS_NET_ESP_RUNTIME_ADMISSION_TEST_ONLY,
       .max_operations = FORMAL_SMOKE_MAX_OPERATIONS,
       .limits =
           {
@@ -225,7 +241,7 @@ esp_err_t pocketjs_net_formal_smoke_run(
               .header_bytes = {4096U, 4096U, 8192U},
               .max_body_chunk_bytes = {512U, 2048U, 2048U},
               .max_operations = {1U, 1U, 1U},
-              .native_buffer_bytes = {65536U, 65536U, 524288U},
+              .native_buffer_bytes = {65536U, 524288U, 524288U},
           },
       .connect_timeout_us = FORMAL_SMOKE_CONNECT_TIMEOUT_US,
       .headers_timeout_us = FORMAL_SMOKE_HEADERS_TIMEOUT_US,

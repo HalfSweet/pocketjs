@@ -21,6 +21,9 @@ typedef enum {
   CORE_WRITING_REQUEST_BODY_END,
   CORE_READING,
   CORE_CLOSING,
+  CORE_REPLACING_CONNECTION,
+  CORE_IDLE_CONNECTION_CLOSING,
+  CORE_ENDPOINT_READY,
   CORE_REDIRECT_READY,
   CORE_WAITING_TERMINAL_RETIRE,
 } core_state_t;
@@ -111,6 +114,10 @@ struct pocketjs_net_http_client_core {
   bool force_no_body;
   pocketjs_net_http_client_error_t callback_error;
   unsigned response_status;
+  unsigned response_http_minor;
+  pocketjs_net_http1_response_body_kind_t response_body_kind;
+  bool response_connection_close;
+  bool response_connection_reusable;
   bool redirect_location_seen;
   pocketjs_net_http_client_slice_t redirect_location;
   bool redirect_pending;
@@ -131,6 +138,12 @@ struct pocketjs_net_http_client_core {
   uint64_t transport_operation_token;
   pocketjs_net_http_client_transport_connection_t connection;
   bool connection_valid;
+  bool connection_reusable;
+  pocketjs_net_http_client_scheme_t connection_scheme;
+  char connection_hostname[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_HOST_BYTES + 1U];
+  uint16_t connection_port;
+  uint32_t connection_ipv4_be;
+  uint64_t connection_idle_deadline_us;
   pocketjs_net_http_client_transport_read_lease_t transport_read_lease;
   bool transport_read_lease_valid;
   const uint8_t *transport_read_bytes;
@@ -177,6 +190,8 @@ static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .headers_first = true,
     .explicit_body_credit = true,
     .explicit_body_lease = true,
+    .connection_reuse = true,
+    .bounded_connection_pool = true,
     .redirects_followed = true,
     .redirect_manual = true,
     .redirect_error = true,
@@ -203,6 +218,7 @@ static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .max_request_body_chunk_bytes =
         POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES,
     .body_lease_bytes = POCKETJS_NET_HTTP_CLIENT_CORE_BODY_LEASE_BYTES,
+    .max_cached_connections = 1U,
 };
 
 const pocketjs_net_http_client_core_descriptor_t *
@@ -240,8 +256,7 @@ core_is_quiescent_internal(const pocketjs_net_http_client_core_t *core) {
          !core->transport_active && !core->connection_valid &&
          !core->transport_read_lease_valid && !core->orphan_read_lease_valid &&
          !core->completion_retire_pending && !core->body_lease_active &&
-         !core->request_body_pull_active &&
-         !core->permission_callback_active;
+         !core->request_body_pull_active && !core->permission_callback_active;
 }
 
 static bool ascii_is_alpha(uint8_t byte) {
@@ -274,6 +289,41 @@ static bool is_tchar(uint8_t byte) {
          byte == '\'' || byte == '*' || byte == '+' || byte == '-' ||
          byte == '.' || byte == '^' || byte == '_' || byte == '`' ||
          byte == '|' || byte == '~';
+}
+
+static bool connection_value_is_valid(const uint8_t *value, size_t length,
+                                      bool *out_close) {
+  size_t offset = 0U;
+  bool saw_token = false;
+  while (offset < length) {
+    while (offset < length && (value[offset] == ' ' || value[offset] == '\t')) {
+      ++offset;
+    }
+    const size_t start = offset;
+    while (offset < length && is_tchar(value[offset])) {
+      ++offset;
+    }
+    if (offset == start) {
+      return false;
+    }
+    saw_token = true;
+    if (ascii_equal_case(value + start, offset - start, "close")) {
+      *out_close = true;
+    }
+    while (offset < length && (value[offset] == ' ' || value[offset] == '\t')) {
+      ++offset;
+    }
+    if (offset == length) {
+      break;
+    }
+    if (value[offset++] != ',') {
+      return false;
+    }
+    if (offset == length) {
+      return false;
+    }
+  }
+  return saw_token;
 }
 
 static bool valid_method(const uint8_t *method, size_t length) {
@@ -844,8 +894,7 @@ base_tls_policy_valid(const pocketjs_net_http_client_core_t *core,
   }
   const size_t hostname_length = strlen(core->hostname);
   return policy->server_name.length == hostname_length &&
-         memcmp(policy->server_name.data, core->hostname, hostname_length) ==
-             0;
+         memcmp(policy->server_name.data, core->hostname, hostname_length) == 0;
 }
 
 static bool forbidden_request_header(const uint8_t *name, size_t length) {
@@ -965,8 +1014,7 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
   }
   switch (request->body_kind) {
   case POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE:
-    if (request->body.length != 0U ||
-        request->streaming_content_length_known ||
+    if (request->body.length != 0U || request->streaming_content_length_known ||
         request->streaming_content_length != 0U) {
       return POCKETJS_NET_HTTP_CLIENT_START_INVALID_ARGUMENT;
     }
@@ -1016,7 +1064,7 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
     return POCKETJS_NET_HTTP_CLIENT_START_FORBIDDEN_REQUEST;
   }
   if (request->header_count >
-          POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_HEADERS) {
+      POCKETJS_NET_HTTP_CLIENT_CORE_MAX_REQUEST_HEADERS) {
     return POCKETJS_NET_HTTP_CLIENT_START_LIMIT_EXCEEDED;
   }
   if (request->body_kind != POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_NONE &&
@@ -1066,13 +1114,15 @@ snapshot_request(pocketjs_net_http_client_core_t *core,
   static const uint8_t connection_value[] = "close";
   static const uint8_t encoding_name[] = "Accept-Encoding";
   static const uint8_t encoding_value[] = "identity";
-  core->request_headers[core->request_header_count++] =
-      (pocketjs_net_http1_header_t){
-          .name = {.data = connection_name,
-                   .length = sizeof(connection_name) - 1U},
-          .value = {.data = connection_value,
-                    .length = sizeof(connection_value) - 1U},
-      };
+  if (!core->config.enable_connection_reuse) {
+    core->request_headers[core->request_header_count++] =
+        (pocketjs_net_http1_header_t){
+            .name = {.data = connection_name,
+                     .length = sizeof(connection_name) - 1U},
+            .value = {.data = connection_value,
+                      .length = sizeof(connection_value) - 1U},
+        };
+  }
   core->request_headers[core->request_header_count++] =
       (pocketjs_net_http1_header_t){
           .name = {.data = encoding_name, .length = sizeof(encoding_name) - 1U},
@@ -1238,7 +1288,6 @@ static bool publish_terminal(pocketjs_net_http_client_core_t *core) {
 static bool response_on_status(void *context, unsigned http_minor,
                                unsigned status_code, const uint8_t *status_text,
                                size_t status_text_length, bool informational) {
-  (void)http_minor;
   pocketjs_net_http_client_core_t *core = context;
   if (informational) {
     return true;
@@ -1251,6 +1300,10 @@ static bool response_on_status(void *context, unsigned http_minor,
   core->redirect_location_seen = false;
   core->redirect_location = (pocketjs_net_http_client_slice_t){0};
   core->response_status = status_code;
+  core->response_http_minor = http_minor;
+  core->response_body_kind = POCKETJS_NET_HTTP1_RESPONSE_BODY_NONE;
+  core->response_connection_close = false;
+  core->response_connection_reusable = false;
   if (status_text_length > sizeof(core->response_header_storage)) {
     core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT;
     return false;
@@ -1276,6 +1329,12 @@ static bool response_on_header(void *context, const uint8_t *name,
   }
   if (ascii_equal_case(name, name_length, "Content-Encoding") &&
       !ascii_equal_case(value, value_length, "identity")) {
+    core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL;
+    return false;
+  }
+  if (ascii_equal_case(name, name_length, "Connection") &&
+      !connection_value_is_valid(value, value_length,
+                                 &core->response_connection_close)) {
     core->callback_error = POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL;
     return false;
   }
@@ -1352,6 +1411,11 @@ response_on_headers_complete(void *context, unsigned status_code,
     }
     core->force_no_body = true;
   }
+  core->response_body_kind = body_kind;
+  core->response_connection_reusable =
+      core->config.enable_connection_reuse && core->response_http_minor == 1U &&
+      !core->response_connection_close &&
+      body_kind != POCKETJS_NET_HTTP1_RESPONSE_BODY_UNTIL_EOF;
   core->final_headers_seen = true;
   const redirect_decision_t redirect = prepare_redirect(core);
   if (redirect == REDIRECT_DECISION_FAIL) {
@@ -1471,19 +1535,16 @@ static bool publish_request_body_pull(pocketjs_net_http_client_core_t *core) {
       maximum = (size_t)remaining;
     }
   }
-  if (maximum == 0U ||
-      core->last_request_body_pull_generation == UINT64_MAX) {
+  if (maximum == 0U || core->last_request_body_pull_generation == UINT64_MAX) {
     select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
     return false;
   }
   ++core->last_request_body_pull_generation;
-  core->request_body_pull_generation =
-      core->last_request_body_pull_generation;
+  core->request_body_pull_generation = core->last_request_body_pull_generation;
   core->request_body_pull_maximum = maximum;
   core->request_body_pull_active = true;
   core->request_body_pull_event_retired = false;
-  if (!publish_event(core,
-                     POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL)) {
+  if (!publish_event(core, POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL)) {
     revoke_request_body_credit(core);
     select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
     return false;
@@ -1504,16 +1565,16 @@ invoke_permission(pocketjs_net_http_client_core_t *core,
   pocketjs_net_http_client_operation_token_t operation_token =
       core->operation_token;
   core->permission_callback_active = true;
-  bool allowed = core->config.allow_endpoint(core->config.permission_context,
-                                              endpoint);
+  bool allowed =
+      core->config.allow_endpoint(core->config.permission_context, endpoint);
   core->permission_callback_active = false;
   if (!core_is_live(core) || core->lifecycle_generation != generation ||
       core->state != expected_state ||
       core->operation_token != operation_token || core->transport_active ||
       core->terminal_selected) {
     if (core_is_live(core)) {
-      poison_core(core,
-                  POCKETJS_NET_HTTP_CLIENT_POISON_PERMISSION_REENTRANCY, 0);
+      poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_PERMISSION_REENTRANCY,
+                  0);
       select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT, 0);
     }
     *out_allowed = false;
@@ -1613,8 +1674,7 @@ static bool start_close(pocketjs_net_http_client_core_t *core) {
     (void)publish_terminal(core);
     return false;
   }
-  uint64_t close_deadline =
-      deadline_after(core->now_us, CORE_CLOSE_TIMEOUT_US);
+  uint64_t close_deadline = deadline_after(core->now_us, CORE_CLOSE_TIMEOUT_US);
   pocketjs_net_http_client_transport_result_t result =
       core->config.transport_ops->start_close(core->config.transport_context,
                                               token, core->connection,
@@ -1633,6 +1693,48 @@ static bool start_close(pocketjs_net_http_client_core_t *core) {
   core->close_cancel_requested = false;
   core->state = CORE_CLOSING;
   return true;
+}
+
+static bool start_idle_connection_close(pocketjs_net_http_client_core_t *core) {
+  if (!core->connection_valid) {
+    return true;
+  }
+  if (core->transport_active || core->event_state != EVENT_EMPTY) {
+    return false;
+  }
+  uint64_t token = 0U;
+  if (!next_transport_token(core, &token)) {
+    poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_ADMISSION, 0);
+    return false;
+  }
+  const uint64_t close_deadline =
+      deadline_after(core->now_us, CORE_CLOSE_TIMEOUT_US);
+  const pocketjs_net_http_client_transport_result_t result =
+      core->config.transport_ops->start_close(core->config.transport_context,
+                                              token, core->connection,
+                                              close_deadline);
+  if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+    poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_ADMISSION,
+                (int32_t)result);
+    return false;
+  }
+  core->connection_reusable = false;
+  core->connection_idle_deadline_us = 0U;
+  core->transport_active = true;
+  core->transport_cancel_requested = false;
+  core->transport_operation_kind = TRANSPORT_OPERATION_CLOSE;
+  core->transport_operation_token = token;
+  core->close_deadline_us = close_deadline;
+  core->close_cancel_requested = false;
+  core->state = CORE_IDLE_CONNECTION_CLOSING;
+  return true;
+}
+
+static bool
+terminal_can_retain_connection(const pocketjs_net_http_client_core_t *core) {
+  return core->config.enable_connection_reuse && !core->shutdown_requested &&
+         core->terminal_success && core->parser_complete &&
+         core->response_connection_reusable && core->connection_valid;
 }
 
 static void progress_terminal(pocketjs_net_http_client_core_t *core) {
@@ -1669,6 +1771,15 @@ static void progress_terminal(pocketjs_net_http_client_core_t *core) {
     }
     return;
   }
+  if (terminal_can_retain_connection(core)) {
+    core->connection_reusable = true;
+    core->connection_idle_deadline_us =
+        deadline_after(core->now_us, core->config.idle_timeout_us);
+    (void)publish_terminal(core);
+    return;
+  }
+  core->connection_reusable = false;
+  core->connection_idle_deadline_us = 0U;
   (void)start_close(core);
 }
 
@@ -1701,8 +1812,8 @@ start_connect(pocketjs_net_http_client_core_t *core, uint32_t ipv4_be) {
   pocketjs_net_http_client_transport_result_t result =
       core->config.transport_ops->start_connect(
           core->config.transport_context, token, ipv4_be, core->port,
-          core->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS,
-          core->hostname, core->connect_deadline_us);
+          core->scheme == POCKETJS_NET_HTTP_CLIENT_SCHEME_HTTPS, core->hostname,
+          core->connect_deadline_us);
   if (result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
     core->selected_ipv4_be = ipv4_be;
     core->transport_active = true;
@@ -1712,6 +1823,101 @@ start_connect(pocketjs_net_http_client_core_t *core, uint32_t ipv4_be) {
     core->state = CORE_CONNECTING;
   }
   return result;
+}
+
+static bool initialize_parser(pocketjs_net_http_client_core_t *core);
+static bool emit_next_request_head(pocketjs_net_http_client_core_t *core);
+
+static bool
+connection_origin_matches(const pocketjs_net_http_client_core_t *core) {
+  return core->connection_valid && core->connection_reusable &&
+         core->connection_idle_deadline_us != 0U &&
+         core->now_us < core->connection_idle_deadline_us &&
+         core->connection_scheme == core->scheme &&
+         core->connection_port == core->port &&
+         strcmp(core->connection_hostname, core->hostname) == 0;
+}
+
+static bool
+begin_reused_connection_request(pocketjs_net_http_client_core_t *core) {
+  bool allowed = false;
+  if (!core->numeric_host) {
+    const pocketjs_net_http_client_endpoint_t hostname_endpoint = {
+        .phase = POCKETJS_NET_HTTP_CLIENT_PERMISSION_HOSTNAME,
+        .scheme = core->scheme,
+        .hostname = core->hostname,
+        .port = core->port,
+        .ipv4_be = 0U,
+    };
+    if (!invoke_permission(core, &hostname_endpoint, CORE_RESOLVING,
+                           &allowed)) {
+      return false;
+    }
+    if (!allowed) {
+      select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED, 0);
+      return false;
+    }
+  }
+  const pocketjs_net_http_client_endpoint_t numeric_endpoint = {
+      .phase = POCKETJS_NET_HTTP_CLIENT_PERMISSION_NUMERIC_CANDIDATE,
+      .scheme = core->scheme,
+      .hostname = core->hostname,
+      .port = core->port,
+      .ipv4_be = core->connection_ipv4_be,
+  };
+  if (!invoke_permission(core, &numeric_endpoint, CORE_RESOLVING, &allowed)) {
+    return false;
+  }
+  if (!allowed) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED, 0);
+    return false;
+  }
+
+  core->connection_reusable = false;
+  core->connection_idle_deadline_us = 0U;
+  core->selected_ipv4_be = core->connection_ipv4_be;
+  core->headers_deadline_us = earlier_deadline(
+      deadline_after(core->now_us, core->config.headers_timeout_us),
+      core->total_deadline_us);
+  if (!initialize_parser(core)) {
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL, 0);
+    return false;
+  }
+  return emit_next_request_head(core);
+}
+
+static bool
+start_connection_replacement_close(pocketjs_net_http_client_core_t *core) {
+  uint64_t token = 0U;
+  if (!next_transport_token(core, &token)) {
+    poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_ADMISSION, 0);
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
+    return false;
+  }
+  const uint64_t close_deadline =
+      earlier_deadline(deadline_after(core->now_us, CORE_CLOSE_TIMEOUT_US),
+                       core->total_deadline_us);
+  const pocketjs_net_http_client_transport_result_t result =
+      core->config.transport_ops->start_close(core->config.transport_context,
+                                              token, core->connection,
+                                              close_deadline);
+  if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+    poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_ADMISSION,
+                (int32_t)result);
+    select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                   (int32_t)result);
+    return false;
+  }
+  core->connection_reusable = false;
+  core->connection_idle_deadline_us = 0U;
+  core->transport_active = true;
+  core->transport_cancel_requested = false;
+  core->transport_operation_kind = TRANSPORT_OPERATION_CLOSE;
+  core->transport_operation_token = token;
+  core->close_deadline_us = close_deadline;
+  core->close_cancel_requested = false;
+  core->state = CORE_REPLACING_CONNECTION;
+  return true;
 }
 
 static bool begin_current_endpoint(pocketjs_net_http_client_core_t *core) {
@@ -1725,6 +1931,13 @@ static bool begin_current_endpoint(pocketjs_net_http_client_core_t *core) {
   core->headers_deadline_us = core->total_deadline_us;
   core->idle_deadline_us = core->total_deadline_us;
   core->state = CORE_RESOLVING;
+
+  if (core->connection_valid) {
+    if (connection_origin_matches(core)) {
+      return begin_reused_connection_request(core);
+    }
+    return start_connection_replacement_close(core);
+  }
 
   if (core->numeric_host) {
     pocketjs_net_http_client_endpoint_t endpoint = {
@@ -1838,6 +2051,10 @@ static void begin_redirect_hop(pocketjs_net_http_client_core_t *core) {
   core->force_no_body = false;
   core->callback_error = 0;
   core->response_status = 0U;
+  core->response_http_minor = 0U;
+  core->response_body_kind = POCKETJS_NET_HTTP1_RESPONSE_BODY_NONE;
+  core->response_connection_close = false;
+  core->response_connection_reusable = false;
   core->response_header_storage_used = 0U;
   core->response_header_field_bytes = 0U;
   core->response_header_count = 0U;
@@ -1846,6 +2063,17 @@ static void begin_redirect_hop(pocketjs_net_http_client_core_t *core) {
   core->body_credit = 0U;
   core->terminal_body_pull_active = false;
   core->body_byte_count = 0U;
+  if (!begin_current_endpoint(core)) {
+    progress_terminal(core);
+  }
+}
+
+static void begin_queued_endpoint(pocketjs_net_http_client_core_t *core) {
+  if (core->state != CORE_ENDPOINT_READY || core->event_state != EVENT_EMPTY ||
+      core->transport_active || core->completion_retire_pending ||
+      core->connection_valid || core->terminal_selected) {
+    return;
+  }
   if (!begin_current_endpoint(core)) {
     progress_terminal(core);
   }
@@ -2048,11 +2276,17 @@ static void consume_retained_read(pocketjs_net_http_client_core_t *core) {
     return;
   }
   if (core->force_no_body && core->final_headers_seen) {
+    if (core->transport_read_offset != core->transport_read_length) {
+      core->response_connection_reusable = false;
+    }
     core->transport_read_offset = core->transport_read_length;
     core->parser_complete = true;
     result = POCKETJS_NET_HTTP1_PARSE_COMPLETE;
   }
   if (result == POCKETJS_NET_HTTP1_PARSE_COMPLETE) {
+    if (core->transport_read_eof_pending) {
+      core->response_connection_reusable = false;
+    }
     if (core->transport_read_offset != core->transport_read_length) {
       (void)release_transport_read_lease(core);
       select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_PROTOCOL, 0);
@@ -2102,8 +2336,7 @@ static void handle_resolved(
         .port = core->port,
         .ipv4_be = completion->detail.resolved.ipv4_be[index],
     };
-    if (!invoke_permission(core, &endpoint, CORE_RESOLVING,
-                           &allowed[index])) {
+    if (!invoke_permission(core, &endpoint, CORE_RESOLVING, &allowed[index])) {
       return;
     }
   }
@@ -2142,6 +2375,7 @@ static void handle_transport_completion(
     pocketjs_net_http_client_core_t *core,
     const pocketjs_net_http_client_transport_completion_t *completion) {
   transport_operation_kind_t completed_kind = core->transport_operation_kind;
+  const core_state_t completed_state = core->state;
   core->transport_active = false;
   core->transport_cancel_requested = false;
   core->transport_operation_kind = TRANSPORT_OPERATION_NONE;
@@ -2161,13 +2395,16 @@ static void handle_transport_completion(
         core->connection_valid = false;
       } else {
         poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_COMPLETION,
-                    completion->type ==
-                            POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR
+                    completion->type == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR
                         ? completion->detail.error.cause_code
                         : 0);
       }
-    } else if (completion->type ==
-                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR &&
+      core->connection_reusable = false;
+      core->connection_idle_deadline_us = 0U;
+      if (completed_state == CORE_IDLE_CONNECTION_CLOSING) {
+        core->state = CORE_IDLE;
+      }
+    } else if (completion->type == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR &&
                (completed_kind == TRANSPORT_OPERATION_CONNECT ||
                 completed_kind == TRANSPORT_OPERATION_READ ||
                 completed_kind == TRANSPORT_OPERATION_WRITE)) {
@@ -2195,6 +2432,16 @@ static void handle_transport_completion(
       core->redirect_pending = false;
       poison_core(core, POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_COMPLETION,
                   completion->detail.error.cause_code);
+      core->connection_reusable = false;
+      core->connection_idle_deadline_us = 0U;
+      if (completed_state == CORE_IDLE_CONNECTION_CLOSING) {
+        core->state = CORE_IDLE;
+        return;
+      }
+      if (!core->terminal_selected) {
+        select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                       completion->detail.error.cause_code);
+      }
       (void)publish_terminal(core);
     }
     return;
@@ -2226,6 +2473,13 @@ static void handle_transport_completion(
     }
     core->connection = completion->detail.connected.connection;
     core->connection_valid = true;
+    core->connection_reusable = false;
+    core->connection_idle_deadline_us = 0U;
+    core->connection_scheme = core->scheme;
+    memcpy(core->connection_hostname, core->hostname,
+           strlen(core->hostname) + 1U);
+    core->connection_port = core->port;
+    core->connection_ipv4_be = core->selected_ipv4_be;
     core->headers_deadline_us = earlier_deadline(
         deadline_after(core->now_us, core->config.headers_timeout_us),
         core->total_deadline_us);
@@ -2325,7 +2579,8 @@ static void handle_transport_completion(
           core->total_deadline_us);
       consume_retained_read(core);
     } else if (completion->detail.read.eof && !core->terminal_selected &&
-        !core->parser_complete) {
+               !core->parser_complete) {
+      core->response_connection_reusable = false;
       pocketjs_net_http1_parse_result_t result =
           pocketjs_net_http1_response_parser_finish(&core->parser);
       if (result == POCKETJS_NET_HTTP1_PARSE_COMPLETE) {
@@ -2355,8 +2610,15 @@ static void handle_transport_completion(
             core->connection.generation) {
       core->connection_valid = true;
     }
-    if (core->redirect_pending && !core->terminal_selected &&
-        !core->connection_valid) {
+    core->connection_reusable = false;
+    core->connection_idle_deadline_us = 0U;
+    if (completed_state == CORE_IDLE_CONNECTION_CLOSING) {
+      core->state = CORE_IDLE;
+    } else if (completed_state == CORE_REPLACING_CONNECTION &&
+               !core->terminal_selected && !core->connection_valid) {
+      core->state = CORE_ENDPOINT_READY;
+    } else if (core->redirect_pending && !core->terminal_selected &&
+               !core->connection_valid) {
       core->state = CORE_REDIRECT_READY;
     } else {
       (void)publish_terminal(core);
@@ -2471,6 +2733,12 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
   }
   core->now_us = now_us;
 
+  if (core->state == CORE_IDLE && core->connection_valid &&
+      core->connection_reusable && core->connection_idle_deadline_us != 0U &&
+      now_us >= core->connection_idle_deadline_us) {
+    (void)start_idle_connection_close(core);
+  }
+
   if (core->completion_retire_pending) {
     pocketjs_net_http_client_transport_result_t retry_result =
         core->config.transport_ops->retire_completion(
@@ -2532,10 +2800,8 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
   }
 
   for (size_t index = 0U;
-       index < max_transport_completions &&
-       !core->completion_retire_pending &&
-       !core->transport_read_lease_valid &&
-       !core->orphan_read_lease_valid;
+       index < max_transport_completions && !core->completion_retire_pending &&
+       !core->transport_read_lease_valid && !core->orphan_read_lease_valid;
        ++index) {
     pocketjs_net_http_client_transport_completion_t completion;
     pocketjs_net_http_client_transport_result_t take_result =
@@ -2579,6 +2845,7 @@ bool pocketjs_net_http_client_core_pump(pocketjs_net_http_client_core_t *core,
   }
 
   begin_redirect_hop(core);
+  begin_queued_endpoint(core);
 
   if (!core->terminal_selected && core->state == CORE_READING &&
       core->event_state == EVENT_EMPTY) {
@@ -2643,12 +2910,10 @@ static bool request_body_credit_matches(
     uint64_t body_generation, uint64_t pull_generation) {
   return core->request_body_kind ==
              POCKETJS_NET_HTTP_CLIENT_REQUEST_BODY_STREAMING &&
-         core->state == CORE_WAITING_REQUEST_BODY &&
-         !core->terminal_selected && core->event_state == EVENT_EMPTY &&
-         core->request_body_pull_active &&
+         core->state == CORE_WAITING_REQUEST_BODY && !core->terminal_selected &&
+         core->event_state == EVENT_EMPTY && core->request_body_pull_active &&
          core->request_body_pull_event_retired &&
-         operation_token == core->operation_token &&
-         body_generation != 0U &&
+         operation_token == core->operation_token && body_generation != 0U &&
          body_generation == core->request_body_generation &&
          pull_generation != 0U &&
          pull_generation == core->request_body_pull_generation;
@@ -2686,8 +2951,8 @@ static size_t encode_chunked_request_body(pocketjs_net_http_client_core_t *core,
 bool pocketjs_net_http_client_core_submit_request_body_chunk(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,
-    uint64_t body_generation, uint64_t pull_generation,
-    const uint8_t *bytes, size_t length) {
+    uint64_t body_generation, uint64_t pull_generation, const uint8_t *bytes,
+    size_t length) {
   if (!core_public_entry_allowed(core) || bytes == NULL || length == 0U ||
       length > POCKETJS_NET_HTTP_CLIENT_CORE_REQUEST_BODY_CHUNK_BYTES ||
       !request_body_credit_matches(core, operation_token, body_generation,
@@ -2704,8 +2969,7 @@ bool pocketjs_net_http_client_core_submit_request_body_chunk(
   }
   memmove(core->request_body, bytes, length);
   consume_request_body_credit(core);
-  if ((uint64_t)length >
-      UINT64_MAX - core->request_body_submitted_length) {
+  if ((uint64_t)length > UINT64_MAX - core->request_body_submitted_length) {
     select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT, 0);
     progress_terminal(core);
     return true;
@@ -2767,16 +3031,14 @@ bool pocketjs_net_http_client_core_submit_request_body_end(
 bool pocketjs_net_http_client_core_submit_request_body_error(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_operation_token_t operation_token,
-    uint64_t body_generation, uint64_t pull_generation,
-    int32_t cause_code) {
+    uint64_t body_generation, uint64_t pull_generation, int32_t cause_code) {
   if (!core_public_entry_allowed(core) ||
       !request_body_credit_matches(core, operation_token, body_generation,
                                    pull_generation)) {
     return false;
   }
   consume_request_body_credit(core);
-  select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY,
-                 cause_code);
+  select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_REQUEST_BODY, cause_code);
   progress_terminal(core);
   return true;
 }
@@ -2821,6 +3083,10 @@ static void reset_after_terminal(pocketjs_net_http_client_core_t *core) {
   core->parser_complete = false;
   core->force_no_body = false;
   core->callback_error = 0;
+  core->response_http_minor = 0U;
+  core->response_body_kind = POCKETJS_NET_HTTP1_RESPONSE_BODY_NONE;
+  core->response_connection_close = false;
+  core->response_connection_reusable = false;
   core->redirect_location_seen = false;
   core->redirect_location = (pocketjs_net_http_client_slice_t){0};
   core->redirect_pending = false;
@@ -2841,8 +3107,7 @@ bool pocketjs_net_http_client_core_retire_event(
       sequence != core->event.sequence ||
       (core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_BODY &&
        !core->body_lease_released) ||
-      (core->event.type ==
-           POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL &&
+      (core->event.type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL &&
        !revoked_request_pull &&
        (!core->request_body_pull_active ||
         core->event.detail.request_body_pull.body_generation !=
@@ -2860,8 +3125,7 @@ bool pocketjs_net_http_client_core_retire_event(
     core->body_lease_released = false;
     core->body_byte_count = 0U;
     core->body_credit = 0U;
-  } else if (type ==
-             POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
+  } else if (type == POCKETJS_NET_HTTP_CLIENT_EVENT_REQUEST_BODY_PULL) {
     if (revoked_request_pull) {
       progress_terminal(core);
       return true;
@@ -2870,6 +3134,9 @@ bool pocketjs_net_http_client_core_retire_event(
     return true;
   } else {
     reset_after_terminal(core);
+    if (core->shutdown_requested && core->connection_valid) {
+      (void)start_idle_connection_close(core);
+    }
     return true;
   }
   if (core->parser_complete && !core->body_lease_active) {
@@ -2890,9 +3157,8 @@ bool pocketjs_net_http_client_core_body_lease_view(
     *out_length = 0U;
   }
   if (!core_public_entry_allowed(core) || out_bytes == NULL ||
-      out_length == NULL ||
-      !core->body_lease_active || core->body_lease_released ||
-      lease.slot != core->body_lease.slot ||
+      out_length == NULL || !core->body_lease_active ||
+      core->body_lease_released || lease.slot != core->body_lease.slot ||
       lease.generation != core->body_lease.generation) {
     return false;
   }
@@ -2905,8 +3171,7 @@ bool pocketjs_net_http_client_core_release_body_lease(
     pocketjs_net_http_client_core_t *core,
     pocketjs_net_http_client_body_lease_t lease) {
   if (!core_public_entry_allowed(core) || !core->body_lease_active ||
-      core->body_lease_released ||
-      lease.slot != core->body_lease.slot ||
+      core->body_lease_released || lease.slot != core->body_lease.slot ||
       lease.generation != core->body_lease.generation) {
     return false;
   }
@@ -2931,15 +3196,15 @@ bool pocketjs_net_http_client_core_get_status(
       .completion_retire_pending = core->completion_retire_pending,
       .event_outstanding = core->event_state != EVENT_EMPTY,
       .request_body_credit_outstanding = core->request_body_pull_active,
-      .transport_read_leases_owned =
-          owned_transport_read_lease_count(core),
+      .connection_reusable =
+          core->connection_valid && core->connection_reusable,
+      .transport_read_leases_owned = owned_transport_read_lease_count(core),
       .poison_flags = core->poison_flags,
       .first_poison_cause_code = core->first_poison_cause_code,
       .lifecycle_generation = core->lifecycle_generation,
       .operation_token = core->operation_token,
       .request_body_generation = core->request_body_generation,
-      .request_body_pull_generation =
-          core->request_body_pull_generation,
+      .request_body_pull_generation = core->request_body_pull_generation,
   };
   return true;
 }
@@ -2955,6 +3220,10 @@ bool pocketjs_net_http_client_core_begin_shutdown(
     select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED, 0);
   }
   progress_terminal(core);
+  if (core->operation_token == 0U && core->state == CORE_IDLE &&
+      core->connection_valid) {
+    (void)start_idle_connection_close(core);
+  }
   return true;
 }
 
@@ -2974,6 +3243,8 @@ bool pocketjs_net_http_client_core_confirm_transport_shutdown(
   core->transport_cancel_requested = false;
   core->close_cancel_requested = false;
   core->connection_valid = false;
+  core->connection_reusable = false;
+  core->connection_idle_deadline_us = 0U;
   core->transport_read_lease_valid = false;
   core->transport_read_bytes = NULL;
   core->transport_read_length = 0U;
@@ -2983,6 +3254,10 @@ bool pocketjs_net_http_client_core_confirm_transport_shutdown(
   core->completion_retire_pending = false;
   core->completion_retire_token = 0U;
   core->transport_shutdown_confirmed = true;
+  if (core->operation_token == 0U &&
+      core->state == CORE_IDLE_CONNECTION_CLOSING) {
+    core->state = CORE_IDLE;
+  }
   progress_terminal(core);
   return true;
 }

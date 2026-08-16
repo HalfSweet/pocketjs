@@ -157,6 +157,12 @@ void app_main(void) {
   assert(descriptor->frozen_accessor_free_binding);
   assert(descriptor->exact_plan_handshake);
   assert(descriptor->fixed_operation_pool);
+  assert(descriptor->pocketjs_owned_native_buffer_floor_enforced);
+  assert(descriptor->validation_snapshot_bytes ==
+         POCKETJS_NET_ESP_TRANSPORT_MAX_PINNED_CA_PEM_BYTES + 1U);
+  assert(descriptor->connection_reuse);
+  assert(descriptor->bounded_connection_pool);
+  assert(descriptor->max_cached_connections == descriptor->max_operations);
   assert(descriptor->exact_lease_ownership);
   assert(descriptor->explicit_three_phase_shutdown);
   assert(descriptor->plaintext_http);
@@ -164,6 +170,9 @@ void app_main(void) {
   assert(descriptor->https_explicit_opt_in);
   assert(descriptor->exact_host_tls_profile);
   assert(!descriptor->distinct_tls_errors);
+  assert(descriptor->tls_close_notify);
+  assert(descriptor->tls_close_notify_uses_operation_deadline);
+  assert(!descriptor->tls_close_notify_waits_for_peer);
   assert(strcmp(descriptor->tls_provider_id,
                 POCKETJS_NET_ESP_TLS_PROVIDER_ID) == 0);
   assert(descriptor->redirect_manual);
@@ -190,6 +199,14 @@ void app_main(void) {
       .runtime_generation = 7U,
       .feature_ids = features,
       .feature_count = 1U,
+      .providers =
+          {
+              .http_client_backend_id = POCKETJS_NET_HTTP_CLIENT_CORE_ID,
+              .net_driver_id = POCKETJS_NET_ESP_TRANSPORT_ID,
+              .http_client_tls_source =
+                  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_NONE,
+          },
+      .admission = POCKETJS_NET_ESP_RUNTIME_ADMISSION_TEST_ONLY,
       .max_operations = 1U,
       .limits =
           {
@@ -197,7 +214,7 @@ void app_main(void) {
               .header_bytes = {1024U, 4096U, 8192U},
               .max_body_chunk_bytes = {512U, 2048U, 2048U},
               .max_operations = {1U, 1U, 1U},
-              .native_buffer_bytes = {32768U, 65536U, 524288U},
+              .native_buffer_bytes = {32768U, 524288U, 524288U},
           },
       .connect_timeout_us = 1000000U,
       .headers_timeout_us = 1000000U,
@@ -207,6 +224,17 @@ void app_main(void) {
       .allow_endpoint = allow_endpoint,
   };
   memset(config.plan_hash, 0x5a, sizeof(config.plan_hash));
+  size_t required_native_bytes = 0U;
+  assert(pocketjs_net_esp_runtime_required_native_buffer_bytes(
+      config.max_operations, &required_native_bytes));
+  assert(required_native_bytes <=
+         config.limits.native_buffer_bytes.default_value);
+  pocketjs_net_esp_runtime_config_t underbudgeted = config;
+  underbudgeted.limits.native_buffer_bytes.default_value =
+      required_native_bytes - 1U;
+  assert(pocketjs_net_esp_runtime_create(&underbudgeted, &runtime) ==
+         ESP_ERR_INVALID_ARG);
+  assert(runtime == NULL);
   ESP_LOGI(TAG, "network runtime owner task=%p",
            (void *)xTaskGetCurrentTaskHandle());
   assert(pocketjs_net_esp_runtime_create(&config, &runtime) == ESP_OK);
@@ -260,8 +288,10 @@ void app_main(void) {
   tls_config.guest = guest;
   tls_config.feature_ids = tls_features;
   tls_config.feature_count = 2U;
-  tls_config.tls_trust_source =
-      POCKETJS_NET_ESP_TLS_TRUST_CERTIFICATE_BUNDLE;
+  tls_config.providers.http_client_tls_source =
+      POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_PROVIDER;
+  tls_config.providers.http_client_tls_id = POCKETJS_NET_ESP_TLS_PROVIDER_ID;
+  tls_config.tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_CERTIFICATE_BUNDLE;
   tls_config.wall_clock_trusted = trusted_wall_clock;
   tls_config.wall_clock_context = &tls_clock_context;
   runtime = NULL;
@@ -284,8 +314,7 @@ void app_main(void) {
                                             (uint64_t)esp_timer_get_time(), 1U,
                                             1U, 8U, 4096U, &service) == ESP_OK);
   }
-  assert(wake_called &&
-         pocketjs_net_esp_runtime_is_ready_to_destroy(runtime));
+  assert(wake_called && pocketjs_net_esp_runtime_is_ready_to_destroy(runtime));
   assert(pocketjs_net_esp_runtime_get_stats(runtime, &stats) == ESP_OK);
   assert(stats.configured_operation_slots == 1U &&
          stats.initialized_operation_slots == 1U &&

@@ -29,11 +29,15 @@ Guest delivery. Operation tokens are strictly increasing 64-bit values and
 never wrap. Connection and read-lease generations also never wrap, so a stale
 handle cannot become valid through slot reuse.
 
-Cancel or timeout of connect, read, or write closes that connection. In
+Cancel or timeout of connect, read, write, or close closes that connection. In
 particular, a partially completed write cannot leave a reusable stream with an
 unreported prefix, and a cancelled read cannot reuse an HTTP/1 connection at an
 unknown response boundary. Resolve cancellation retains only its quarantined
-DNS context; cancelling close leaves the connection open for an explicit retry.
+DNS context. A normal TLS close sends `close_notify`; `WANT_READ`/`WANT_WRITE`
+retries consume bounded owner-pump steps under the close operation's monotonic
+deadline. The client does not wait indefinitely for a reciprocal alert. A
+close-alert failure, cancellation, or timeout hard-closes the native stream and
+is reported through the existing close terminal path.
 
 Poison recovery is separate from healthy shutdown. An owner may call
 `pocketjs_net_esp_transport_destroy_poisoned` only after the sole Core using the

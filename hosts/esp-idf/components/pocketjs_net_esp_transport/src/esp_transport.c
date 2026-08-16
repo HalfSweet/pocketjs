@@ -62,7 +62,7 @@
 #if DNS_MAX_HOST_IP != POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES
 #error "CONFIG_LWIP_DNS_MAX_HOST_IP must equal PocketJS candidate capacity"
 #endif
-#if defined(CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM) &&                         \
+#if defined(CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM) &&                        \
     CONFIG_LWIP_HOOK_DNS_EXT_RESOLVE_CUSTOM
 #error "PocketJS ESP transport requires stock tcpip-thread DNS callbacks"
 #endif
@@ -234,6 +234,11 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
     .plaintext_fallback = false,
     .renegotiation = false,
     .early_data = false,
+    .tls_close_notify = true,
+    .tls_close_notify_uses_operation_deadline = true,
+    /* The client sends an orderly alert but does not wait indefinitely for a
+     * reciprocal alert before releasing the native connection. */
+    .tls_close_notify_waits_for_peer = false,
     /* Static callback messages are pre-acquired at create time, but their
      * backing MEMP pool and DNS table are IDF-owned rather than byte-bounded.
      */
@@ -576,8 +581,9 @@ static pocketjs_net_esp_error_t map_tls_error(int tls_code,
   }
 }
 
-pocketjs_net_esp_error_t pocketjs_net_esp_transport_map_tls_error_for_test(
-    int tls_code, uint32_t certificate_flags) {
+pocketjs_net_esp_error_t
+pocketjs_net_esp_transport_map_tls_error_for_test(int tls_code,
+                                                  uint32_t certificate_flags) {
   return map_tls_error(tls_code, certificate_flags);
 }
 
@@ -772,8 +778,8 @@ tls_config_shape_valid(const pocketjs_net_esp_transport_config_t *config) {
 
 static void tcpip_destroy_barrier(void *context) { (void)context; }
 
-static esp_err_t prepare_poisoned_dns_teardown(
-    pocketjs_net_esp_transport_t *transport) {
+static esp_err_t
+prepare_poisoned_dns_teardown(pocketjs_net_esp_transport_t *transport) {
   portENTER_CRITICAL(&transport->lock);
   for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
        ++index) {
@@ -795,8 +801,7 @@ static esp_err_t prepare_poisoned_dns_teardown(
   bool callbacks_drained = true;
   portENTER_CRITICAL(&transport->lock);
   for (size_t index = 0;
-       callbacks_drained &&
-       index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
+       callbacks_drained && index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
        ++index) {
     callbacks_drained =
         transport->dns_contexts[index].state == DNS_CONTEXT_FREE;
@@ -805,8 +810,7 @@ static esp_err_t prepare_poisoned_dns_teardown(
   return callbacks_drained ? ESP_OK : ESP_ERR_NOT_FINISHED;
 }
 
-static void release_transport_storage(
-    pocketjs_net_esp_transport_t *transport) {
+static void release_transport_storage(pocketjs_net_esp_transport_t *transport) {
   for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
        ++index) {
     tcpip_callbackmsg_delete(transport->dns_contexts[index].submit_message);
@@ -825,8 +829,7 @@ esp_err_t pocketjs_net_esp_transport_validate_config(
   if (config == NULL || !tls_config_shape_valid(config)) {
     return ESP_ERR_INVALID_ARG;
   }
-  if (config->tls_trust_source ==
-          POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA &&
+  if (config->tls_trust_source == POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA &&
       !validate_pinned_ca(config->host_pinned_ca_pem,
                           config->host_pinned_ca_pem_bytes)) {
     return ESP_ERR_INVALID_ARG;
@@ -1725,6 +1728,42 @@ static void pump_close(pocketjs_net_esp_transport_t *transport,
       &transport->connections[operation->connection_slot];
   pocketjs_net_esp_connection_t handle =
       connection_handle(operation->connection_slot, connection->generation);
+  if (connection->secure) {
+    mbedtls_ssl_context *ssl = esp_tls_get_ssl_context(connection->tls);
+    if (ssl == NULL) {
+      operation_cleanup_for_error(transport, operation, true);
+      enqueue_error(transport, operation,
+                    POCKETJS_NET_ESP_ERROR_TRANSPORT_FAILED,
+                    ESP_ERR_INVALID_STATE, 0, 0U, false);
+      return;
+    }
+    int result = mbedtls_ssl_close_notify(ssl);
+    pocketjs_net_tls_close_notify_outcome_t outcome =
+        pocketjs_net_classify_tls_close_notify(
+            result, MBEDTLS_ERR_SSL_WANT_READ, MBEDTLS_ERR_SSL_WANT_WRITE);
+    if (outcome == POCKETJS_NET_TLS_CLOSE_NOTIFY_RETRY) {
+      return;
+    }
+    if (outcome == POCKETJS_NET_TLS_CLOSE_NOTIFY_FAILED) {
+      int cause = 0;
+      int system_error = 0;
+      int tls_code = 0;
+      uint32_t flags = 0U;
+      read_tls_error(connection->tls, &cause, &system_error, &tls_code, &flags);
+      if (tls_code == 0) {
+        tls_code = result;
+      }
+      if (system_error != 0) {
+        cause = system_error;
+      }
+      operation_cleanup_for_error(transport, operation, true);
+      enqueue_error(transport, operation,
+                    system_error != 0 ? map_errno(system_error)
+                                      : map_tls_error(tls_code, flags),
+                    cause, tls_code, flags, false);
+      return;
+    }
+  }
   connection_native_close(connection);
   pocketjs_net_esp_completion_t completion = {
       .type = POCKETJS_NET_ESP_TERMINAL_CLOSED,

@@ -39,6 +39,14 @@ int main(void) {
          POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED);
   assert(pocketjs_net_classify_tls_error(-0x2700, 0U, NULL) ==
          POCKETJS_NET_TLS_ERROR_CLASS_HANDSHAKE_FAILED);
+  assert(pocketjs_net_classify_tls_close_notify(0, -0x6900, -0x6880) ==
+         POCKETJS_NET_TLS_CLOSE_NOTIFY_COMPLETE);
+  assert(pocketjs_net_classify_tls_close_notify(-0x6900, -0x6900, -0x6880) ==
+         POCKETJS_NET_TLS_CLOSE_NOTIFY_RETRY);
+  assert(pocketjs_net_classify_tls_close_notify(-0x6880, -0x6900, -0x6880) ==
+         POCKETJS_NET_TLS_CLOSE_NOTIFY_RETRY);
+  assert(pocketjs_net_classify_tls_close_notify(-0x1234, -0x6900, -0x6880) ==
+         POCKETJS_NET_TLS_CLOSE_NOTIFY_FAILED);
 
   pocketjs_net_token_gate_t gate = {0};
   assert(!pocketjs_net_token_gate_can_accept(&gate, 0));
@@ -147,7 +155,7 @@ int main(void) {
       POCKETJS_NET_TRANSPORT_OPERATION_READ));
   assert(pocketjs_net_operation_cancel_closes_connection(
       POCKETJS_NET_TRANSPORT_OPERATION_WRITE));
-  assert(!pocketjs_net_operation_cancel_closes_connection(
+  assert(pocketjs_net_operation_cancel_closes_connection(
       POCKETJS_NET_TRANSPORT_OPERATION_CLOSE));
   return 0;
 }

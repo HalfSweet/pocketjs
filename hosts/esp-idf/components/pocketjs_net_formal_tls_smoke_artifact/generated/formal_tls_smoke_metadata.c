@@ -29,6 +29,11 @@ const pocketjs_network_v1_feature_id_t
 const uint16_t pocketjs_net_formal_tls_smoke_feature_count =
     2U;
 
+const char pocketjs_net_formal_tls_smoke_http_client_backend_id[] =
+    "pocketjs.net.http-client-core.v1.experimental";
+const char pocketjs_net_formal_tls_smoke_net_driver_id[] =
+    "pocketjs.net.esp-idf.transport.v1.experimental";
+
 const char pocketjs_net_formal_tls_smoke_factory_sha256[] =
     "sha256:55b7bc93ff27ad2ed686767484fea1775c966637572e28fe9a04472be90c5847";
 const uint8_t pocketjs_net_formal_tls_smoke_factory_sha256_bytes[32] = {

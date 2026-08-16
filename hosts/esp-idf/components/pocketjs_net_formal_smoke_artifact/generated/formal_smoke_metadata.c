@@ -28,6 +28,11 @@ const pocketjs_network_v1_feature_id_t
 const uint16_t pocketjs_net_formal_smoke_feature_count =
     1U;
 
+const char pocketjs_net_formal_smoke_http_client_backend_id[] =
+    "pocketjs.net.http-client-core.v1.experimental";
+const char pocketjs_net_formal_smoke_net_driver_id[] =
+    "pocketjs.net.esp-idf.transport.v1.experimental";
+
 const char pocketjs_net_formal_smoke_factory_sha256[] =
     "sha256:951049cdb1147f2dc06eda38b2653241e94de3b526e3880755cbe22789a72a6e";
 const uint8_t pocketjs_net_formal_smoke_factory_sha256_bytes[32] = {

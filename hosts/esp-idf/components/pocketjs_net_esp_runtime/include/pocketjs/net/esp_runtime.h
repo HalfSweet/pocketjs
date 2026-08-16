@@ -48,6 +48,24 @@ typedef struct {
   pocketjs_net_esp_runtime_limit_range_t native_buffer_bytes;
 } pocketjs_net_esp_runtime_limits_t;
 
+typedef enum {
+  POCKETJS_NET_ESP_RUNTIME_ADMISSION_TEST_ONLY = 1,
+  POCKETJS_NET_ESP_RUNTIME_ADMISSION_PUBLIC,
+} pocketjs_net_esp_runtime_admission_t;
+
+typedef enum {
+  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_NONE = 0,
+  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_PROVIDER,
+  POCKETJS_NET_ESP_RUNTIME_TLS_SELECTION_BACKEND,
+} pocketjs_net_esp_runtime_tls_selection_source_t;
+
+typedef struct {
+  const char *http_client_backend_id;
+  const char *net_driver_id;
+  pocketjs_net_esp_runtime_tls_selection_source_t http_client_tls_source;
+  const char *http_client_tls_id;
+} pocketjs_net_esp_runtime_provider_selection_t;
+
 typedef struct {
   /** Guest borrowed until destroy; it supplies the owner context and guard. */
   pocketjs_esp_guest_t *guest;
@@ -58,6 +76,10 @@ typedef struct {
   /** Exact, strictly increasing network feature projection. */
   const pocketjs_network_v1_feature_id_t *feature_ids;
   uint16_t feature_count;
+  /** Exact provider selection copied from the already verified Build Plan. */
+  pocketjs_net_esp_runtime_provider_selection_t providers;
+  /** Test-only plans never cause public capability advertisement. */
+  pocketjs_net_esp_runtime_admission_t admission;
   /** One through POCKETJS_NET_ESP_RUNTIME_MAX_OPERATIONS. */
   uint16_t max_operations;
   pocketjs_net_esp_runtime_limits_t limits;
@@ -109,6 +131,9 @@ typedef struct {
   bool exact_plan_handshake;
   bool endpoint_permission_rechecked;
   bool fixed_operation_pool;
+  bool pocketjs_owned_native_buffer_floor_enforced;
+  bool connection_reuse;
+  bool bounded_connection_pool;
   bool exact_lease_ownership;
   bool explicit_three_phase_shutdown;
   bool plaintext_http;
@@ -116,6 +141,9 @@ typedef struct {
   bool https_explicit_opt_in;
   bool exact_host_tls_profile;
   bool distinct_tls_errors;
+  bool tls_close_notify;
+  bool tls_close_notify_uses_operation_deadline;
+  bool tls_close_notify_waits_for_peer;
   const char *tls_provider_id;
   bool redirect_manual;
   bool redirect_error;
@@ -128,8 +156,10 @@ typedef struct {
   bool proxy;
   bool content_decoding;
   size_t max_operations;
+  size_t max_cached_connections;
   size_t max_redirects;
   size_t operation_slot_bytes;
+  size_t validation_snapshot_bytes;
 } pocketjs_net_esp_runtime_descriptor_t;
 
 typedef struct {
@@ -154,6 +184,8 @@ typedef struct {
   size_t runtime_instance_bytes;
   size_t core_storage_bytes;
   size_t transport_instances;
+  size_t pocketjs_owned_native_bytes;
+  size_t admitted_native_buffer_bytes;
 } pocketjs_net_esp_runtime_stats_t;
 
 typedef struct {
@@ -165,6 +197,15 @@ typedef struct {
 
 const pocketjs_net_esp_runtime_descriptor_t *
 pocketjs_net_esp_runtime_descriptor(void);
+
+/**
+ * Compute the maximum PocketJS-owned native allocation payload for the fixed
+ * runtime, binding tombstone, configured slots, transports, and CA-validation
+ * snapshot. Allocator metadata and IDF-owned lwIP/Mbed TLS pools are excluded
+ * and remain separate descriptor/admission requirements.
+ */
+bool pocketjs_net_esp_runtime_required_native_buffer_bytes(
+    uint16_t max_operations, size_t *out_bytes);
 
 /** Create on the same FreeRTOS task that owns quickjs_context. */
 esp_err_t

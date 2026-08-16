@@ -12,6 +12,14 @@ only call the configured scheduler wake hook; Guest code runs only through
 Each operation slot owns one Core and one transport because Core-local
 transport tokens cannot safely share a completion consumer. The pool has a
 compile-time ceiling of eight slots and a smaller admitted runtime size.
+`pocketjs_net_esp_runtime_required_native_buffer_bytes()` computes the maximum
+PocketJS-owned allocation payload for the runtime, binding tombstone, fixed
+slots, dedicated transports, and CA-validation snapshot. Creation rejects a
+`runtime.nativeBufferBytes` default or hard limit below that result. Header
+Latin-1 conversion uses fixed runtime scratch instead of transient native heap,
+and stats report both current PocketJS-owned bytes and the admitted default.
+Allocator metadata and IDF-owned lwIP/Mbed TLS pools remain outside this number
+and must be admitted separately before public capability advertisement.
 Response body events retain the Core lease until the formal
 `leaseTake`/`leaseReadInto`/`leaseRelease` sequence completes. Request upload
 pull events are retired immediately while their single credit and Core body
@@ -32,6 +40,11 @@ reliably preserve the reason flags after a failed handshake. The runtime maps
 that failure to `tls_certificate_invalid` and reports
 `distinct_tls_errors=false`; it does not promise a separate
 `tls_hostname_mismatch` result for this provider.
+TLS close operations send a client `close_notify`. Nonblocking
+`WANT_READ`/`WANT_WRITE` results are retried by later owner turns under the
+close operation's monotonic deadline. The Host does not wait indefinitely for
+the peer's reciprocal alert; failure, cancellation, and timeout hard-close the
+dedicated connection.
 
 The runtime passes `manual`, `error`, and bounded `follow` modes into the Core.
 The final response metadata carries the effective URL and whether any hop was
@@ -39,9 +52,19 @@ followed. A one-shot streaming producer can follow redirects that rewrite the
 request to GET, but 307/308 and other preserve-body redirects fail with
 `invalid_state`; the runtime never asks the Guest producer to replay consumed
 input. The native redirect resolver is still an ASCII-only subset of the
-framework URL implementation. The selected TLS provider and complete Host
-descriptor are not yet verified against the Build Plan by this component, TLS
-close-notify is not bounded, and native TLS allocation limits are not proven.
+framework URL implementation. Runtime creation now compares the Build Plan's
+generated HTTP backend, network driver, and optional TLS provider selection
+with the exact compiled provider IDs before allocating slots. It also checks
+the compiled Core and transport descriptors against the lifecycle, redirect,
+credit, lease, pool, and TLS properties consumed by the runtime. This check
+applies to test-only plans, so a component replacement or descriptor drift
+fails before Guest evaluation. A public admission request additionally
+requires every composed descriptor to advertise the capability, exhaustive
+DNS candidates with generation-safe cancellation, bounded native-step time,
+and bounded lwIP allocation. TLS public admission also requires nonblocking
+TLS steps, no ESP-TLS internal resolver allocation, bounded ESP-TLS/X.509
+allocation, and distinct certificate errors. Those properties are currently
+false. Full product Host descriptor/resource aggregation is still incomplete.
 **The descriptor therefore keeps public capability advertisement off.**
 
 Shutdown has three explicit stages: stop admission and request cancellation,

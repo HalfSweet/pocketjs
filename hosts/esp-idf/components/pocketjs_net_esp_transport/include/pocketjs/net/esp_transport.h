@@ -150,6 +150,9 @@ typedef struct {
   bool plaintext_fallback;
   bool renegotiation;
   bool early_data;
+  bool tls_close_notify;
+  bool tls_close_notify_uses_operation_deadline;
+  bool tls_close_notify_waits_for_peer;
   bool bounded_lwip_dns_callback_allocation;
   bool bounded_lwip_socket_allocation;
   bool bounded_esp_tls_allocation;
@@ -361,8 +364,9 @@ const char *pocketjs_net_esp_error_name(pocketjs_net_esp_error_t error);
 
 #if defined(POCKETJS_NET_ESP_TRANSPORT_TEST_INTERNALS)
 /** Build-smoke seam for deterministic native TLS error mapping checks. */
-pocketjs_net_esp_error_t pocketjs_net_esp_transport_map_tls_error_for_test(
-    int tls_code, uint32_t certificate_flags);
+pocketjs_net_esp_error_t
+pocketjs_net_esp_transport_map_tls_error_for_test(int tls_code,
+                                                  uint32_t certificate_flags);
 #endif
 
 #ifdef __cplusplus

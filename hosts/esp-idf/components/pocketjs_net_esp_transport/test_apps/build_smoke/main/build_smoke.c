@@ -60,6 +60,9 @@ void app_main(void) {
   assert(!descriptor->plaintext_fallback);
   assert(!descriptor->renegotiation);
   assert(!descriptor->early_data);
+  assert(descriptor->tls_close_notify);
+  assert(descriptor->tls_close_notify_uses_operation_deadline);
+  assert(!descriptor->tls_close_notify_waits_for_peer);
   assert(!descriptor->bounded_lwip_dns_callback_allocation);
   assert(!descriptor->bounded_lwip_socket_allocation);
   assert(!descriptor->bounded_esp_tls_allocation);

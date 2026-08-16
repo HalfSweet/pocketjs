@@ -106,6 +106,10 @@ interface GeneratedMetadata {
   readonly planHash: string;
   readonly planHashBytes: readonly number[];
   readonly featureIds: readonly number[];
+  readonly providers: {
+    readonly httpClientBackendId: string;
+    readonly netDriverId: string;
+  };
   readonly factory: {
     readonly sourceBytes: number;
     readonly storageBytes: number;
@@ -192,6 +196,11 @@ ${cFeatureIds(metadata.featureIds)}
 const uint16_t pocketjs_net_formal_smoke_feature_count =
     ${metadata.featureIds.length}U;
 
+const char pocketjs_net_formal_smoke_http_client_backend_id[] =
+    ${cString(metadata.providers.httpClientBackendId)};
+const char pocketjs_net_formal_smoke_net_driver_id[] =
+    ${cString(metadata.providers.netDriverId)};
+
 const char pocketjs_net_formal_smoke_factory_sha256[] =
     ${cString(`sha256:${digest}`)};
 const uint8_t pocketjs_net_formal_smoke_factory_sha256_bytes[32] = {
@@ -244,14 +253,20 @@ async function resolvePlan(): Promise<ResolvedBuildPlan> {
     throw new Error("formal smoke plan identity escaped its exact test-only allowlist");
   }
   const connect = result.plan.network.policy.connect;
+  const backend = result.plan.network.providers.backendByRole["http.client"];
+  const driver = result.plan.network.providers.netDriverId;
   if (
     connect.length !== 1 ||
     connect[0]?.protocol !== SCHEME ||
     connect[0]?.host !== HOST ||
     connect[0]?.port.min !== PORT ||
-    connect[0]?.port.max !== PORT
+    connect[0]?.port.max !== PORT ||
+    backend !== "pocketjs.net.http-client-core.v1.experimental" ||
+    driver !== "pocketjs.net.esp-idf.transport.v1.experimental" ||
+    Object.keys(result.plan.network.providers.backendByRole).length !== 1 ||
+    Object.keys(result.plan.network.providers.tlsByRole).length !== 0
   ) {
-    throw new Error("formal smoke plan endpoint does not match its canonical metadata");
+    throw new Error("formal smoke plan endpoint or provider selection drifted");
   }
   return result.plan;
 }
@@ -322,6 +337,11 @@ async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
     planHash: plan.planHash,
     planHashBytes,
     featureIds,
+    providers: {
+      httpClientBackendId:
+        plan.network!.providers.backendByRole["http.client"]!,
+      netDriverId: plan.network!.providers.netDriverId,
+    },
     factory: {
       sourceBytes: source.length,
       storageBytes: factory.length,

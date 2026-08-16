@@ -74,6 +74,10 @@ extern const pocketjs_network_v1_feature_id_t
     pocketjs_net_formal_smoke_feature_ids[];
 extern const uint16_t pocketjs_net_formal_smoke_feature_count;
 
+/** Exact provider selection copied from the verified Build Plan. */
+extern const char pocketjs_net_formal_smoke_http_client_backend_id[];
+extern const char pocketjs_net_formal_smoke_net_driver_id[];
+
 /** SHA-256 of factory_length source bytes, excluding the trailing NUL. */
 extern const char pocketjs_net_formal_smoke_factory_sha256[];
 extern const uint8_t pocketjs_net_formal_smoke_factory_sha256_bytes[32];

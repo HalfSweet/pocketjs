@@ -29,8 +29,10 @@ typedef enum {
   POCKETJS_NET_ESP_RUNTIME_LEASE_RELEASED,
 } pocketjs_net_esp_runtime_lease_state_t;
 
-typedef struct pocketjs_net_esp_runtime_binding_state
-    pocketjs_net_esp_runtime_binding_state_t;
+typedef struct pocketjs_net_esp_runtime_binding_state {
+  pocketjs_net_esp_runtime_t *runtime;
+  uint32_t references;
+} pocketjs_net_esp_runtime_binding_state_t;
 
 typedef struct {
   bool initialized;
@@ -158,6 +160,8 @@ struct pocketjs_net_esp_runtime {
   uint64_t permission_checks;
 
   pocketjs_net_esp_runtime_http_command_t command_scratch;
+  uint16_t
+      latin1_scratch[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_RESPONSE_HEADER_BYTES];
   /* Sized to max_operations by create(); capacity never changes afterward. */
   pocketjs_net_esp_runtime_slot_t slots[];
 };

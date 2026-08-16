@@ -56,6 +56,12 @@ typedef enum {
   POCKETJS_NET_TLS_ERROR_CLASS_RESOURCE_LIMIT,
 } pocketjs_net_tls_error_class_t;
 
+typedef enum {
+  POCKETJS_NET_TLS_CLOSE_NOTIFY_COMPLETE = 0,
+  POCKETJS_NET_TLS_CLOSE_NOTIFY_RETRY,
+  POCKETJS_NET_TLS_CLOSE_NOTIFY_FAILED,
+} pocketjs_net_tls_close_notify_outcome_t;
+
 /**
  * Native TLS constants are supplied by the pinned platform build. Keeping the
  * classifier independent of those headers makes the mapping host-testable.
@@ -116,6 +122,10 @@ bool pocketjs_net_operation_cancel_closes_connection(
 pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
     int tls_code, uint32_t certificate_flags,
     const pocketjs_net_tls_error_symbols_t *symbols);
+
+pocketjs_net_tls_close_notify_outcome_t
+pocketjs_net_classify_tls_close_notify(int result, int want_read,
+                                       int want_write);
 
 size_t pocketjs_net_round_robin_next(size_t current, size_t capacity);
 
