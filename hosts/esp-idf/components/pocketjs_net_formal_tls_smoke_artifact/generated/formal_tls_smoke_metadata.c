@@ -9,9 +9,9 @@ extern const uint8_t embedded_factory_start[]
 const uint8_t *const pocketjs_net_formal_tls_smoke_factory_bytes =
     embedded_factory_start;
 const size_t pocketjs_net_formal_tls_smoke_factory_length =
-    470917U;
+    472010U;
 const size_t pocketjs_net_formal_tls_smoke_factory_storage_length =
-    470918U;
+    472011U;
 
 const char pocketjs_net_formal_tls_smoke_plan_hash[] = "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654";
 const uint8_t pocketjs_net_formal_tls_smoke_plan_hash_bytes
@@ -35,11 +35,11 @@ const char pocketjs_net_formal_tls_smoke_net_driver_id[] =
     "pocketjs.net.esp-idf.transport.v1.experimental";
 
 const char pocketjs_net_formal_tls_smoke_factory_sha256[] =
-    "sha256:55b7bc93ff27ad2ed686767484fea1775c966637572e28fe9a04472be90c5847";
+    "sha256:7290243f0b188d4ddbe0f55c994be320b7d2d5c848baf6dd836f14934a63a6dc";
 const uint8_t pocketjs_net_formal_tls_smoke_factory_sha256_bytes[32] = {
-    0x55, 0xb7, 0xbc, 0x93, 0xff, 0x27, 0xad, 0x2e, 0xd6, 0x86, 0x76, 0x74,
-    0x84, 0xfe, 0xa1, 0x77, 0x5c, 0x96, 0x66, 0x37, 0x57, 0x2e, 0x28, 0xfe,
-    0x9a, 0x04, 0x47, 0x2b, 0xe9, 0x0c, 0x58, 0x47,
+    0x72, 0x90, 0x24, 0x3f, 0x0b, 0x18, 0x8d, 0x4d, 0xdb, 0xe0, 0xf5, 0x5c,
+    0x99, 0x4b, 0xe3, 0x20, 0xb7, 0xd2, 0xd5, 0xc8, 0x48, 0xba, 0xf6, 0xdd,
+    0x83, 0x6f, 0x14, 0x93, 0x4a, 0x63, 0xa6, 0xdc,
 };
 
 const pocketjs_net_formal_tls_smoke_endpoint_t
@@ -163,6 +163,8 @@ const char pocketjs_net_formal_tls_smoke_tls_provider_id[] =
 
 const char pocketjs_net_formal_tls_smoke_report_global[] =
     "__pocketjsFormalNetworkTlsSmokeReportV1";
+const char pocketjs_net_formal_tls_smoke_cancel_global[] =
+    "__pocketjsFormalNetworkTlsSmokeCancelV1";
 
 _Static_assert(sizeof(pocketjs_net_formal_tls_smoke_plan_hash) == 72U,
                "plan hash text length drifted");

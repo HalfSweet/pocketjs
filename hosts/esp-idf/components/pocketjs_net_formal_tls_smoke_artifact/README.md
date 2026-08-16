@@ -34,6 +34,19 @@ the selected Mac peer, provision a trusted wall clock, and pass both facts to
 the runtime as `POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA` and rejects every
 other Host profile.
 
+The runner also exposes test-only deadline and cancellation controls. A zero
+stage-timeout field selects the fixed artifact default; a nonzero value is
+passed unchanged to the formal runtime. `cancel_after_ms` installs no timer in
+native networking: the owner task waits until the first health request is
+active, then invokes the artifact's private AbortController function through
+the guarded Guest call API. These controls are for deterministic delayed-
+handshake tests and do not change the Build Plan or public SDK surface.
+With a five-second peer handshake delay, a two-second connect deadline must
+produce `timed_out`; cancelling after 500 ms must produce `aborted`. Both runs
+must complete three-phase shutdown with zero poison and no live leases. Peer
+evidence must contain the board's DNS answer, delayed TLS connection, and SNI
+`pocketjs.test`, but no successful connection or HTTP request.
+
 The generated artifact metadata also carries the exact HTTP backend, network
 driver, and TLS provider selection from its verified Build Plan. The runner
 passes those generated values into fail-closed test-only runtime admission;

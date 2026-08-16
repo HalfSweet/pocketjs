@@ -1,6 +1,7 @@
-import { fetch } from "@pocketjs/framework/net/http";
+import { AbortController, fetch } from "@pocketjs/framework/net/http";
 
 const REPORT_GLOBAL = "__pocketjsFormalNetworkTlsSmokeReportV1";
+const CANCEL_GLOBAL = "__pocketjsFormalNetworkTlsSmokeCancelV1";
 const ORIGIN = "https://pocketjs.test:8443";
 const ROUNDS_TOTAL = 20;
 const HEALTH_BODY =
@@ -46,6 +47,15 @@ const state: SmokeState = {
   errorCode: "",
   errorOperation: "",
 };
+
+let activeController: AbortController | null = null;
+
+function cancelActiveRequest(): boolean {
+  const controller = activeController;
+  if (controller === null) return false;
+  controller.abort();
+  return true;
+}
 
 function checkpoint(phase: SmokePhase): void {
   state.phase = phase;
@@ -97,9 +107,17 @@ async function run(): Promise<void> {
     for (let round = 1; round <= ROUNDS_TOTAL; round += 1) {
       state.roundsStarted = round;
       checkpoint("health");
-      const health = await fetch(`${ORIGIN}/health`, {
-        tls: TLS_POLICY,
-      });
+      const healthController = new AbortController();
+      activeController = healthController;
+      let health;
+      try {
+        health = await fetch(`${ORIGIN}/health`, {
+          signal: healthController.signal,
+          tls: TLS_POLICY,
+        });
+      } finally {
+        activeController = null;
+      }
       if (health.status !== 200 || await health.text() !== HEALTH_BODY) {
         throw new Error("formal TLS smoke health response mismatch");
       }
@@ -107,11 +125,19 @@ async function run(): Promise<void> {
 
       checkpoint("echo");
       const payload = echoPayload(round);
-      const echo = await fetch(`${ORIGIN}/echo`, {
-        method: "POST",
-        body: streamedPayload(payload),
-        tls: TLS_POLICY,
-      });
+      const echoController = new AbortController();
+      activeController = echoController;
+      let echo;
+      try {
+        echo = await fetch(`${ORIGIN}/echo`, {
+          method: "POST",
+          body: streamedPayload(payload),
+          signal: echoController.signal,
+          tls: TLS_POLICY,
+        });
+      } finally {
+        activeController = null;
+      }
       const echoed = new Uint8Array(await echo.arrayBuffer());
       if (echo.status !== 200 || !equalBytes(echoed, payload)) {
         throw new Error("formal TLS smoke echo response mismatch");
@@ -129,6 +155,13 @@ async function run(): Promise<void> {
 
 Object.defineProperty(globalThis, REPORT_GLOBAL, {
   value: report,
+  configurable: false,
+  enumerable: false,
+  writable: false,
+});
+
+Object.defineProperty(globalThis, CANCEL_GLOBAL, {
+  value: cancelActiveRequest,
   configurable: false,
   enumerable: false,
   writable: false,

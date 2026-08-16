@@ -45,6 +45,10 @@ static uint64_t deadline_after_ms(uint64_t now_us, uint32_t milliseconds) {
   return delta > UINT64_MAX - now_us ? UINT64_MAX : now_us + delta;
 }
 
+static uint64_t selected_timeout(uint64_t configured, uint64_t fallback) {
+  return configured == 0U ? fallback : configured;
+}
+
 static void wake_owner(void *context) {
   formal_tls_smoke_host_context_t *host = context;
   if (host != NULL && host->owner_task != NULL) {
@@ -106,6 +110,8 @@ valid_config(const pocketjs_net_formal_tls_smoke_run_config_t *config,
              POCKETJS_NET_FORMAL_TLS_SMOKE_MIN_GUEST_STACK_BYTES &&
          config->guest_execution_timeout_us != 0U &&
          config->guest_max_interrupt_checks != 0U &&
+         (config->cancel_after_ms == 0U ||
+          config->cancel_after_ms < config->overall_timeout_ms) &&
          config->overall_timeout_ms != 0U &&
          config->shutdown_warning_ms != 0U &&
          pocketjs_net_formal_tls_smoke_factory_bytes != NULL &&
@@ -271,10 +277,14 @@ esp_err_t pocketjs_net_formal_tls_smoke_run(
               .max_operations = {1U, 1U, 1U},
               .native_buffer_bytes = {65536U, 524288U, 524288U},
           },
-      .connect_timeout_us = FORMAL_TLS_SMOKE_CONNECT_TIMEOUT_US,
-      .headers_timeout_us = FORMAL_TLS_SMOKE_HEADERS_TIMEOUT_US,
-      .idle_timeout_us = FORMAL_TLS_SMOKE_IDLE_TIMEOUT_US,
-      .total_timeout_us = FORMAL_TLS_SMOKE_TOTAL_TIMEOUT_US,
+      .connect_timeout_us = selected_timeout(
+          config->connect_timeout_us, FORMAL_TLS_SMOKE_CONNECT_TIMEOUT_US),
+      .headers_timeout_us = selected_timeout(
+          config->headers_timeout_us, FORMAL_TLS_SMOKE_HEADERS_TIMEOUT_US),
+      .idle_timeout_us = selected_timeout(config->idle_timeout_us,
+                                          FORMAL_TLS_SMOKE_IDLE_TIMEOUT_US),
+      .total_timeout_us = selected_timeout(config->total_timeout_us,
+                                           FORMAL_TLS_SMOKE_TOTAL_TIMEOUT_US),
       .tls_trust_source = POCKETJS_NET_ESP_TLS_TRUST_HOST_PINNED_CA,
       .host_pinned_ca_pem = pocketjs_net_formal_tls_smoke_ca_pem,
       .host_pinned_ca_pem_bytes = pocketjs_net_formal_tls_smoke_ca_pem_length,
@@ -310,6 +320,8 @@ esp_err_t pocketjs_net_formal_tls_smoke_run(
   const uint64_t deadline =
       deadline_after_ms(started_us, config->overall_timeout_ms);
   bool application_complete = false;
+  bool cancel_invoked = false;
+  uint64_t cancel_deadline = 0U;
   while (monotonic_us() < deadline) {
     bool more_ready = false;
     bool jobs_pending = false;
@@ -322,6 +334,27 @@ esp_err_t pocketjs_net_formal_tls_smoke_run(
         pocketjs_net_formal_tls_smoke_read_report(guest, &out_result->report);
     if (run_error != ESP_OK) {
       break;
+    }
+    if (config->cancel_after_ms != 0U && !cancel_invoked &&
+        !out_result->report.done &&
+        out_result->report.phase ==
+            POCKETJS_NET_FORMAL_TLS_SMOKE_PHASE_HEALTH) {
+      const uint64_t now = monotonic_us();
+      if (cancel_deadline == 0U) {
+        cancel_deadline = deadline_after_ms(now, config->cancel_after_ms);
+      }
+      if (now >= cancel_deadline) {
+        bool cancelled = false;
+        run_error = pocketjs_net_formal_tls_smoke_cancel_active_request(
+            guest, &cancelled);
+        if (run_error != ESP_OK || !cancelled) {
+          if (run_error == ESP_OK) {
+            run_error = ESP_ERR_INVALID_STATE;
+          }
+          break;
+        }
+        cancel_invoked = true;
+      }
     }
     run_error =
         pocketjs_net_esp_runtime_get_stats(runtime, &out_result->runtime);

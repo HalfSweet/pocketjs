@@ -68,6 +68,7 @@ def make_server(
     events: QuietSink | RecordingSink | None = None,
     *,
     observe_tls_close_notify: bool = False,
+    tls_handshake_delay_ms: int = 0,
 ) -> http_peer.ThreadingPeerServer:
     return http_peer.ThreadingPeerServer(
         ("127.0.0.1", 0),
@@ -78,6 +79,7 @@ def make_server(
         events=events if events is not None else QuietSink(),
         tls_context=tls_context,
         observe_tls_close_notify=observe_tls_close_notify,
+        tls_handshake_delay_ms=tls_handshake_delay_ms,
     )
 
 
@@ -281,6 +283,7 @@ class TLSPeerTest(unittest.TestCase):
         maximum_version: ssl.TLSVersion | None = None,
         events: RecordingSink | None = None,
         observe_tls_close_notify: bool = False,
+        tls_handshake_delay_ms: int = 0,
     ) -> tuple[http_peer.ThreadingPeerServer, str, int]:
         tls_context = http_peer.create_server_tls_context(
             self.pki[cert_name], self.pki[key_name], "1.2"
@@ -291,6 +294,7 @@ class TLSPeerTest(unittest.TestCase):
             tls_context,
             events,
             observe_tls_close_notify=observe_tls_close_notify,
+            tls_handshake_delay_ms=tls_handshake_delay_ms,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -516,6 +520,26 @@ class TLSPeerTest(unittest.TestCase):
         ]
         self.assertEqual(closes[0]["tls_close_state"], "ragged_eof")
         self.assertIs(closes[0]["tls_close_notify_observed"], False)
+
+    def test_delays_tls_handshake_without_serving_http(self) -> None:
+        events = RecordingSink()
+        _, _, port = self.start_profile(
+            "server_cert",
+            "server_key",
+            maximum_version=ssl.TLSVersion.TLSv1_2,
+            events=events,
+            tls_handshake_delay_ms=250,
+        )
+        raw = socket.create_connection(("127.0.0.1", port), timeout=1)
+        raw.settimeout(0.05)
+        with self.assertRaises((TimeoutError, socket.timeout)):
+            self.trusted_context().wrap_socket(raw, server_hostname="localhost")
+        raw.close()
+        self.assertTrue(events.wait_for("tls_handshake_delay"))
+        self.assertTrue(events.wait_for("tls_handshake_error"))
+        records = events.snapshot()
+        self.assertFalse(any(event == "connection_open" for event, _ in records))
+        self.assertFalse(any(event == "request" for event, _ in records))
 
     def test_wrong_hostname_is_rejected(self) -> None:
         error = self.assert_profile_rejected("wrong_host_cert", "wrong_host_key")

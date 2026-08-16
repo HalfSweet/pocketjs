@@ -18,6 +18,7 @@ const metadata = await Bun.file(new URL("generated/metadata.json", COMPONENT)).j
   planHashBytes: number[];
   featureIds: number[];
   reportGlobal: string;
+  cancelGlobal: string;
 };
 const binary = new Uint8Array(await Bun.file(
   new URL("generated/factory.js.bin", COMPONENT),
@@ -146,7 +147,11 @@ const factory = (0, eval)(source) as (binding: NetworkV1BindingTable) => unknown
 if (typeof factory !== "function" || factory.length !== 0) {
   throw new Error("generated artifact did not evaluate to the factory ABI");
 }
-if (Object.hasOwn(globalThis, metadata.reportGlobal) || Object.hasOwn(globalThis, "frame")) {
+if (
+  Object.hasOwn(globalThis, metadata.reportGlobal) ||
+  Object.hasOwn(globalThis, metadata.cancelGlobal) ||
+  Object.hasOwn(globalThis, "frame")
+) {
   throw new Error("application initialized before the factory call");
 }
 factory(binding);
@@ -155,8 +160,13 @@ for (let checkpoint = 0; checkpoint < 20; checkpoint += 1) {
 }
 
 const reportFunction = (globalThis as Record<string, unknown>)[metadata.reportGlobal];
-if (typeof reportFunction !== "function" || typeof globalThis.frame !== "function") {
-  throw new Error("factory did not install its report and legacy frame slots");
+const cancelFunction = (globalThis as Record<string, unknown>)[metadata.cancelGlobal];
+if (
+  typeof reportFunction !== "function" ||
+  typeof cancelFunction !== "function" ||
+  typeof globalThis.frame !== "function"
+) {
+  throw new Error("factory did not install its report, cancel, and frame slots");
 }
 const report = (reportFunction as () => Record<string, unknown>)();
 if (
@@ -173,6 +183,9 @@ if (
   report.errorCode !== "permission_denied"
 ) {
   throw new Error(`unexpected refusal report: ${JSON.stringify(report)}`);
+}
+if ((cancelFunction as () => boolean)() !== false) {
+  throw new Error("completed request unexpectedly remained cancellable");
 }
 
 console.log(JSON.stringify(report));

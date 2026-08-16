@@ -26,6 +26,10 @@ void app_main(void) {
   assert(strcmp(pocketjs_net_formal_tls_smoke_ca_der_sha256,
                 "sha256:318ae57f0fb82d12cf86431571fb6ec3556ecb74f530a5be"
                 "6f741a482b5447af") == 0);
+  assert(strcmp(pocketjs_net_formal_tls_smoke_report_global,
+                "__pocketjsFormalNetworkTlsSmokeReportV1") == 0);
+  assert(strcmp(pocketjs_net_formal_tls_smoke_cancel_global,
+                "__pocketjsFormalNetworkTlsSmokeCancelV1") == 0);
 
   int clock_context = 1;
   const pocketjs_net_formal_tls_smoke_run_config_t config = {
@@ -39,6 +43,10 @@ void app_main(void) {
           POCKETJS_NET_FORMAL_TLS_SMOKE_MIN_GUEST_STACK_BYTES,
       .guest_execution_timeout_us = 100000U,
       .guest_max_interrupt_checks = 100000U,
+      .connect_timeout_us = 500000U,
+      .headers_timeout_us = 1000000U,
+      .idle_timeout_us = 1000000U,
+      .total_timeout_us = 2000000U,
       .overall_timeout_ms = 120000U,
       .shutdown_warning_ms = 5000U,
   };
@@ -55,4 +63,10 @@ void app_main(void) {
     assert(pocketjs_net_formal_tls_smoke_run(&invalid, &result) ==
            ESP_ERR_INVALID_ARG);
   }
+
+  pocketjs_net_formal_tls_smoke_run_config_t invalid_cancel = config;
+  invalid_cancel.cancel_after_ms = invalid_cancel.overall_timeout_ms;
+  pocketjs_net_formal_tls_smoke_run_result_t invalid_cancel_result = {0};
+  assert(pocketjs_net_formal_tls_smoke_run(
+             &invalid_cancel, &invalid_cancel_result) == ESP_ERR_INVALID_ARG);
 }

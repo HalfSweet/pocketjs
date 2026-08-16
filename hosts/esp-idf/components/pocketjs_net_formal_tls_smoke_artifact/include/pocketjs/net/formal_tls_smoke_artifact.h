@@ -84,10 +84,16 @@ extern const char pocketjs_net_formal_tls_smoke_ca_der_sha256[];
 extern const char pocketjs_net_formal_tls_smoke_tls_provider_id[];
 
 extern const char pocketjs_net_formal_tls_smoke_report_global[];
+extern const char pocketjs_net_formal_tls_smoke_cancel_global[];
 
 esp_err_t pocketjs_net_formal_tls_smoke_read_report(
     pocketjs_esp_guest_t *guest,
     pocketjs_net_formal_tls_smoke_report_t *out_report);
+
+/** Invoke the test-only AbortController for the currently active request. */
+esp_err_t
+pocketjs_net_formal_tls_smoke_cancel_active_request(pocketjs_esp_guest_t *guest,
+                                                    bool *out_cancelled);
 
 typedef struct {
   /** Must equal the generated HTTPS origin exactly. */
@@ -101,6 +107,13 @@ typedef struct {
   size_t guest_stack_limit_bytes;
   uint64_t guest_execution_timeout_us;
   uint32_t guest_max_interrupt_checks;
+  /** Zero selects the artifact's fixed default for each runtime deadline. */
+  uint64_t connect_timeout_us;
+  uint64_t headers_timeout_us;
+  uint64_t idle_timeout_us;
+  uint64_t total_timeout_us;
+  /** Zero disables cancellation; otherwise abort the first active request. */
+  uint32_t cancel_after_ms;
   uint32_t overall_timeout_ms;
   uint32_t shutdown_warning_ms;
 } pocketjs_net_formal_tls_smoke_run_config_t;

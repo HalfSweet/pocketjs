@@ -50,9 +50,9 @@
     "tlsProviderId": "pocketjs.net.esp-idf.esp-tls.v1.experimental"
   },
   "factory": {
-    "sourceBytes": 470917,
-    "storageBytes": 470918,
-    "sha256": "sha256:55b7bc93ff27ad2ed686767484fea1775c966637572e28fe9a04472be90c5847"
+    "sourceBytes": 472010,
+    "storageBytes": 472011,
+    "sha256": "sha256:7290243f0b188d4ddbe0f55c994be320b7d2d5c848baf6dd836f14934a63a6dc"
   },
   "endpoint": {
     "origin": "https://pocketjs.test:8443",
@@ -73,6 +73,7 @@
     "caDerSha256": "sha256:318ae57f0fb82d12cf86431571fb6ec3556ecb74f530a5be6f741a482b5447af"
   },
   "reportGlobal": "__pocketjsFormalNetworkTlsSmokeReportV1",
+  "cancelGlobal": "__pocketjsFormalNetworkTlsSmokeCancelV1",
   "stagedSurfaceBuild": {
     "publicSpecifier": "@pocketjs/framework/net/http",
     "permit": "test-only-staged-https-client-fetch",

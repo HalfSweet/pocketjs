@@ -158,6 +158,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         events: EventSink,
         tls_context: ssl.SSLContext | None = None,
         observe_tls_close_notify: bool = False,
+        tls_handshake_delay_ms: int = 0,
     ) -> None:
         self.body_limit = body_limit
         self.header_limit = header_limit
@@ -167,6 +168,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.state = PeerState()
         self.tls_context = tls_context
         self.observe_tls_close_notify = observe_tls_close_notify
+        self.tls_handshake_delay_ms = tls_handshake_delay_ms
         if self.tls_context is not None:
             self.tls_context.set_servername_callback(self._record_tls_server_name)
         super().__init__(address, PeerHandler)
@@ -224,6 +226,13 @@ class PeerHandler(socketserver.BaseRequestHandler):
             if self.server.observe_tls_close_notify:
                 self.tls_close_state = "not_observed"
             try:
+                if self.server.tls_handshake_delay_ms:
+                    self.server.events.emit(
+                        "tls_handshake_delay",
+                        peer_ipv4=self.client_address[0],
+                        delay_ms=self.server.tls_handshake_delay_ms,
+                    )
+                    time.sleep(self.server.tls_handshake_delay_ms / 1000)
                 self.request.do_handshake()
             except OSError as error:
                 self.request.pocketjs_handshake_failed = True  # type: ignore[attr-defined]
@@ -917,6 +926,10 @@ def run_server(args: argparse.Namespace) -> int:
         raise ValueError("--tls-cert and --tls-key must be provided together")
     if args.observe_tls_close_notify and not args.tls_cert:
         raise ValueError("--observe-tls-close-notify requires TLS")
+    if args.tls_handshake_delay_ms and not args.tls_cert:
+        raise ValueError("--tls-handshake-delay-ms requires TLS")
+    if args.tls_handshake_delay_ms > args.delay_ceiling_ms:
+        raise ValueError("--tls-handshake-delay-ms exceeds --delay-ceiling-ms")
     tls_context = None
     if args.tls_cert:
         if args.tls_max_version and tls_version(
@@ -944,6 +957,7 @@ def run_server(args: argparse.Namespace) -> int:
         events=events,
         tls_context=tls_context,
         observe_tls_close_notify=args.observe_tls_close_notify,
+        tls_handshake_delay_ms=args.tls_handshake_delay_ms,
     )
     host, port = server.server_address[:2]
     events.emit(
@@ -956,6 +970,7 @@ def run_server(args: argparse.Namespace) -> int:
             args.tls_max_version if tls_context is not None else None
         ),
         observe_tls_close_notify=args.observe_tls_close_notify,
+        tls_handshake_delay_ms=args.tls_handshake_delay_ms,
         max_header_bytes=args.max_header_bytes,
         max_request_body_bytes=args.max_request_body_bytes,
     )
@@ -1017,6 +1032,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--observe-tls-close-notify",
         action="store_true",
         help="distinguish a client TLS close_notify from an abrupt EOF",
+    )
+    serve.add_argument(
+        "--tls-handshake-delay-ms",
+        type=nonnegative_integer,
+        default=0,
+        help="bounded delay before the server processes ClientHello",
     )
     serve.set_defaults(entrypoint=run_server)
 

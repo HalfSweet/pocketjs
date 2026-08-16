@@ -86,6 +86,12 @@ With `--observe-tls-close-notify`, each TLS `connection_close` event records
 the corresponding `tls_close_notify_observed` boolean. **A Phase 1B graceful
 shutdown pass requires `close_notify`; a TCP EOF alone is not sufficient.**
 
+`--tls-handshake-delay-ms N` waits for the bounded interval before the server
+processes ClientHello. It requires TLS and cannot exceed
+`--delay-ceiling-ms`. Use it with a client-side connect deadline or
+AbortSignal to prove that a stalled handshake terminates without opening HTTP
+or falling back to plaintext.
+
 The HTTPS probe exercises the same verified path from a Mac client. It has no
 insecure mode:
 

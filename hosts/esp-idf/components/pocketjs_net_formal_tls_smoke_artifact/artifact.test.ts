@@ -173,6 +173,9 @@ describe("ESP formal TLS network smoke artifact", () => {
       "pocketjs_net_formal_tls_smoke_net_driver_id",
     );
     expect(metadataSource).toContain(EXPECTED_CA_DER_SHA256);
+    expect(metadata.reportGlobal).toBe("__pocketjsFormalNetworkTlsSmokeReportV1");
+    expect(metadata.cancelGlobal).toBe("__pocketjsFormalNetworkTlsSmokeCancelV1");
+    expect(metadataSource).toContain("pocketjs_net_formal_tls_smoke_cancel_global");
 
     const storage = new Uint8Array(binary);
     expect(storage.at(-1)).toBe(0);

@@ -32,6 +32,7 @@ const SCHEME = "https";
 const HOST = "pocketjs.test";
 const PORT = 8443;
 const REPORT_GLOBAL = "__pocketjsFormalNetworkTlsSmokeReportV1";
+const CANCEL_GLOBAL = "__pocketjsFormalNetworkTlsSmokeCancelV1";
 const PUBLIC_HTTP_SPECIFIER = "@pocketjs/framework/net/http";
 const TLS_PROVIDER_ID = "pocketjs.net.esp-idf.esp-tls.v1.experimental";
 const EXPECTED_CA_DER_SHA256 =
@@ -141,6 +142,7 @@ interface GeneratedMetadata {
     readonly caDerSha256: string;
   };
   readonly reportGlobal: string;
+  readonly cancelGlobal: string;
   readonly stagedSurfaceBuild: {
     readonly publicSpecifier: string;
     readonly permit: "test-only-staged-https-client-fetch";
@@ -252,6 +254,8 @@ const char pocketjs_net_formal_tls_smoke_tls_provider_id[] =
 
 const char pocketjs_net_formal_tls_smoke_report_global[] =
     ${cString(metadata.reportGlobal)};
+const char pocketjs_net_formal_tls_smoke_cancel_global[] =
+    ${cString(metadata.cancelGlobal)};
 
 _Static_assert(sizeof(pocketjs_net_formal_tls_smoke_plan_hash) == 72U,
                "plan hash text length drifted");
@@ -414,6 +418,7 @@ async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
       caDerSha256: ca.derSha256,
     },
     reportGlobal: REPORT_GLOBAL,
+    cancelGlobal: CANCEL_GLOBAL,
     stagedSurfaceBuild: {
       publicSpecifier: PUBLIC_HTTP_SPECIFIER,
       permit: "test-only-staged-https-client-fetch",

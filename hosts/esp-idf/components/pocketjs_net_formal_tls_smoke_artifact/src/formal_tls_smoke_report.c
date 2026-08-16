@@ -250,3 +250,52 @@ esp_err_t pocketjs_net_formal_tls_smoke_read_report(
   }
   return ESP_OK;
 }
+
+esp_err_t
+pocketjs_net_formal_tls_smoke_cancel_active_request(pocketjs_esp_guest_t *guest,
+                                                    bool *out_cancelled) {
+  if (guest == NULL || out_cancelled == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *out_cancelled = false;
+  JSContext *context = pocketjs_esp_guest_context(guest);
+  if (context == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  JSValue global = JS_GetGlobalObject(context);
+  JSValue function = JS_UNDEFINED;
+  JSValue result = JS_UNDEFINED;
+  if (JS_IsException(global) ||
+      !own_data_property(context, global,
+                         pocketjs_net_formal_tls_smoke_cancel_global,
+                         &function) ||
+      !JS_IsFunction(context, function)) {
+    JS_FreeValue(context, function);
+    JS_FreeValue(context, global);
+    if (JS_HasException(context)) {
+      pocketjs_esp_guest_log_exception(guest, "formal_tls_smoke_cancel_lookup");
+    }
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  const esp_err_t call_result = pocketjs_esp_guest_call_function(
+      guest, "formal_tls_smoke_cancel", function, global, 0U, NULL, &result);
+  JS_FreeValue(context, function);
+  JS_FreeValue(context, global);
+  if (call_result != ESP_OK) {
+    JS_FreeValue(context, result);
+    return call_result;
+  }
+
+  const int cancelled = JS_ToBool(context, result);
+  JS_FreeValue(context, result);
+  if (cancelled < 0) {
+    if (JS_HasException(context)) {
+      pocketjs_esp_guest_log_exception(guest, "formal_tls_smoke_cancel_result");
+    }
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+  *out_cancelled = cancelled != 0;
+  return ESP_OK;
+}
