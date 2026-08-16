@@ -135,5 +135,10 @@ size_t pocketjs_net_round_robin_next(size_t current, size_t capacity);
 bool pocketjs_net_dns_candidate_prefix_saturated(size_t populated_slots,
                                                  size_t slot_capacity);
 
+/** Callback tickets are nonzero immutable snapshots of a context generation. */
+bool pocketjs_net_dns_callback_ticket_matches(bool ticket_active,
+                                              uint64_t context_generation,
+                                              uint64_t ticket_generation);
+
 /** Never wraps. False permanently retires a slot at UINT64_MAX. */
 bool pocketjs_net_generation_advance(uint64_t *generation);

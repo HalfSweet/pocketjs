@@ -62,6 +62,10 @@ int main(void) {
   assert(pocketjs_net_dns_candidate_prefix_saturated(4U, 4U));
   assert(pocketjs_net_dns_candidate_prefix_saturated(5U, 4U));
   assert(pocketjs_net_dns_candidate_prefix_saturated(0U, 0U));
+  assert(!pocketjs_net_dns_callback_ticket_matches(false, 7U, 7U));
+  assert(!pocketjs_net_dns_callback_ticket_matches(true, 0U, 0U));
+  assert(pocketjs_net_dns_callback_ticket_matches(true, 7U, 7U));
+  assert(!pocketjs_net_dns_callback_ticket_matches(true, 8U, 7U));
 
   uint64_t generation = 0;
   assert(pocketjs_net_generation_advance(&generation));

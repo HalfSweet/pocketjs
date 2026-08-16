@@ -145,9 +145,18 @@ typedef struct {
   size_t transferred;
 } operation_slot_t;
 
+typedef struct dns_context dns_context_t;
+
 typedef struct {
+  dns_context_t *context;
+  uint64_t generation;
+  bool active;
+} dns_callback_ticket_t;
+
+struct dns_context {
   struct pocketjs_net_esp_transport *owner;
   struct tcpip_callback_msg *submit_message;
+  dns_callback_ticket_t callback_ticket;
   dns_context_state_t state;
   uint64_t generation;
   pocketjs_net_esp_operation_token_t token;
@@ -156,7 +165,7 @@ typedef struct {
   uint32_t candidates[POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES];
   size_t candidate_count;
   err_t result;
-} dns_context_t;
+};
 
 struct pocketjs_net_esp_transport {
   TaskHandle_t owner_task;
@@ -199,9 +208,9 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
      * TC bit when a shorter prefix came from a truncated response. */
     .complete_dns_candidate_set = false,
     .rejects_saturated_dns_candidate_prefix = true,
-    /* Cancellation quarantines a pending context until its late callback; no
-     * immutable generation ticket is carried by lwIP's callback API. */
-    .dns_cancel_generation_cleanup = false,
+    /* Both the tcpip submit and raw found callbacks carry an immutable
+     * generation ticket and revalidate it under the transport lock. */
+    .dns_cancel_generation_cleanup = true,
     .synchronous_getaddrinfo_for_hostname = false,
     /* esp_tls_conn_new_async still runs its private getaddrinfo helper on the
      * already-numeric candidate. It cannot issue DNS, but its allocation is a
@@ -369,7 +378,10 @@ reserve_dns_context(pocketjs_net_esp_transport_t *transport,
        ++index) {
     dns_context_t *context = &transport->dns_contexts[index];
     if (context->state == DNS_CONTEXT_FREE &&
+        !context->callback_ticket.active &&
         pocketjs_net_generation_advance(&context->generation)) {
+      context->callback_ticket.generation = context->generation;
+      context->callback_ticket.active = true;
       context->state = DNS_CONTEXT_SUBMIT_QUEUED;
       *out_index = index;
       result = context;
@@ -651,8 +663,24 @@ copy_dns_candidates(const ip_addr_t *addresses,
 
 static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
                                void *callback_arg) {
-  dns_context_t *context = callback_arg;
+  dns_callback_ticket_t *ticket = callback_arg;
+  if (ticket == NULL || ticket->context == NULL) {
+    return;
+  }
+  dns_context_t *context = ticket->context;
+  const uint64_t callback_generation = ticket->generation;
   pocketjs_net_esp_transport_t *transport = context->owner;
+
+  portENTER_CRITICAL(&transport->lock);
+  const bool current =
+      pocketjs_net_dns_callback_ticket_matches(
+          ticket->active, context->generation, callback_generation) &&
+      context->state == DNS_CONTEXT_LOOKUP_PENDING;
+  portEXIT_CRITICAL(&transport->lock);
+  if (!current) {
+    return;
+  }
+
   ip_addr_t cached_addresses[DNS_MAX_HOST_IP];
   memset(cached_addresses, 0, sizeof(cached_addresses));
   /* IDF 6.0.2 passes the DNS table's whole fixed address array, but entry
@@ -661,7 +689,7 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
    * copy it through dns_lookup into a zeroed caller array. dns_lookup copies
    * only the current entry's ipaddr_cnt prefix. */
   err_t cache_result =
-      addresses != NULL && name != NULL
+      addresses != NULL && name != NULL && strcmp(name, context->hostname) == 0
           ? dns_gethostbyname_addrtype(name, cached_addresses, NULL, NULL,
                                        LWIP_DNS_ADDRTYPE_IPV4)
           : ERR_VAL;
@@ -673,7 +701,9 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
           : 0U;
 
   portENTER_CRITICAL(&transport->lock);
-  if (context->state == DNS_CONTEXT_LOOKUP_PENDING) {
+  if (pocketjs_net_dns_callback_ticket_matches(
+          ticket->active, context->generation, callback_generation) &&
+      context->state == DNS_CONTEXT_LOOKUP_PENDING) {
     if (atomic_load_explicit(&context->cancelled, memory_order_acquire)) {
       context->state = DNS_CONTEXT_FREE;
     } else {
@@ -686,6 +716,7 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
       }
       context->state = DNS_CONTEXT_RESULT_READY;
     }
+    ticket->active = false;
   }
   portEXIT_CRITICAL(&transport->lock);
 
@@ -695,14 +726,26 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
 }
 
 static void submit_dns_in_tcpip_thread(void *callback_arg) {
-  dns_context_t *context = callback_arg;
+  dns_callback_ticket_t *ticket = callback_arg;
+  if (ticket == NULL || ticket->context == NULL) {
+    return;
+  }
+  dns_context_t *context = ticket->context;
+  const uint64_t callback_generation = ticket->generation;
   pocketjs_net_esp_transport_t *transport = context->owner;
 
   portENTER_CRITICAL(&transport->lock);
   bool cancelled =
       atomic_load_explicit(&context->cancelled, memory_order_acquire);
-  if (context->state != DNS_CONTEXT_SUBMIT_QUEUED || cancelled) {
+  if (!pocketjs_net_dns_callback_ticket_matches(
+          ticket->active, context->generation, callback_generation) ||
+      context->state != DNS_CONTEXT_SUBMIT_QUEUED) {
+    portEXIT_CRITICAL(&transport->lock);
+    return;
+  }
+  if (cancelled) {
     context->state = DNS_CONTEXT_FREE;
+    ticket->active = false;
     portEXIT_CRITICAL(&transport->lock);
     if (transport->wake != NULL) {
       transport->wake(transport->wake_context);
@@ -715,7 +758,7 @@ static void submit_dns_in_tcpip_thread(void *callback_arg) {
   ip_addr_t addresses[DNS_MAX_HOST_IP];
   memset(addresses, 0, sizeof(addresses));
   err_t result = dns_gethostbyname_addrtype(context->hostname, addresses,
-                                            pocketjs_dns_found, context,
+                                            pocketjs_dns_found, ticket,
                                             LWIP_DNS_ADDRTYPE_IPV4);
   if (result == ERR_INPROGRESS) {
     return;
@@ -727,9 +770,15 @@ static void submit_dns_in_tcpip_thread(void *callback_arg) {
                      ? copy_dns_candidates(addresses, candidates, &saturated)
                      : 0U;
   portENTER_CRITICAL(&transport->lock);
+  if (!pocketjs_net_dns_callback_ticket_matches(
+          ticket->active, context->generation, callback_generation) ||
+      context->state != DNS_CONTEXT_LOOKUP_PENDING) {
+    portEXIT_CRITICAL(&transport->lock);
+    return;
+  }
   if (atomic_load_explicit(&context->cancelled, memory_order_acquire)) {
     context->state = DNS_CONTEXT_FREE;
-  } else if (context->state == DNS_CONTEXT_LOOKUP_PENDING) {
+  } else {
     memcpy(context->candidates, candidates, sizeof(candidates));
     context->candidate_count = saturated ? 0U : count;
     context->result =
@@ -737,6 +786,7 @@ static void submit_dns_in_tcpip_thread(void *callback_arg) {
                   : (result == ERR_OK && count == 0U ? ERR_VAL : result);
     context->state = DNS_CONTEXT_RESULT_READY;
   }
+  ticket->active = false;
   portEXIT_CRITICAL(&transport->lock);
   if (transport->wake != NULL) {
     transport->wake(transport->wake_context);
@@ -818,7 +868,8 @@ prepare_poisoned_dns_teardown(pocketjs_net_esp_transport_t *transport) {
        callbacks_drained && index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
        ++index) {
     callbacks_drained =
-        transport->dns_contexts[index].state == DNS_CONTEXT_FREE;
+        transport->dns_contexts[index].state == DNS_CONTEXT_FREE &&
+        !transport->dns_contexts[index].callback_ticket.active;
   }
   portEXIT_CRITICAL(&transport->lock);
   return callbacks_drained ? ESP_OK : ESP_ERR_NOT_FINISHED;
@@ -887,9 +938,10 @@ esp_err_t pocketjs_net_esp_transport_create(
        ++index) {
     dns_context_t *context = &transport->dns_contexts[index];
     context->owner = transport;
+    context->callback_ticket.context = context;
     atomic_init(&context->cancelled, false);
-    context->submit_message =
-        tcpip_callbackmsg_new(submit_dns_in_tcpip_thread, context);
+    context->submit_message = tcpip_callbackmsg_new(submit_dns_in_tcpip_thread,
+                                                    &context->callback_ticket);
     if (context->submit_message == NULL) {
       for (size_t previous = 0; previous < index; ++previous) {
         tcpip_callbackmsg_delete(
@@ -951,7 +1003,8 @@ bool pocketjs_net_esp_transport_is_quiescent(
   for (size_t index = 0;
        quiescent && index < POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CONTEXTS;
        ++index) {
-    quiescent = transport->dns_contexts[index].state == DNS_CONTEXT_FREE;
+    quiescent = transport->dns_contexts[index].state == DNS_CONTEXT_FREE &&
+                !transport->dns_contexts[index].callback_ticket.active;
   }
   for (size_t index = 0;
        quiescent && index < POCKETJS_NET_ESP_TRANSPORT_MAX_CONNECTIONS;
@@ -1044,6 +1097,7 @@ esp_err_t pocketjs_net_esp_transport_start_resolve(
     if (context != NULL) {
       portENTER_CRITICAL(&transport->lock);
       context->state = DNS_CONTEXT_FREE;
+      context->callback_ticket.active = false;
       portEXIT_CRITICAL(&transport->lock);
     }
     return accept_result;
@@ -1070,8 +1124,16 @@ esp_err_t pocketjs_net_esp_transport_start_resolve(
 
   err_t post_result = tcpip_callbackmsg_trycallback(context->submit_message);
   if (post_result != ERR_OK) {
-    context->result = post_result;
-    context->state = DNS_CONTEXT_RESULT_READY;
+    portENTER_CRITICAL(&transport->lock);
+    if (pocketjs_net_dns_callback_ticket_matches(
+            context->callback_ticket.active, context->generation,
+            context->callback_ticket.generation) &&
+        context->state == DNS_CONTEXT_SUBMIT_QUEUED) {
+      context->result = post_result;
+      context->state = DNS_CONTEXT_RESULT_READY;
+      context->callback_ticket.active = false;
+    }
+    portEXIT_CRITICAL(&transport->lock);
   }
   return ESP_OK;
 }

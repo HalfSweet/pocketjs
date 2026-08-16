@@ -69,6 +69,7 @@ pocketjs_net_esp_transport_descriptor(void) {
       .asynchronous_raw_dns = true,
       .stock_lwip_dns_callbacks_only = true,
       .rejects_saturated_dns_candidate_prefix = true,
+      .dns_cancel_generation_cleanup = true,
       .synchronous_getaddrinfo_for_hostname = false,
       .nonblocking_plain_tcp_steps = true,
       .monotonic_deadlines = true,

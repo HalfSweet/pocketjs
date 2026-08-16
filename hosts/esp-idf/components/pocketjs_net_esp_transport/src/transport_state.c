@@ -220,6 +220,13 @@ bool pocketjs_net_dns_candidate_prefix_saturated(size_t populated_slots,
   return slot_capacity == 0U || populated_slots >= slot_capacity;
 }
 
+bool pocketjs_net_dns_callback_ticket_matches(bool ticket_active,
+                                              uint64_t context_generation,
+                                              uint64_t ticket_generation) {
+  return ticket_active && ticket_generation != 0U &&
+         context_generation == ticket_generation;
+}
+
 bool pocketjs_net_generation_advance(uint64_t *generation) {
   if (generation == NULL || *generation == UINT64_MAX) {
     return false;
