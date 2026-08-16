@@ -71,15 +71,19 @@ python3 "$PEER_DIR/http_peer.py" serve \
   --tls-key "$PEER_DIR/.pki/server.key.pem" \
   --tls-min-version 1.2 \
   --tls-max-version 1.2 \
+  --socket-timeout-ms 60000 \
   --observe-tls-close-notify \
   --events "$POCKETJS_PEER_RUN_DIR/tls.ndjson"
 ```
 
-**The command above accepts only TLS 1.2.** Without `--tls-max-version`, the
-server accepts TLS 1.2 and newer by default. Use `--tls-min-version 1.3` for a
-version-rejection test. Configure the ESP client with `https://MAC_IPV4:8443`
-and the generated `ca.cert.pem` trust anchor. The certificate must contain the
-exact DNS name or IP address used by the URL.
+**The command above accepts only TLS 1.2.** Its 60-second peer socket timeout is
+longer than the smoke client's 30-second total request deadline, so packet loss
+cannot make the peer close a reusable connection before the client selects its
+own timeout outcome. Without `--tls-max-version`, the server accepts TLS 1.2
+and newer by default. Use `--tls-min-version 1.3` for a version-rejection test.
+Configure the ESP client with `https://MAC_IPV4:8443` and the generated
+`ca.cert.pem` trust anchor. The certificate must contain the exact DNS name or
+IP address used by the URL.
 
 With `--observe-tls-close-notify`, each TLS `connection_close` event records
 `tls_close_state` as `close_notify`, `ragged_eof`, or `not_observed` and includes
@@ -328,3 +332,51 @@ allowlisting, no-recursion behavior, `NXDOMAIN`, `REFUSED`, malformed and
 oversized messages, and EDNS bounds. The fixtures do not by themselves cover
 permission decisions, abort races, target resource limits, long soak, or
 hardware/runtime assertions.
+
+## Phase 1B repeated-handshake soak gate
+
+The ESP board harnesses can repeat the complete 20-round factory with a fresh
+Guest, runtime, transport, and TLS connection. **The prescribed ESP Phase 1B
+soak duration is 15 minutes per board.** Set the board project's
+`CONFIG_POCKET_NET_FORMAL_REPEAT_INTERVAL_MS=1000`, select its success mode,
+and capture one board at a time into a fresh private evidence directory. Keep
+the authoritative DNS fixture and TLS 1.2 peer running for the complete window.
+
+After at least 15 minutes, stop the monitor and peers, then validate the board,
+DNS, and TLS logs together:
+
+```sh
+python3 tools/net-conformance-peer/phase1b_soak.py \
+  --board s3 \
+  --board-log "$POCKETJS_PEER_RUN_DIR/board.log" \
+  --dns-events "$POCKETJS_PEER_RUN_DIR/dns.ndjson" \
+  --tls-events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --board-ipv4 172.16.10.231 \
+  --peer-ipv4 172.16.10.126
+```
+
+Use `--board p4 --board-ipv4 172.16.10.145` for Tab5. Set `--peer-ipv4` to the
+same numeric address advertised by the authoritative DNS fixture. **A USB
+serial monitor can reset either board when it opens the port.** For a one-run
+capture, leave the newly flashed target in the bootloader (`--after no-reset`),
+start fresh peers, and let opening the monitor cause the only application boot.
+Starting the peers before a normal post-flash boot and then opening a resetting
+monitor produces two ClientHellos and is intentionally rejected as ambiguous
+evidence.
+
+The gate requires at least two complete runs and 900 seconds of wire evidence.
+Every run must use a new connection, carry exactly 40 health/streamed-echo
+requests over TLS 1.2, send SNI `pocketjs.test`, end with `close_notify`,
+complete shutdown, balance all leases, retain zero poison, contain no
+task-watchdog report, and record at least one cooperative Guest-owner yield. It
+also enforces the measured target envelope of at most 64 KiB transient
+internal-RAM high water and 4 MiB PSRAM high water, then permits no more than 16
+KiB internal and 4 KiB PSRAM steady drift after the first run. These are
+hardware-smoke limits, not a claim that ESP-TLS's native allocator is
+caller-owned or generally byte-bounded.
+
+Run its deterministic parser/resource regressions with:
+
+```sh
+python3 -m unittest tools/net-conformance-peer/test_phase1b_soak.py
+```

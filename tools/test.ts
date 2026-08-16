@@ -109,6 +109,17 @@ const SUITE: readonly Stage[] = [
     ],
   },
   {
+    name: "network peer",
+    script: [
+      "python3",
+      "-m",
+      "unittest",
+      "tools/net-conformance-peer/test_http_peer.py",
+      "tools/net-conformance-peer/test_dns_peer.py",
+      "tools/net-conformance-peer/test_phase1b_soak.py",
+    ],
+  },
+  {
     name: "vue-sfc journeys",
     prep: [
       ["bun", "tools/build.ts", "hero-vue-sfc-main", "--framework=vue-vapor"],

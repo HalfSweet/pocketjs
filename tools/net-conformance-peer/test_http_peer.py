@@ -357,6 +357,7 @@ class TLSPeerTest(unittest.TestCase):
             self.fail(f"TLS peer CLI did not become ready: {error_output}")
         ready = json.loads(ready_line)
         self.assertEqual(ready["event"], "peer_ready")
+        self.assertEqual(ready["socket_timeout_ms"], 5000)
         return process, ready
 
     def stop_cli_profile(

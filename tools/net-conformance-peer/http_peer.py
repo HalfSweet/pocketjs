@@ -971,6 +971,7 @@ def run_server(args: argparse.Namespace) -> int:
         ),
         observe_tls_close_notify=args.observe_tls_close_notify,
         tls_handshake_delay_ms=args.tls_handshake_delay_ms,
+        socket_timeout_ms=args.socket_timeout_ms,
         max_header_bytes=args.max_header_bytes,
         max_request_body_bytes=args.max_request_body_bytes,
     )
