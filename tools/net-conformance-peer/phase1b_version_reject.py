@@ -121,13 +121,13 @@ def validate_board_log(
             or start.get("origin") != "https://pocketjs.test:8443"
             or start.get("peer_ipv4") != peer_ipv4
             or contract.get("valid") != "1"
-            or contract.get("distinct_tls_errors") != "0"
+            or contract.get("distinct_tls_errors") != "1"
             or contract.get("public") != "0"
         ):
             fail("S3 start is not the exact test-only TLS version profile")
     elif (
         boot.get("test_mode") != "version_reject"
-        or boot.get("distinct_tls_errors") != "0"
+        or boot.get("distinct_tls_errors") != "1"
     ):
         fail("P4 boot is not the exact test-only TLS version profile")
 

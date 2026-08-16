@@ -52,10 +52,10 @@ driver, and TLS provider selection from its verified Build Plan. The runner
 passes those generated values into fail-closed test-only runtime admission;
 they are not reconstructed from product defaults.
 
-The exact runtime descriptor must report `distinct_tls_errors=false`. Stock
-ESP-IDF v6.0.2 can expose only the generic X.509 verification error after some
-failed handshakes, so the artifact accepts `tls_certificate_invalid` for
-hostname, trust-chain, validity, and usage failures. Negative wire evidence
-must still show the expected SNI, a failed TLS handshake, zero HTTP requests,
-and no plaintext fallback. This limitation keeps the public TLS capability gate
-closed.
+The exact runtime descriptor must report `distinct_tls_errors=true`. The
+transport reads the failed handshake's live Mbed TLS verification result before
+teardown: hostname mismatch maps to `tls_hostname_mismatch`, while trust-chain,
+validity, and usage failures map to `tls_certificate_invalid`. Negative wire
+evidence must show the expected SNI, a failed TLS handshake, zero HTTP requests,
+and no plaintext fallback. Native allocation and DNS completeness blockers keep
+the public TLS capability gate closed.

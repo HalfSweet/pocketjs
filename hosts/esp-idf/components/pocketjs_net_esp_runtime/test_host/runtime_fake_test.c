@@ -85,6 +85,7 @@ pocketjs_net_esp_transport_descriptor(void) {
       .host_trust = true,
       .host_pinned_ca = true,
       .hostname_verification = true,
+      .distinct_tls_errors = true,
       .sni = true,
       .trusted_wall_clock_required = true,
       .plaintext_fallback = false,

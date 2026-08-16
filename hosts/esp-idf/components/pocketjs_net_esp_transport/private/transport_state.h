@@ -125,6 +125,9 @@ pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
     int tls_code, uint32_t certificate_flags,
     const pocketjs_net_tls_error_symbols_t *symbols);
 
+uint32_t pocketjs_net_select_tls_certificate_flags(uint32_t captured_flags,
+                                                   uint32_t live_verify_result);
+
 pocketjs_net_tls_close_notify_outcome_t
 pocketjs_net_classify_tls_close_notify(int result, int want_read,
                                        int want_write);

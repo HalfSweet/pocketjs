@@ -147,6 +147,8 @@ typedef struct {
   bool host_trust;
   bool host_pinned_ca;
   bool hostname_verification;
+  /** Hostname mismatch is distinct from other certificate failures. */
+  bool distinct_tls_errors;
   bool sni;
   bool trusted_wall_clock_required;
   bool plaintext_fallback;

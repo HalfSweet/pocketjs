@@ -6,6 +6,11 @@
 #include "transport_state.h"
 
 int main(void) {
+  assert(pocketjs_net_select_tls_certificate_flags(0U, 0U) == 0U);
+  assert(pocketjs_net_select_tls_certificate_flags(0x08U, 0U) == 0x08U);
+  assert(pocketjs_net_select_tls_certificate_flags(0U, 0x04U) == 0x04U);
+  assert(pocketjs_net_select_tls_certificate_flags(0x08U, 0x04U) == 0x04U);
+  assert(pocketjs_net_select_tls_certificate_flags(0x08U, UINT32_MAX) == 0x08U);
   static const pocketjs_net_tls_error_symbols_t tls_symbols = {
       .certificate_verify_failed = -0x2700,
       .bad_certificate = -0x7a00,

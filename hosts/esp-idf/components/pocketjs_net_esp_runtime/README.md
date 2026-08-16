@@ -35,11 +35,11 @@ destroy. **The native boundary accepts only TLS 1.2, full certificate and
 hostname verification, no client certificate, no custom CA input, no ALPN,
 and the canonical DNS A-label as `serverName`.** Numeric HTTPS hosts and every
 other TLS policy are rejected before permission checks, DNS, or socket I/O.
-Stock ESP-IDF v6.0.2 exposes a generic X.509 verification failure but does not
-reliably preserve the reason flags after a failed handshake. The runtime maps
-that failure to `tls_certificate_invalid` and reports
-`distinct_tls_errors=false`; it does not promise a separate
-`tls_hostname_mismatch` result for this provider.
+The transport reads the failed handshake's live Mbed TLS verification result
+through ESP-TLS's public SSL-context accessor before teardown. The runtime
+therefore reports `distinct_tls_errors=true`: hostname mismatch maps to
+`tls_hostname_mismatch`, while chain, validity, and usage failures map to
+`tls_certificate_invalid`.
 TLS close operations send a client `close_notify`. Nonblocking
 `WANT_READ`/`WANT_WRITE` results are retried by later owner turns under the
 close operation's monotonic deadline. The Host does not wait indefinitely for

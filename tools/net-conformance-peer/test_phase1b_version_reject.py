@@ -33,11 +33,11 @@ class Phase1BVersionRejectTest(unittest.TestCase):
         board_ip = "172.16.10.231" if board == "s3" else "172.16.10.145"
 
         lines = [
-            "POCKET_NET_TLS_CONTRACT valid=1 distinct_tls_errors=0 public=0",
+            "POCKET_NET_TLS_CONTRACT valid=1 distinct_tls_errors=1 public=0",
             "POCKET_NET_FORMAL_TLS_BOOT board=test "
             "origin=https://pocketjs.test:8443 peer_ipv4=172.16.10.126 "
             "dns_server=172.16.10.126 test_mode=version_reject "
-            "public_capability=0 distinct_tls_errors=0",
+            "public_capability=0 distinct_tls_errors=1",
             "POCKET_NET_FORMAL_TLS_START probe=1 "
             "origin=https://pocketjs.test:8443 peer_ipv4=172.16.10.126 "
             "mode=version_reject",

@@ -169,7 +169,7 @@ void app_main(void) {
   assert(descriptor->https_rejected_before_io);
   assert(descriptor->https_explicit_opt_in);
   assert(descriptor->exact_host_tls_profile);
-  assert(!descriptor->distinct_tls_errors);
+  assert(descriptor->distinct_tls_errors);
   assert(descriptor->tls_close_notify);
   assert(descriptor->tls_close_notify_uses_operation_deadline);
   assert(!descriptor->tls_close_notify_waits_for_peer);

@@ -167,6 +167,15 @@ static bool tls_code_matches(int actual, int expected) {
          (actual == expected || (expected != INT_MIN && actual == -expected));
 }
 
+uint32_t
+pocketjs_net_select_tls_certificate_flags(uint32_t captured_flags,
+                                          uint32_t live_verify_result) {
+  if (live_verify_result != 0U && live_verify_result != UINT32_MAX) {
+    return live_verify_result;
+  }
+  return captured_flags;
+}
+
 pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
     int tls_code, uint32_t certificate_flags,
     const pocketjs_net_tls_error_symbols_t *symbols) {

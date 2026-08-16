@@ -32,8 +32,8 @@ class Phase1BConformanceTest(unittest.TestCase):
         if board == "s3":
             lines = (
                 "POCKET_NET_TLS_CONTRACT valid=1 https_explicit_opt_in=1 "
-                "exact_host_tls_profile=1 distinct_tls_errors=0 "
-                "expected_distinct_tls_errors=0 public=0 "
+                "exact_host_tls_profile=1 distinct_tls_errors=1 "
+                "expected_distinct_tls_errors=1 public=0 "
                 f"provider={phase1b_conformance.EXPECTED_PROVIDER}",
                 "POCKET_NET_FORMAL_TLS_BOOT frame_calls=0 "
                 f"origin={phase1b_conformance.EXPECTED_ORIGIN} "
@@ -71,7 +71,7 @@ class Phase1BConformanceTest(unittest.TestCase):
                 f"origin={phase1b_conformance.EXPECTED_ORIGIN} "
                 "peer_ipv4=172.16.10.126 dns_server=172.16.10.126 "
                 "rounds=20 requests=40 test_mode=success public_capability=0 "
-                "distinct_tls_errors=0 "
+                "distinct_tls_errors=1 "
                 f"plan={phase1b_conformance.EXPECTED_PLAN} "
                 f"factory={phase1b_conformance.EXPECTED_FACTORY} "
                 f"ca={phase1b_conformance.EXPECTED_CA} "

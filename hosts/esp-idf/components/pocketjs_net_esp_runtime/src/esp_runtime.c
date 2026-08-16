@@ -36,7 +36,7 @@ static const pocketjs_net_esp_runtime_descriptor_t RUNTIME_DESCRIPTOR = {
     .https_rejected_before_io = true,
     .https_explicit_opt_in = true,
     .exact_host_tls_profile = true,
-    .distinct_tls_errors = false,
+    .distinct_tls_errors = true,
     .tls_close_notify = true,
     .tls_close_notify_uses_operation_deadline = true,
     .tls_close_notify_waits_for_peer = false,
@@ -252,8 +252,8 @@ static bool transport_descriptor_compatible(
   }
   return transport->tls_compiled && transport->tls_1_2_only &&
          transport->host_trust && transport->host_pinned_ca &&
-         transport->hostname_verification && transport->sni &&
-         transport->trusted_wall_clock_required &&
+         transport->hostname_verification && transport->distinct_tls_errors &&
+         transport->sni && transport->trusted_wall_clock_required &&
          !transport->plaintext_fallback && !transport->renegotiation &&
          !transport->early_data && transport->tls_close_notify &&
          transport->tls_close_notify_uses_operation_deadline &&

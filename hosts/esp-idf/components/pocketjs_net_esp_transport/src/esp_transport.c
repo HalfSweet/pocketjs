@@ -239,6 +239,10 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
     .host_trust = true,
     .host_pinned_ca = true,
     .hostname_verification = true,
+    /* ESP-TLS exposes its live Mbed TLS context through a public accessor.
+     * Reading the negotiation verify result after a failed handshake preserves
+     * CN_MISMATCH even when ESP-IDF's error handle retained only -0x2700. */
+    .distinct_tls_errors = true,
     .sni = true,
     .trusted_wall_clock_required = true,
     .plaintext_fallback = false,
@@ -622,6 +626,12 @@ static void read_tls_error(esp_tls_t *tls, int *cause, int *system_error,
     if (*system_error != 0) {
       *cause = *system_error;
     }
+  }
+  mbedtls_ssl_context *ssl =
+      (mbedtls_ssl_context *)esp_tls_get_ssl_context(tls);
+  if (ssl != NULL) {
+    *certificate_flags = pocketjs_net_select_tls_certificate_flags(
+        *certificate_flags, mbedtls_ssl_get_verify_result(ssl));
   }
 }
 

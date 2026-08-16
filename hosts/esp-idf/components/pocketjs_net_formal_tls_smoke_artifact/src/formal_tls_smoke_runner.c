@@ -97,7 +97,7 @@ valid_config(const pocketjs_net_formal_tls_smoke_run_config_t *config,
          descriptor->pocketjs_owned_native_buffer_floor_enforced &&
          pocketjs_net_esp_runtime_required_native_buffer_bytes(
              FORMAL_TLS_SMOKE_MAX_OPERATIONS, &required_native_bytes) &&
-         required_native_bytes <= 524288U && !descriptor->distinct_tls_errors &&
+         required_native_bytes <= 524288U && descriptor->distinct_tls_errors &&
          descriptor->tls_close_notify &&
          descriptor->tls_close_notify_uses_operation_deadline &&
          !descriptor->tls_close_notify_waits_for_peer &&

@@ -56,6 +56,7 @@ void app_main(void) {
   assert(descriptor->host_trust);
   assert(descriptor->host_pinned_ca);
   assert(descriptor->hostname_verification);
+  assert(descriptor->distinct_tls_errors);
   assert(descriptor->sni);
   assert(descriptor->trusted_wall_clock_required);
   assert(!descriptor->plaintext_fallback);

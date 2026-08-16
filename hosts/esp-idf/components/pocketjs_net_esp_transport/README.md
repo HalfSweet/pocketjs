@@ -105,12 +105,13 @@ The descriptor deliberately reports the following gaps:
 - **Validation of the one Host-pinned CA uses Mbed TLS X.509 parsing.** Its
   transient native allocation is not caller-owned or byte-bounded even though
   the input snapshot is fixed at 4096 bytes.
-- **Stock ESP-IDF v6.0.2 does not reliably retain certificate verification
-  flags after a failed handshake.** Its error handle preserves the generic
-  X.509 verification failure, so unknown CA, validity, usage, and hostname
-  failures safely collapse to `tls_certificate_invalid`. The runtime does not
-  claim distinct TLS errors until the provider exposes the verification flags
-  and wire tests distinguish hostname mismatch from other certificate errors.
+- **Certificate verification reasons are recovered from the live negotiation
+  state.** ESP-IDF's error handle may preserve only the generic X.509 failure,
+  so the adapter also reads `mbedtls_ssl_get_verify_result()` from the public
+  ESP-TLS SSL-context accessor before destroying the connection. Hostname
+  mismatch maps to `tls_hostname_mismatch`; chain, validity, and usage failures
+  map to `tls_certificate_invalid`. S3 and P4 wire tests require the expected
+  SNI, a failed handshake, and zero HTTP requests.
 - **The lwIP resolver retains at most `DNS_MAX_HOST_IP` records.** A full prefix
   is rejected, but the stock callback does not expose the DNS `TC` bit. A
   truncated response containing fewer records therefore remains
@@ -122,9 +123,9 @@ The descriptor deliberately reports the following gaps:
   `cancel`/`begin_shutdown` callers before destroy; internal pool quiescence
   cannot prove that an external caller does not still hold the pointer.
 
-Until these blockers have measured target-specific resource envelopes and the
-one millisecond ESP-TLS wait is either admitted or removed, this provider must
-not enter a production or admitted-target Build Plan and must not advertise
+Until these blockers have measured target-specific resource envelopes and
+bounded native step wall time, this provider must not enter a production or
+admitted-target Build Plan and must not advertise
 `network.http.client.tls`. **An exact test-only TLS smoke plan may select this
 provider solely to gather pre-admission hardware evidence.** That plan does not
 add a stock target, open the compiler's public network gate, or change the
