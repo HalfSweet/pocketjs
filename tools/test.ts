@@ -117,6 +117,7 @@ const SUITE: readonly Stage[] = [
       "tools/net-conformance-peer/test_http_peer.py",
       "tools/net-conformance-peer/test_dns_peer.py",
       "tools/net-conformance-peer/test_phase1b_soak.py",
+      "tools/net-conformance-peer/test_phase1b_version_reject.py",
     ],
   },
   {

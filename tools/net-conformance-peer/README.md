@@ -380,3 +380,35 @@ Run its deterministic parser/resource regressions with:
 ```sh
 python3 -m unittest tools/net-conformance-peer/test_phase1b_soak.py
 ```
+
+## Phase 1B TLS version-rejection gate
+
+Select the board harness's `version_reject` profile and run the TLS peer with
+both `--tls-min-version 1.3` and `--tls-max-version 1.3`. The ESP profile is
+fixed to TLS 1.2, so the attempt must fail before an opened TLS connection or
+HTTP request. Capture one boot into fresh board, DNS, and peer logs, stop both
+peers, then validate the three evidence streams together:
+
+```sh
+python3 tools/net-conformance-peer/phase1b_version_reject.py \
+  --board s3 \
+  --board-log "$POCKETJS_PEER_RUN_DIR/board.log" \
+  --dns-events "$POCKETJS_PEER_RUN_DIR/dns.ndjson" \
+  --tls-events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --board-ipv4 172.16.10.231 \
+  --peer-ipv4 172.16.10.126
+```
+
+Use `--board p4 --board-ipv4 172.16.10.145` for Tab5. The gate requires one
+controlled DNS answer and exactly one TLS handshake failure from the selected
+board, zero `connection_open` and HTTP `request` events, a board-side
+`tls_alert`, cooperative Guest-owner yielding, balanced leases, zero poison,
+and completed shutdown. ESP-IDF 6.0.2 reports this incompatible-version alert
+at the current provider's conservative error granularity; the test does not
+claim distinct TLS alert or certificate reasons.
+
+Run the deterministic evidence-parser regressions with:
+
+```sh
+python3 -m unittest tools/net-conformance-peer/test_phase1b_version_reject.py
+```
