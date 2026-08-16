@@ -120,6 +120,21 @@ describe("net package namespace", () => {
       new URL("../framework/src/net/http.ts", import.meta.url).pathname,
     );
   });
+
+  test("stock hosts remove a legacy global binding before app evaluation", async () => {
+    const [webEngine, simRuntime] = await Promise.all([
+      Bun.file(new URL("../hosts/web/engine.js", import.meta.url)).text(),
+      Bun.file(new URL("../hosts/sim/sim.ts", import.meta.url)).text(),
+    ]);
+    expect(webEngine).not.toContain('from "./net.js"');
+    expect(webEngine).not.toMatch(/globalThis\.net\s*=/);
+    expect(webEngine).toContain('Reflect.deleteProperty(globalThis, "net")');
+    expect(simRuntime).not.toMatch(/g\.net\s*=/);
+    expect(simRuntime).toContain('Reflect.deleteProperty(g, "net")');
+    expect(simRuntime.indexOf('Reflect.deleteProperty(g, "net")')).toBeLessThan(
+      simRuntime.indexOf("(0, eval)(src)"),
+    );
+  });
 });
 
 describe("network surface demand gate", () => {

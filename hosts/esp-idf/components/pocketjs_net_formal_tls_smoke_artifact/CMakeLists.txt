@@ -1,6 +1,12 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/pocketjs_generate_test_artifact.cmake")
+pocketjs_generate_test_artifact(
+  _pocketjs_generated
+  "${CMAKE_CURRENT_LIST_DIR}/generate.ts"
+)
+
 idf_component_register(
   SRCS
-    "generated/formal_tls_smoke_metadata.c"
+    "${_pocketjs_generated}/formal_tls_smoke_metadata.c"
     "src/formal_tls_smoke_ipv4.c"
     "src/formal_tls_smoke_report.c"
     "src/formal_tls_smoke_runner.c"
@@ -19,7 +25,7 @@ idf_component_register(
 
 target_add_binary_data(
   ${COMPONENT_LIB}
-  "generated/factory.js.bin"
+  "${_pocketjs_generated}/factory.js.bin"
   BINARY
 )
 

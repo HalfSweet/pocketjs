@@ -20,13 +20,19 @@ use the SDK's default `redirect: "follow"`, which verifies that an ordinary
 The factory installs the legacy `frame` slot required by the Guest host, but
 **the headless runner never calls it and requires `frameCalls === 0`.**
 
-Generate or check the committed artifact from the repository root:
+ESP-IDF generates the artifact into the component's build directory during
+configuration. To inspect the deterministic outputs without changing the
+source tree, generate them into a temporary directory:
 
 ```sh
-bun hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/generate.ts
-bun hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/generate.ts --check
-bun test hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/artifact.test.ts
+bun hosts/esp-idf/components/pocketjs_net_formal_smoke_artifact/generate.ts \
+  --output-dir=/tmp/pocketjs-formal-http-artifact
+bun test tests/esp-network-artifacts.test.ts
 ```
+
+**Generated plans, metadata C, and factory bundles are build outputs and are
+not committed.** The consolidated artifact test regenerates all HTTP and TLS
+profiles in an isolated directory and locks their hashes and admission rules.
 
 `pocketjs_net_formal_smoke_run()` is called from a dedicated non-lwIP owner
 task. It creates a PSRAM-only QuickJS Guest, performs the exact formal ABI 1.1

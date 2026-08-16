@@ -1,6 +1,12 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/pocketjs_generate_test_artifact.cmake")
+pocketjs_generate_test_artifact(
+  _pocketjs_generated
+  "${CMAKE_CURRENT_LIST_DIR}/generate.ts"
+)
+
 idf_component_register(
   SRCS
-    "generated/formal_smoke_metadata.c"
+    "${_pocketjs_generated}/formal_smoke_metadata.c"
     "src/formal_smoke_report.c"
     "src/formal_smoke_runner.c"
   INCLUDE_DIRS
@@ -16,7 +22,7 @@ idf_component_register(
 
 target_add_binary_data(
   ${COMPONENT_LIB}
-  "generated/factory.js.bin"
+  "${_pocketjs_generated}/factory.js.bin"
   BINARY
 )
 

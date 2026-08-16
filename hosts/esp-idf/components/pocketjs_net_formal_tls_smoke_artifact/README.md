@@ -20,13 +20,19 @@ the SDK's default redirect-follow mode and this exact Guest TLS policy:
 in generated metadata. **No CA or server private key belongs in this
 component.**
 
-Generate and verify the checked-in artifacts with:
+ESP-IDF generates the artifact into the component's build directory during
+configuration. To inspect the deterministic outputs without changing the
+source tree, generate them into a temporary directory:
 
 ```sh
-bun hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/generate.ts
-bun hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/generate.ts --check
-bun test hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/artifact.test.ts
+bun hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/generate.ts \
+  --output-dir=/tmp/pocketjs-formal-tls-artifact
+bun test tests/esp-network-artifacts.test.ts
 ```
+
+**Generated plans, metadata C, and factory bundles are build outputs and are
+not committed.** The consolidated artifact test regenerates all HTTP and TLS
+profiles in an isolated directory and locks their hashes and admission rules.
 
 The board harness must configure stock lwIP DNS so `pocketjs.test` resolves to
 the selected Mac peer, provision a trusted wall clock, and pass both facts to

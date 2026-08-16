@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   NETWORK_V1_ABI_MAJOR,
   NETWORK_V1_ABI_MINOR,
@@ -13,14 +14,17 @@ import {
   type NetworkV1FeatureId,
 } from "../../../../contracts/spec/network/network-v1.ts";
 
-const COMPONENT = new URL("./", import.meta.url);
-const metadata = await Bun.file(new URL("generated/metadata.json", COMPONENT)).json() as {
+const generated = process.env.POCKETJS_TEST_ARTIFACT_DIR;
+if (generated === undefined || generated.length === 0) {
+  throw new Error("POCKETJS_TEST_ARTIFACT_DIR is required");
+}
+const metadata = await Bun.file(join(generated, "metadata.json")).json() as {
   planHashBytes: number[];
   featureIds: number[];
   reportGlobal: string;
 };
 const binary = new Uint8Array(await Bun.file(
-  new URL("generated/factory.js.bin", COMPONENT),
+  join(generated, "factory.js.bin"),
 ).arrayBuffer());
 if (binary.length < 2 || binary[binary.length - 1] !== 0) {
   throw new Error("factory storage is not NUL-terminated");

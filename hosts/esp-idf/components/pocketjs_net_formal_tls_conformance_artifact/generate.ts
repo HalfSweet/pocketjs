@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,11 @@ import {
 import { validateAndResolveBuildPlan } from
   "../../../../framework/src/manifest/resolve.ts";
 import {
+  testArtifactOutputDirectory,
+  writeTestArtifactOutputs,
+  type GeneratedTestArtifactOutput,
+} from "../../../../tools/test-artifact-output.ts";
+import {
   metadataSource,
   readCa,
   TEST_CAPABILITIES,
@@ -29,7 +34,6 @@ import {
 
 const COMPONENT = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(COMPONENT, "../../../..");
-const GENERATED = join(COMPONENT, "generated");
 const TARGET_ID = "esp-formal-network-tls-conformance-test";
 const APP_ID = "dev.pocketjs.esp-formal-network-tls-conformance";
 const OUTPUT = "esp-formal-network-tls-conformance";
@@ -68,23 +72,10 @@ const TEST_CONTRACTS = definePlatformContractRegistry(
   TEST_TARGETS,
 );
 
-interface GeneratedOutput {
-  readonly name: string;
-  readonly bytes: Uint8Array;
-}
-
 const encoder = new TextEncoder();
 
 function textBytes(value: string): Uint8Array {
   return encoder.encode(value);
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 export async function resolvePlan(): Promise<ResolvedBuildPlan> {
@@ -179,7 +170,7 @@ async function buildFactory(plan: ResolvedBuildPlan): Promise<Uint8Array> {
   }
 }
 
-async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
+async function expectedOutputs(): Promise<readonly GeneratedTestArtifactOutput[]> {
   const [plan, ca] = await Promise.all([resolvePlan(), readCa()]);
   const factory = await buildFactory(plan);
   const source = factory.subarray(0, factory.length - 1);
@@ -240,39 +231,15 @@ async function expectedOutputs(): Promise<readonly GeneratedOutput[]> {
   ];
 }
 
-export async function generate(check: boolean): Promise<void> {
+export async function generate(outputDirectory: string): Promise<void> {
   const outputs = await expectedOutputs();
-  if (check) {
-    const drifted: string[] = [];
-    for (const output of outputs) {
-      const path = join(GENERATED, output.name);
-      if (!await Bun.file(path).exists()) {
-        drifted.push(`${output.name} (missing)`);
-      } else {
-        const actual = new Uint8Array(await Bun.file(path).arrayBuffer());
-        if (!equalBytes(actual, output.bytes)) drifted.push(output.name);
-      }
-    }
-    if (drifted.length > 0) {
-      throw new Error(
-        `formal TLS conformance artifact drift: ${drifted.join(", ")}; run bun generate.ts`,
-      );
-    }
-    return;
-  }
-  await mkdir(GENERATED, { recursive: true });
-  for (const output of outputs) {
-    await Bun.write(join(GENERATED, output.name), output.bytes);
-  }
+  await writeTestArtifactOutputs(outputDirectory, outputs);
 }
 
 if (import.meta.main) {
-  const options = new Set(process.argv.slice(2));
-  if ([...options].some((option) => option !== "--check")) {
-    throw new Error("usage: bun generate.ts [--check]");
-  }
-  await generate(options.has("--check"));
-  console.log(options.has("--check")
-    ? "PocketJS formal TLS conformance artifact: generated files are current"
-    : "PocketJS formal TLS conformance artifact: generated files updated");
+  const outputDirectory = testArtifactOutputDirectory(process.argv.slice(2));
+  await generate(outputDirectory);
+  console.log(
+    `PocketJS formal TLS conformance artifact generated in ${outputDirectory}`,
+  );
 }

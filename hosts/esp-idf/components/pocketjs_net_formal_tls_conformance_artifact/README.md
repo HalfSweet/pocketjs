@@ -17,9 +17,16 @@ to the exact test entry and verified plan, all native descriptors continue to
 advertise `public_capability=false`, and the production target registry remains
 unchanged.
 
-Regenerate or verify the checked-in outputs with:
+ESP-IDF generates the artifact into the component's build directory during
+configuration. To inspect the deterministic outputs without changing the
+source tree, generate them into a temporary directory:
 
 ```sh
-bun hosts/esp-idf/components/pocketjs_net_formal_tls_conformance_artifact/generate.ts
-bun hosts/esp-idf/components/pocketjs_net_formal_tls_conformance_artifact/generate.ts --check
+bun hosts/esp-idf/components/pocketjs_net_formal_tls_conformance_artifact/generate.ts \
+  --output-dir=/tmp/pocketjs-formal-tls-conformance-artifact
+bun test tests/esp-network-artifacts.test.ts
 ```
+
+**Generated plans, metadata C, and factory bundles are build outputs and are
+not committed.** The consolidated artifact test regenerates all profiles in an
+isolated directory and locks their hashes and admission rules.
