@@ -1241,11 +1241,14 @@ static void assert_tls_error_mapping(
   assert(pocketjs_net_http_client_core_start(fixture.core, &request,
                                              fixture.now) ==
          POCKETJS_NET_HTTP_CLIENT_START_OK);
-  const uint32_t address = 0x0100007fU;
-  fake_complete_resolve(&fixture.fake, &address, 1U);
+  const uint32_t addresses[] = {0x0100007fU, 0x0200007fU};
+  fake_complete_resolve(&fixture.fake, addresses, 2U);
   pump(&fixture);
+  assert(fixture.permissions.numeric_calls == 2U);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
   fake_queue_error(&fixture.fake, transport_error, 55);
   pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
   pocketjs_net_http_client_event_t error =
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
   assert(error.detail.error.code == core_error);
@@ -1290,6 +1293,137 @@ static void test_all_candidates_checked_before_denial(void) {
       take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
   assert(error.detail.error.code ==
          POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED);
+  retire_event(&fixture, error);
+}
+
+static void test_connect_error_tries_next_allowed_candidate(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  fixture.permissions.allowed_candidates[0] = true;
+  fixture.permissions.allowed_candidates[1] = false;
+  fixture.permissions.allowed_candidates[2] = true;
+  fixture.permissions.allowed_candidates[3] = true;
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  const uint32_t addresses[] = {0x0100000aU, 0x0200000aU, 0x0300000aU,
+                                0x0400000aU};
+  fake_complete_resolve(&fixture.fake, addresses, 4U);
+  pump(&fixture);
+  assert(fixture.permissions.numeric_calls == 4U);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+  assert(fixture.fake.connect_ipv4_be == addresses[0]);
+  const uint64_t connect_deadline = fixture.fake.active_deadline;
+
+  fake_queue_error(&fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT, 11);
+  pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 2U);
+  assert(fixture.fake.connect_ipv4_be == addresses[2]);
+  assert(fixture.fake.active_deadline == connect_deadline);
+
+  fake_queue_error(&fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT, 22);
+  pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 3U);
+  assert(fixture.fake.connect_ipv4_be == addresses[3]);
+  assert(fixture.fake.active_deadline == connect_deadline);
+
+  fake_complete_connect(&fixture.fake);
+  pump(&fixture);
+  assert(fixture.fake.active_kind == FAKE_WRITE);
+}
+
+static void test_connect_candidate_exhaustion_preserves_last_error(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  const uint32_t addresses[] = {0x0100000aU, 0x0200000aU};
+  fake_complete_resolve(&fixture.fake, addresses, 2U);
+  pump(&fixture);
+  assert(fixture.fake.connect_ipv4_be == addresses[0]);
+
+  fake_queue_error(&fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT, 11);
+  pump(&fixture);
+  assert(fixture.fake.connect_ipv4_be == addresses[1]);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 2U);
+
+  fake_queue_error(&fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT, 22);
+  pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 2U);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == POCKETJS_NET_HTTP_CLIENT_ERROR_CONNECT);
+  assert(error.detail.error.cause_code == 22);
+  retire_event(&fixture, error);
+}
+
+static void assert_candidate_error_does_not_retry(
+    pocketjs_net_http_client_transport_error_t transport_error,
+    pocketjs_net_http_client_error_t expected_error) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  const uint32_t addresses[] = {0x0100000aU, 0x0200000aU};
+  fake_complete_resolve(&fixture.fake, addresses, 2U);
+  pump(&fixture);
+  fake_queue_error(&fixture.fake, transport_error, 33);
+  pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == expected_error);
+  assert(error.detail.error.cause_code == 33);
+  retire_event(&fixture, error);
+}
+
+static void test_non_connect_errors_do_not_advance_candidates(void) {
+  assert_candidate_error_does_not_retry(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_TIMED_OUT,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_TIMED_OUT);
+  assert_candidate_error_does_not_retry(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_IO,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_IO);
+  assert_candidate_error_does_not_retry(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_RESOURCE_LIMIT,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT);
+  assert_candidate_error_does_not_retry(
+      POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_ABORTED,
+      POCKETJS_NET_HTTP_CLIENT_ERROR_ABORTED);
+}
+
+static void test_connect_error_does_not_retry_after_deadline(void) {
+  fixture_t fixture;
+  fixture_init(&fixture);
+  pocketjs_net_http_client_request_t request =
+      make_get(1U, "http://example.com/");
+  assert(pocketjs_net_http_client_core_start(fixture.core, &request,
+                                             fixture.now) ==
+         POCKETJS_NET_HTTP_CLIENT_START_OK);
+  const uint32_t addresses[] = {0x0100000aU, 0x0200000aU};
+  fake_complete_resolve(&fixture.fake, addresses, 2U);
+  pump(&fixture);
+  fixture.now = fixture.fake.active_deadline;
+  fake_queue_error(&fixture.fake,
+                   POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT, 44);
+  pump(&fixture);
+  assert(fixture.fake.starts[FAKE_CONNECT] == 1U);
+  pocketjs_net_http_client_event_t error =
+      take_event(&fixture, POCKETJS_NET_HTTP_CLIENT_EVENT_ERROR);
+  assert(error.detail.error.code == POCKETJS_NET_HTTP_CLIENT_ERROR_CONNECT);
+  assert(error.detail.error.cause_code == 44);
   retire_event(&fixture, error);
 }
 
@@ -2900,6 +3034,10 @@ int main(void) {
   test_https_base_policy_is_fail_closed();
   test_tls_errors_remain_distinct();
   test_all_candidates_checked_before_denial();
+  test_connect_error_tries_next_allowed_candidate();
+  test_connect_candidate_exhaustion_preserves_last_error();
+  test_non_connect_errors_do_not_advance_candidates();
+  test_connect_error_does_not_retry_after_deadline();
   test_protocol_error_closes_before_terminal();
   test_chunked_body_and_valid_trailer();
   test_protocol_error_selected_before_body_pull();

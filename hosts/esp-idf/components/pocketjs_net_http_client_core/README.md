@@ -55,10 +55,14 @@ wrap or reuse during a live Core instance.
 
 The permission callback runs on the owner task. For a DNS name it receives the
 canonical `(scheme, hostname, port)` tuple before resolve starts. After resolve,
-the callback is invoked for every returned numeric candidate before one allowed
-candidate is selected. A literal IPv4 address receives the numeric permission
-check directly. A connection failure is terminal; the Core does not try another
-candidate. **The callback is non-reentrant:** every Core entry point rejects a
+the callback is invoked for every returned numeric candidate before any connect
+starts. Allowed candidates are retained in resolver order. A transport-class
+connect refusal or unreachable result advances to the next retained candidate
+under the original connect deadline; no HTTP bytes have been emitted and no
+request is replayed. TLS, timeout, I/O, resource, abort, and local admission
+failures are terminal and never advance the address list. A literal IPv4
+address receives the numeric permission check directly. **The callback is
+non-reentrant:** every Core entry point rejects a
 call made from the callback, and the Core verifies its lifecycle generation,
 operation token, state, and transport-idle state after each callback returns.
 
@@ -177,8 +181,10 @@ publicly admitted Build Plan and must not advertise `network.http.client` or
 ## Verification
 
 `test_host/core_test.c` uses a deterministic fake transport to cover permission
-ordering, headers-first delivery, bounded body credit and leases, 4xx success,
-strict trailer failure, close-before-error ordering, default pre-I/O HTTPS
+ordering, ordered fallback across authorized DNS candidates, candidate
+exhaustion and non-retryable error classes, headers-first delivery, bounded
+body credit and leases, 4xx success, strict trailer failure,
+close-before-error ordering, default pre-I/O HTTPS
 rejection, exact base-policy validation and explicit TLS connect selection,
 redirect follow/error/manual decisions, relative URL resolution, per-hop
 permission checks, method/body rewrite, cross-origin sensitive-field removal,

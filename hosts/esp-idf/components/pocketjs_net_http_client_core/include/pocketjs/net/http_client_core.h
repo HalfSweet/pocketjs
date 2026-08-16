@@ -415,6 +415,8 @@ typedef struct {
   bool redirect_error;
   bool redirect_fixed_body_replay;
   bool redirect_streaming_body_replay;
+  /** Retry only another already-authorized DNS address before request I/O. */
+  bool connect_error_candidate_fallback;
   bool hidden_retry;
   bool hidden_auth;
   bool hidden_cookie_store;

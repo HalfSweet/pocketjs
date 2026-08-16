@@ -202,7 +202,8 @@ static bool core_descriptor_compatible(
          core->connection_reuse && core->bounded_connection_pool &&
          core->redirects_followed && core->redirect_manual &&
          core->redirect_error && core->redirect_fixed_body_replay &&
-         !core->redirect_streaming_body_replay && !core->hidden_retry &&
+         !core->redirect_streaming_body_replay &&
+         core->connect_error_candidate_fallback && !core->hidden_retry &&
          !core->hidden_auth && !core->hidden_cookie_store && !core->proxy &&
          !core->content_decoding &&
          core->cleanup_faults_separate_from_terminal &&

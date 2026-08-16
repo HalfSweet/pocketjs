@@ -40,6 +40,7 @@ void app_main(void) {
   assert(descriptor->redirect_error);
   assert(descriptor->redirect_fixed_body_replay);
   assert(!descriptor->redirect_streaming_body_replay);
+  assert(descriptor->connect_error_candidate_fallback);
   assert(!descriptor->hidden_retry);
   assert(!descriptor->hidden_auth);
   assert(!descriptor->hidden_cookie_store);

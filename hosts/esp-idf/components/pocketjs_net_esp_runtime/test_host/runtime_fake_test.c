@@ -126,6 +126,7 @@ pocketjs_net_http_client_core_descriptor(void) {
       .redirect_error = true,
       .redirect_fixed_body_replay = true,
       .redirect_streaming_body_replay = false,
+      .connect_error_candidate_fallback = true,
       .hidden_retry = false,
       .hidden_auth = false,
       .hidden_cookie_store = false,

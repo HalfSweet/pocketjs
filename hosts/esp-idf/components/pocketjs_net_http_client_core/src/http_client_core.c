@@ -81,6 +81,9 @@ struct pocketjs_net_http_client_core {
   bool numeric_host;
   uint32_t numeric_ipv4_be;
   uint32_t selected_ipv4_be;
+  uint32_t connect_candidates[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_DNS_CANDIDATES];
+  size_t connect_candidate_count;
+  size_t next_connect_candidate;
 
   uint8_t method[POCKETJS_NET_HTTP_CLIENT_CORE_MAX_METHOD_BYTES];
   size_t method_length;
@@ -197,6 +200,7 @@ static const pocketjs_net_http_client_core_descriptor_t descriptor = {
     .redirect_error = true,
     .redirect_fixed_body_replay = true,
     .redirect_streaming_body_replay = false,
+    .connect_error_candidate_fallback = true,
     .hidden_retry = false,
     .hidden_auth = false,
     .hidden_cookie_store = false,
@@ -1825,6 +1829,16 @@ start_connect(pocketjs_net_http_client_core_t *core, uint32_t ipv4_be) {
   return result;
 }
 
+static pocketjs_net_http_client_transport_result_t
+start_next_connect_candidate(pocketjs_net_http_client_core_t *core) {
+  if (core->next_connect_candidate >= core->connect_candidate_count) {
+    return POCKETJS_NET_HTTP_CLIENT_TRANSPORT_INVALID;
+  }
+  const uint32_t ipv4_be =
+      core->connect_candidates[core->next_connect_candidate++];
+  return start_connect(core, ipv4_be);
+}
+
 static bool initialize_parser(pocketjs_net_http_client_core_t *core);
 static bool emit_next_request_head(pocketjs_net_http_client_core_t *core);
 
@@ -1931,6 +1945,8 @@ static bool begin_current_endpoint(pocketjs_net_http_client_core_t *core) {
   core->headers_deadline_us = core->total_deadline_us;
   core->idle_deadline_us = core->total_deadline_us;
   core->state = CORE_RESOLVING;
+  core->connect_candidate_count = 0U;
+  core->next_connect_candidate = 0U;
 
   if (core->connection_valid) {
     if (connection_origin_matches(core)) {
@@ -2340,19 +2356,20 @@ static void handle_resolved(
       return;
     }
   }
-  size_t selected = count;
+  core->connect_candidate_count = 0U;
+  core->next_connect_candidate = 0U;
   for (size_t index = 0U; index < count; ++index) {
     if (allowed[index]) {
-      selected = index;
-      break;
+      core->connect_candidates[core->connect_candidate_count++] =
+          completion->detail.resolved.ipv4_be[index];
     }
   }
-  if (selected == count) {
+  if (core->connect_candidate_count == 0U) {
     select_failure(core, POCKETJS_NET_HTTP_CLIENT_ERROR_PERMISSION_DENIED, 0);
     return;
   }
   pocketjs_net_http_client_transport_result_t result =
-      start_connect(core, completion->detail.resolved.ipv4_be[selected]);
+      start_next_connect_candidate(core);
   if (result != POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
     select_failure(core,
                    result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_RESOURCE_LIMIT
@@ -2418,6 +2435,28 @@ static void handle_transport_completion(
     discard_completion_payload(core, completion);
   }
 
+  if (completion->type == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR &&
+      completed_kind == TRANSPORT_OPERATION_CONNECT &&
+      completion->detail.error.code ==
+          POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR_CONNECT &&
+      !core->terminal_selected &&
+      core->next_connect_candidate < core->connect_candidate_count &&
+      core->now_us < core->connect_deadline_us) {
+    core->connection_valid = false;
+    const pocketjs_net_http_client_transport_result_t retry_result =
+        start_next_connect_candidate(core);
+    if (retry_result == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_OK) {
+      return;
+    }
+    select_failure(core,
+                   retry_result ==
+                           POCKETJS_NET_HTTP_CLIENT_TRANSPORT_RESOURCE_LIMIT
+                       ? POCKETJS_NET_HTTP_CLIENT_ERROR_RESOURCE_LIMIT
+                       : POCKETJS_NET_HTTP_CLIENT_ERROR_TRANSPORT,
+                   (int32_t)retry_result);
+    return;
+  }
+
   if (completion->type == POCKETJS_NET_HTTP_CLIENT_TRANSPORT_ERROR) {
     if (completed_kind == TRANSPORT_OPERATION_CONNECT ||
         completed_kind == TRANSPORT_OPERATION_READ ||
@@ -2480,6 +2519,8 @@ static void handle_transport_completion(
            strlen(core->hostname) + 1U);
     core->connection_port = core->port;
     core->connection_ipv4_be = core->selected_ipv4_be;
+    core->connect_candidate_count = 0U;
+    core->next_connect_candidate = 0U;
     core->headers_deadline_us = earlier_deadline(
         deadline_after(core->now_us, core->config.headers_timeout_us),
         core->total_deadline_us);
@@ -3095,6 +3136,8 @@ static void reset_after_terminal(pocketjs_net_http_client_core_t *core) {
   core->redirect_mode = POCKETJS_NET_HTTP_CLIENT_REDIRECT_MANUAL;
   core->redirect_count = 0U;
   core->max_redirects = 0U;
+  core->connect_candidate_count = 0U;
+  core->next_connect_candidate = 0U;
 }
 
 bool pocketjs_net_http_client_core_retire_event(
