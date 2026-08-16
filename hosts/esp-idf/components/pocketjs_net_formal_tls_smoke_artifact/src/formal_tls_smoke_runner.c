@@ -413,6 +413,7 @@ finish:
       out_result->runtime.taken_leases == 0U &&
       out_result->runtime.leases_taken == out_result->runtime.leases_released &&
       out_result->runtime.poison_flags == 0U &&
+      out_result->guest.cooperative_yields > 0U &&
       out_result->runtime.requests_started ==
           POCKETJS_NET_FORMAL_TLS_SMOKE_REQUESTS;
   if (!successful && run_error == ESP_OK) {
@@ -422,7 +423,7 @@ finish:
            "POCKET_NET_FORMAL_TLS_RUN status=%s rounds=%u/%u requests=%u/%u "
            "frame_calls=%u service_turns=%llu jobs=%llu shutdown=%d "
            "poison=0x%08x core_poison=0x%08x poisoned_cores=%u "
-           "core_cause=%ld elapsed_ms=%llu",
+           "core_cause=%ld guest_yields=%u elapsed_ms=%llu",
            esp_err_to_name(run_error),
            (unsigned)out_result->report.rounds_passed,
            (unsigned)POCKETJS_NET_FORMAL_TLS_SMOKE_ROUNDS,
@@ -435,6 +436,7 @@ finish:
            out_result->runtime.core_poison_flags,
            (unsigned)out_result->runtime.poisoned_core_slots,
            (long)out_result->runtime.first_core_poison_cause_code,
+           (unsigned)out_result->guest.cooperative_yields,
            (unsigned long long)out_result->elapsed_ms);
   return run_error;
 }

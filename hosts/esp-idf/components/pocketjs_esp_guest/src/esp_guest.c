@@ -15,6 +15,8 @@
 #include "freertos/task.h"
 
 #define POCKETJS_ESP_GUEST_CONSOLE_BYTES 384U
+#define POCKETJS_ESP_GUEST_YIELD_INTERVAL_US INT64_C(100000)
+#define POCKETJS_ESP_GUEST_ALLOCATIONS_PER_YIELD_CHECK 64U
 
 static const char *TAG = "pocketjs_guest";
 
@@ -32,7 +34,41 @@ struct pocketjs_esp_guest {
   int64_t execution_deadline_us;
   uint32_t max_interrupt_checks;
   uint32_t interrupt_checks_remaining;
+  uint32_t allocations_until_yield_check;
+  int64_t cooperative_yield_deadline_us;
 };
+
+static void guest_maybe_cooperative_yield(pocketjs_esp_guest_t *guest) {
+  if (!guest->executing ||
+      esp_timer_get_time() < guest->cooperative_yield_deadline_us) {
+    return;
+  }
+
+  /* A ready owner task outranks the idle task, so taskYIELD() is insufficient
+   * to let the idle task service the task watchdog during a large source
+   * parse. Blocking for one scheduler tick preserves bounded execution while
+   * keeping parser and bytecode work cooperative with the rest of the Host. */
+  vTaskDelay(1);
+  ++guest->stats.cooperative_yields;
+  const int64_t now = esp_timer_get_time();
+  guest->cooperative_yield_deadline_us =
+      now > INT64_MAX - POCKETJS_ESP_GUEST_YIELD_INTERVAL_US
+          ? INT64_MAX
+          : now + POCKETJS_ESP_GUEST_YIELD_INTERVAL_US;
+}
+
+static void guest_allocation_checkpoint(pocketjs_esp_guest_t *guest) {
+  if (!guest->executing) {
+    return;
+  }
+  if (guest->allocations_until_yield_check > 1U) {
+    --guest->allocations_until_yield_check;
+    return;
+  }
+  guest->allocations_until_yield_check =
+      POCKETJS_ESP_GUEST_ALLOCATIONS_PER_YIELD_CHECK;
+  guest_maybe_cooperative_yield(guest);
+}
 
 static size_t guest_allocation_size(const void *pointer) {
   return pointer != NULL ? heap_caps_get_allocated_size((void *)pointer) : 0;
@@ -62,6 +98,7 @@ static void guest_record_allocation(pocketjs_esp_guest_t *guest,
       guest->stats.allocation_count_high_water) {
     guest->stats.allocation_count_high_water = guest->stats.allocation_count;
   }
+  guest_allocation_checkpoint(guest);
 }
 
 static void guest_record_free(pocketjs_esp_guest_t *guest, void *pointer) {
@@ -152,6 +189,7 @@ static int guest_interrupt(JSRuntime *runtime, void *opaque) {
   if (!guest->executing) {
     return 0;
   }
+  guest_maybe_cooperative_yield(guest);
   if (guest->max_interrupt_checks != 0) {
     if (guest->interrupt_checks_remaining == 0) {
       guest->interrupted = true;
@@ -179,6 +217,12 @@ static esp_err_t guest_begin_execution(pocketjs_esp_guest_t *guest) {
       guest->execution_timeout_us > (uint64_t)(INT64_MAX - now)
           ? INT64_MAX
           : now + (int64_t)guest->execution_timeout_us;
+  guest->allocations_until_yield_check =
+      POCKETJS_ESP_GUEST_ALLOCATIONS_PER_YIELD_CHECK;
+  guest->cooperative_yield_deadline_us =
+      now > INT64_MAX - POCKETJS_ESP_GUEST_YIELD_INTERVAL_US
+          ? INT64_MAX
+          : now + POCKETJS_ESP_GUEST_YIELD_INTERVAL_US;
   return ESP_OK;
 }
 

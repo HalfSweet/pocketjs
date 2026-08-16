@@ -41,6 +41,8 @@ typedef struct {
   size_t allocation_count_high_water;
   size_t engine_memory_used_bytes;
   size_t engine_object_count;
+  /** Total one-tick FreeRTOS yields during bounded Guest execution. */
+  uint32_t cooperative_yields;
 } pocketjs_esp_guest_stats_t;
 
 /**

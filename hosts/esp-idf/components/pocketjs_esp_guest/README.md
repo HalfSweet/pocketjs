@@ -23,6 +23,14 @@ has optional wall-clock and QuickJS interrupt-check budgets. The scheduler also
 receives an explicit pending-jobs result, so it cannot mistake a truncated
 checkpoint for quiescence.
 
+While a bounded Guest execution is active, the component gives FreeRTOS one
+scheduler tick at 100 ms intervals. QuickJS bytecode reaches that checkpoint
+through its interrupt hook; source parsing reaches it through sampled engine
+allocations. **This keeps the idle task and system watchdog live while a large,
+verified factory is parsed.** The yield counter is included in Guest stats.
+Native code that neither invokes the engine interrupt hook nor allocates engine
+memory remains the Host's responsibility and must be independently bounded.
+
 The engine allocator can require PSRAM. That mode fails closed instead of
 silently consuming internal DRAM when external memory is unavailable. Current
 and high-water byte/count counters plus QuickJS object/memory totals are
