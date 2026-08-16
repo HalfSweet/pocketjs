@@ -8,6 +8,7 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 import signal
 import socket
 import ssl
@@ -65,6 +66,8 @@ class RecordingSink:
 def make_server(
     tls_context: ssl.SSLContext | None = None,
     events: QuietSink | RecordingSink | None = None,
+    *,
+    observe_tls_close_notify: bool = False,
 ) -> http_peer.ThreadingPeerServer:
     return http_peer.ThreadingPeerServer(
         ("127.0.0.1", 0),
@@ -74,6 +77,7 @@ def make_server(
         delay_ceiling_ms=2000,
         events=events if events is not None else QuietSink(),
         tls_context=tls_context,
+        observe_tls_close_notify=observe_tls_close_notify,
     )
 
 
@@ -276,13 +280,18 @@ class TLSPeerTest(unittest.TestCase):
         *,
         maximum_version: ssl.TLSVersion | None = None,
         events: RecordingSink | None = None,
+        observe_tls_close_notify: bool = False,
     ) -> tuple[http_peer.ThreadingPeerServer, str, int]:
         tls_context = http_peer.create_server_tls_context(
             self.pki[cert_name], self.pki[key_name], "1.2"
         )
         if maximum_version is not None:
             tls_context.maximum_version = maximum_version
-        server = make_server(tls_context, events)
+        server = make_server(
+            tls_context,
+            events,
+            observe_tls_close_notify=observe_tls_close_notify,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -448,6 +457,65 @@ class TLSPeerTest(unittest.TestCase):
             fields for event, fields in events.records if event == "tls_client_hello"
         ]
         self.assertEqual(hello_events[0]["server_name"], "localhost")
+
+    def tls_health_connection(self, port: int) -> ssl.SSLSocket:
+        raw = socket.create_connection(("127.0.0.1", port), timeout=2)
+        secure = self.trusted_context().wrap_socket(raw, server_hostname="localhost")
+        secure.sendall(
+            b"GET /health HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Connection: keep-alive\r\n\r\n"
+        )
+        response = http.client.HTTPResponse(secure)
+        response.begin()
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'"status":"ok"', response.read())
+        return secure
+
+    def test_observes_client_close_notify(self) -> None:
+        events = RecordingSink()
+        _, _, port = self.start_profile(
+            "server_cert",
+            "server_key",
+            maximum_version=ssl.TLSVersion.TLSv1_2,
+            events=events,
+            observe_tls_close_notify=True,
+        )
+        secure = self.tls_health_connection(port)
+        try:
+            try:
+                raw = secure.unwrap()
+            except OSError:
+                secure.close()
+            else:
+                raw.close()
+        finally:
+            secure.close()
+        self.assertTrue(events.wait_for("connection_close"))
+        closes = [
+            fields for event, fields in events.snapshot() if event == "connection_close"
+        ]
+        self.assertEqual(closes[0]["tls_close_state"], "close_notify")
+        self.assertIs(closes[0]["tls_close_notify_observed"], True)
+
+    def test_observes_ragged_tls_eof(self) -> None:
+        events = RecordingSink()
+        _, _, port = self.start_profile(
+            "server_cert",
+            "server_key",
+            maximum_version=ssl.TLSVersion.TLSv1_2,
+            events=events,
+            observe_tls_close_notify=True,
+        )
+        secure = self.tls_health_connection(port)
+        descriptor = secure.detach()
+        os.close(descriptor)
+        self.assertTrue(events.wait_for("connection_close"))
+        closes = [
+            fields for event, fields in events.snapshot() if event == "connection_close"
+        ]
+        self.assertEqual(closes[0]["tls_close_state"], "ragged_eof")
+        self.assertIs(closes[0]["tls_close_notify_observed"], False)
 
     def test_wrong_hostname_is_rejected(self) -> None:
         error = self.assert_profile_rejected("wrong_host_cert", "wrong_host_key")

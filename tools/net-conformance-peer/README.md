@@ -71,6 +71,7 @@ python3 "$PEER_DIR/http_peer.py" serve \
   --tls-key "$PEER_DIR/.pki/server.key.pem" \
   --tls-min-version 1.2 \
   --tls-max-version 1.2 \
+  --observe-tls-close-notify \
   --events "$POCKETJS_PEER_RUN_DIR/tls.ndjson"
 ```
 
@@ -79,6 +80,11 @@ server accepts TLS 1.2 and newer by default. Use `--tls-min-version 1.3` for a
 version-rejection test. Configure the ESP client with `https://MAC_IPV4:8443`
 and the generated `ca.cert.pem` trust anchor. The certificate must contain the
 exact DNS name or IP address used by the URL.
+
+With `--observe-tls-close-notify`, each TLS `connection_close` event records
+`tls_close_state` as `close_notify`, `ragged_eof`, or `not_observed` and includes
+the corresponding `tls_close_notify_observed` boolean. **A Phase 1B graceful
+shutdown pass requires `close_notify`; a TCP EOF alone is not sufficient.**
 
 The HTTPS probe exercises the same verified path from a Mac client. It has no
 insecure mode:

@@ -157,6 +157,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         delay_ceiling_ms: int,
         events: EventSink,
         tls_context: ssl.SSLContext | None = None,
+        observe_tls_close_notify: bool = False,
     ) -> None:
         self.body_limit = body_limit
         self.header_limit = header_limit
@@ -165,6 +166,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.events = events
         self.state = PeerState()
         self.tls_context = tls_context
+        self.observe_tls_close_notify = observe_tls_close_notify
         if self.tls_context is not None:
             self.tls_context.set_servername_callback(self._record_tls_server_name)
         super().__init__(address, PeerHandler)
@@ -197,6 +199,7 @@ class ThreadingPeerServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             request,
             server_side=True,
             do_handshake_on_connect=False,
+            suppress_ragged_eofs=not self.observe_tls_close_notify,
         )
         return secure_request, address
 
@@ -215,8 +218,11 @@ class PeerHandler(socketserver.BaseRequestHandler):
 
     def setup(self) -> None:
         super().setup()
+        self.tls_close_state: str | None = None
         self.request.settimeout(self.server.socket_timeout)
         if isinstance(self.request, ssl.SSLSocket):
+            if self.server.observe_tls_close_notify:
+                self.tls_close_state = "not_observed"
             try:
                 self.request.do_handshake()
             except OSError as error:
@@ -248,11 +254,16 @@ class PeerHandler(socketserver.BaseRequestHandler):
 
     def finish(self) -> None:
         self.server.state.connection_closed()
-        self.server.events.emit(
-            "connection_close",
-            connection_id=self.connection_id,
-            requests=self.connection_request_index,
-        )
+        fields: dict[str, object] = {
+            "connection_id": self.connection_id,
+            "requests": self.connection_request_index,
+        }
+        if self.tls_close_state is not None:
+            fields["tls_close_state"] = self.tls_close_state
+            fields["tls_close_notify_observed"] = (
+                self.tls_close_state == "close_notify"
+            )
+        self.server.events.emit("connection_close", **fields)
         super().finish()
 
     def handle(self) -> None:
@@ -262,6 +273,10 @@ class PeerHandler(socketserver.BaseRequestHandler):
                 request, buffered = self._read_request(buffered)
             except RequestError as error:
                 self._send_fixed(error.status, error.message.encode(), keep_alive=False)
+                return
+            except ssl.SSLEOFError:
+                if self.tls_close_state is not None:
+                    self.tls_close_state = "ragged_eof"
                 return
             except (ConnectionError, socket.timeout):
                 return
@@ -307,6 +322,8 @@ class PeerHandler(socketserver.BaseRequestHandler):
             if not chunk:
                 if buffered:
                     raise RequestError(400, "connection closed in request headers")
+                if self.tls_close_state is not None:
+                    self.tls_close_state = "close_notify"
                 return None, b""
             buffered += chunk
 
@@ -898,6 +915,8 @@ def run_probe(args: argparse.Namespace) -> int:
 def run_server(args: argparse.Namespace) -> int:
     if bool(args.tls_cert) != bool(args.tls_key):
         raise ValueError("--tls-cert and --tls-key must be provided together")
+    if args.observe_tls_close_notify and not args.tls_cert:
+        raise ValueError("--observe-tls-close-notify requires TLS")
     tls_context = None
     if args.tls_cert:
         if args.tls_max_version and tls_version(
@@ -924,6 +943,7 @@ def run_server(args: argparse.Namespace) -> int:
         delay_ceiling_ms=args.delay_ceiling_ms,
         events=events,
         tls_context=tls_context,
+        observe_tls_close_notify=args.observe_tls_close_notify,
     )
     host, port = server.server_address[:2]
     events.emit(
@@ -935,6 +955,7 @@ def run_server(args: argparse.Namespace) -> int:
         tls_max_version=(
             args.tls_max_version if tls_context is not None else None
         ),
+        observe_tls_close_notify=args.observe_tls_close_notify,
         max_header_bytes=args.max_header_bytes,
         max_request_body_bytes=args.max_request_body_bytes,
     )
@@ -991,6 +1012,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--tls-max-version",
         choices=("1.2", "1.3"),
         help="optional maximum accepted TLS version for version-specific tests",
+    )
+    serve.add_argument(
+        "--observe-tls-close-notify",
+        action="store_true",
+        help="distinguish a client TLS close_notify from an abrupt EOF",
     )
     serve.set_defaults(entrypoint=run_server)
 
