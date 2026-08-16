@@ -1,0 +1,83 @@
+{
+  "app": {
+    "id": "dev.pocketjs.esp-formal-network-tls-conformance",
+    "title": "ESP formal TLS network conformance",
+    "entry": "app.ts",
+    "output": "esp-formal-network-tls-conformance",
+    "framework": "solid"
+  },
+  "target": {
+    "id": "esp-formal-network-tls-conformance-test",
+    "hostAbi": 1
+  },
+  "viewport": {
+    "logical": [
+      1,
+      1
+    ],
+    "physical": [
+      1,
+      1
+    ],
+    "presentation": "native",
+    "rasterDensity": 1
+  },
+  "features": {
+    "network.http.client": true,
+    "network.http.client.tls": true
+  },
+  "network": {
+    "policy": {
+      "version": 1,
+      "connect": [
+        {
+          "protocol": "https",
+          "host": "pocketjs.test",
+          "port": {
+            "min": 8443,
+            "max": 8443
+          }
+        }
+      ],
+      "listen": [],
+      "localNetwork": true,
+      "insecureTransport": false,
+      "broadcast": false,
+      "multicast": false,
+      "allowInvalidTlsForDevelopment": false,
+      "browserAmbientCredentials": false,
+      "browserOpaqueWebSocketRedirects": false,
+      "credentials": []
+    },
+    "providers": {
+      "backendByRole": {
+        "http.client": "pocketjs.net.http-client-core.v1.experimental"
+      },
+      "tlsByRole": {
+        "http.client": {
+          "source": "provider",
+          "id": "pocketjs.net.esp-idf.esp-tls.v1.experimental"
+        }
+      },
+      "netDriverId": "pocketjs.net.esp-idf.transport.v1.experimental"
+    },
+    "resources": {
+      "minimum": {
+        "runtime": {
+          "connections": 1,
+          "pendingOperations": 1,
+          "completionDescriptors": 8,
+          "nativeBufferBytes": 65536
+        },
+        "http": {
+          "connections": 1,
+          "inflightRequests": 1,
+          "headerBytes": 4096,
+          "headerCount": 16,
+          "bufferedBodyBytes": 4096
+        }
+      }
+    }
+  },
+  "planHash": "sha256:fe3014e4d3628eb60aaeedd414432eb8c9a5932e904b258a9d05a17c7f6abcce"
+}

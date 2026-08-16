@@ -35,15 +35,15 @@ const REPORT_GLOBAL = "__pocketjsFormalNetworkTlsSmokeReportV1";
 const CANCEL_GLOBAL = "__pocketjsFormalNetworkTlsSmokeCancelV1";
 const PUBLIC_HTTP_SPECIFIER = "@pocketjs/framework/net/http";
 const TLS_PROVIDER_ID = "pocketjs.net.esp-idf.esp-tls.v1.experimental";
-const EXPECTED_CA_DER_SHA256 =
+export const EXPECTED_CA_DER_SHA256 =
   "sha256:318ae57f0fb82d12cf86431571fb6ec3556ecb74f530a5be6f741a482b5447af";
 
-const TEST_CAPABILITIES = defineCapabilityRegistry([
+export const TEST_CAPABILITIES = defineCapabilityRegistry([
   "network.http.client",
   "network.http.client.tls",
 ] as const);
 
-type TestCapability = CapabilityId<typeof TEST_CAPABILITIES>;
+export type TestCapability = CapabilityId<typeof TEST_CAPABILITIES>;
 
 const TEST_TARGET_DEFINITIONS = {
   [TARGET_ID]: {
@@ -70,7 +70,7 @@ const TEST_CONTRACTS = definePlatformContractRegistry(
   TEST_TARGETS,
 );
 
-const TEST_NETWORK_PROFILE: HostNetworkResolutionProfile = {
+export const TEST_NETWORK_PROFILE: HostNetworkResolutionProfile = {
   providers: {
     backendByRole: {
       "http.client": "pocketjs.net.http-client-core.v1.experimental",
@@ -106,7 +106,7 @@ interface GeneratedOutput {
   readonly bytes: Uint8Array;
 }
 
-interface GeneratedMetadata {
+export interface GeneratedMetadata {
   readonly schemaVersion: 1;
   readonly testOnly: true;
   readonly target: { readonly id: string; readonly hostAbi: number };
@@ -183,7 +183,7 @@ function cString(value: string): string {
   return JSON.stringify(value);
 }
 
-function metadataSource(
+export function metadataSource(
   plan: ResolvedBuildPlan,
   metadata: GeneratedMetadata,
   caPem: Uint8Array,
@@ -312,7 +312,7 @@ export async function resolvePlan(): Promise<ResolvedBuildPlan> {
   return result.plan;
 }
 
-async function readCa(): Promise<{ pem: Uint8Array; derSha256: string }> {
+export async function readCa(): Promise<{ pem: Uint8Array; derSha256: string }> {
   const pem = new Uint8Array(await Bun.file(
     join(COMPONENT, "fixtures/ca.cert.pem"),
   ).arrayBuffer());

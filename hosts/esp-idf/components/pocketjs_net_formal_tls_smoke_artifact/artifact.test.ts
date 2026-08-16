@@ -80,7 +80,7 @@ async function expectPermitRefusal(
   const result = await spawnBuild(path, join(temporary, label), "https");
   expect(result.exitCode).not.toBe(0);
   expect(result.output).toContain(
-    "restricted to the exact ESP formal TLS network smoke plan and entry",
+    "restricted to the exact ESP formal TLS test plans and entries",
   );
 }
 

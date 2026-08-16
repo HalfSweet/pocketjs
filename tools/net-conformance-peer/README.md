@@ -333,6 +333,44 @@ oversized messages, and EDNS bounds. The fixtures do not by themselves cover
 permission decisions, abort races, target resource limits, long soak, or
 hardware/runtime assertions.
 
+## Phase 1B HTTP/TLS conformance gate
+
+The conformance artifact runs 20 rounds and reports 40 Guest operations. Four
+manual redirect hops produce **44 wire requests over 25 TLS 1.2 connections**.
+The matrix covers `HEAD`, fixed and chunked response bodies, streamed chunked
+uploads, 404 and 503 responses, manual redirects, malformed framing and
+trailers, connection reuse, graceful `close_notify`, forced closes, and a
+retry counter that detects hidden retries. It runs without frames and requires
+balanced leases, completed shutdown, and zero runtime or Core poison.
+
+Capture one board at a time with fresh board, authoritative DNS, and TLS peer
+logs. Stop both peers after the board reports success, then validate the three
+files together:
+
+```sh
+python3 tools/net-conformance-peer/phase1b_conformance.py \
+  --board s3 \
+  --board-log "$POCKETJS_PEER_RUN_DIR/board.log" \
+  --dns-events "$POCKETJS_PEER_RUN_DIR/dns.ndjson" \
+  --tls-events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --board-ipv4 172.16.10.231 \
+  --peer-ipv4 172.16.10.126
+```
+
+Use `--board p4 --board-ipv4 172.16.10.145` for Tab5. Replace both addresses
+with the addresses selected for that run. The validator pins the artifact,
+plan, CA, provider, endpoint, request order, request bodies and headers,
+connection segmentation, TLS version, SNI, DNS identity, and cross-file
+monotonic ordering. The P4 profile also requires the C6 power-expander
+read-modify-write and readback invariant. **A passing conformance run is test
+evidence; it does not advertise the public network capability.**
+
+Run the deterministic evidence-parser regressions with:
+
+```sh
+python3 -m unittest tools/net-conformance-peer/test_phase1b_conformance.py
+```
+
 ## Phase 1B repeated-handshake soak gate
 
 The ESP board harnesses can repeat the complete 20-round factory with a fresh

@@ -241,9 +241,36 @@ if (testOnlyStagedHttpClientFetchRequested) {
   );
 }
 if (testOnlyStagedHttpsClientFetchRequested) {
-  const expectedEntry = join(
-    ROOT,
-    "hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/app.ts",
+  const exactArtifacts = [
+    {
+      targetId: "esp-formal-network-tls-smoke-test",
+      planHash:
+        "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654",
+      appId: "dev.pocketjs.esp-formal-network-tls-smoke",
+      output: "esp-formal-network-tls-smoke",
+      entry: join(
+        ROOT,
+        "hosts/esp-idf/components/pocketjs_net_formal_tls_smoke_artifact/app.ts",
+      ),
+    },
+    {
+      targetId: "esp-formal-network-tls-conformance-test",
+      planHash:
+        "sha256:fe3014e4d3628eb60aaeedd414432eb8c9a5932e904b258a9d05a17c7f6abcce",
+      appId: "dev.pocketjs.esp-formal-network-tls-conformance",
+      output: "esp-formal-network-tls-conformance",
+      entry: join(
+        ROOT,
+        "hosts/esp-idf/components/pocketjs_net_formal_tls_conformance_artifact/app.ts",
+      ),
+    },
+  ] as const;
+  const exactArtifact = exactArtifacts.some((artifact) =>
+    buildPlan?.target.id === artifact.targetId &&
+    buildPlan.planHash === artifact.planHash &&
+    buildPlan.app.id === artifact.appId &&
+    buildPlan.app.output === artifact.output &&
+    requestedEntry === artifact.entry
   );
   const features = buildPlan?.features ?? {};
   const enabledFeatures = Object.entries(features)
@@ -259,13 +286,8 @@ if (testOnlyStagedHttpsClientFetchRequested) {
     !networkFactoryRequested ||
     bundleArtifactMode !== "network-factory" ||
     networkPrivate === undefined ||
-    buildPlan?.target.id !== "esp-formal-network-tls-smoke-test" ||
-    buildPlan.target.hostAbi !== 1 ||
-    buildPlan.planHash !==
-      "sha256:9240cfa29c1678b49b6fed67104a39b2ad32f5dedab372af1c2a0bde3d602654" ||
-    buildPlan.app.id !== "dev.pocketjs.esp-formal-network-tls-smoke" ||
-    buildPlan.app.output !== "esp-formal-network-tls-smoke" ||
-    requestedEntry !== expectedEntry ||
+    !exactArtifact ||
+    buildPlan?.target.hostAbi !== 1 ||
     enabledFeatures.length !== 2 ||
     enabledFeatures[0] !== "network.http.client" ||
     enabledFeatures[1] !== "network.http.client.tls" ||
@@ -286,7 +308,7 @@ if (testOnlyStagedHttpsClientFetchRequested) {
   ) {
     throw new Error(
       "PocketJS build: --test-only-staged-https-client-fetch is restricted to " +
-        "the exact ESP formal TLS network smoke plan and entry",
+        "the exact ESP formal TLS test plans and entries",
     );
   }
   networkPrivate = Object.freeze({
