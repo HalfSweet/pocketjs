@@ -157,6 +157,11 @@ bool pocketjs_net_operation_cancel_closes_connection(
          kind == POCKETJS_NET_TRANSPORT_OPERATION_CLOSE;
 }
 
+bool pocketjs_net_operation_shutdown_requests_cancel(
+    pocketjs_net_transport_operation_kind_t kind) {
+  return kind != POCKETJS_NET_TRANSPORT_OPERATION_CLOSE;
+}
+
 static bool tls_code_matches(int actual, int expected) {
   return expected != 0 &&
          (actual == expected || (expected != INT_MIN && actual == -expected));

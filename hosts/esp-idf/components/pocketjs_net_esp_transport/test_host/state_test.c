@@ -157,5 +157,15 @@ int main(void) {
       POCKETJS_NET_TRANSPORT_OPERATION_WRITE));
   assert(pocketjs_net_operation_cancel_closes_connection(
       POCKETJS_NET_TRANSPORT_OPERATION_CLOSE));
+  assert(pocketjs_net_operation_shutdown_requests_cancel(
+      POCKETJS_NET_TRANSPORT_OPERATION_RESOLVE));
+  assert(pocketjs_net_operation_shutdown_requests_cancel(
+      POCKETJS_NET_TRANSPORT_OPERATION_CONNECT));
+  assert(pocketjs_net_operation_shutdown_requests_cancel(
+      POCKETJS_NET_TRANSPORT_OPERATION_READ));
+  assert(pocketjs_net_operation_shutdown_requests_cancel(
+      POCKETJS_NET_TRANSPORT_OPERATION_WRITE));
+  assert(!pocketjs_net_operation_shutdown_requests_cancel(
+      POCKETJS_NET_TRANSPORT_OPERATION_CLOSE));
   return 0;
 }

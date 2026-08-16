@@ -118,6 +118,8 @@ bool pocketjs_net_operation_ticket_matches(
     uint64_t requested_token);
 bool pocketjs_net_operation_cancel_closes_connection(
     pocketjs_net_transport_operation_kind_t kind);
+bool pocketjs_net_operation_shutdown_requests_cancel(
+    pocketjs_net_transport_operation_kind_t kind);
 
 pocketjs_net_tls_error_class_t pocketjs_net_classify_tls_error(
     int tls_code, uint32_t certificate_flags,

@@ -1604,6 +1604,16 @@ esp_err_t pocketjs_net_esp_runtime_get_stats(
     const pocketjs_net_esp_runtime_slot_t *slot = &runtime->slots[index];
     if (slot->initialized) {
       ++out_stats->initialized_operation_slots;
+      pocketjs_net_http_client_core_status_t core_status = {0};
+      if (pocketjs_net_http_client_core_get_status(slot->core, &core_status) &&
+          core_status.poisoned) {
+        if (out_stats->poisoned_core_slots == 0U) {
+          out_stats->first_core_poison_cause_code =
+              core_status.first_poison_cause_code;
+        }
+        ++out_stats->poisoned_core_slots;
+        out_stats->core_poison_flags |= core_status.poison_flags;
+      }
     }
     if (slot->transport != NULL) {
       ++out_stats->transport_instances;

@@ -37,7 +37,9 @@ DNS context. A normal TLS close sends `close_notify`; `WANT_READ`/`WANT_WRITE`
 retries consume bounded owner-pump steps under the close operation's monotonic
 deadline. The client does not wait indefinitely for a reciprocal alert. A
 close-alert failure, cancellation, or timeout hard-closes the native stream and
-is reported through the existing close terminal path.
+is reported through the existing close terminal path. Transport-wide shutdown
+cancels active resolve/connect/read/write operations, but it does not cancel an
+already accepted close; that close completes or reaches its own deadline.
 
 Poison recovery is separate from healthy shutdown. An owner may call
 `pocketjs_net_esp_transport_destroy_poisoned` only after the sole Core using the

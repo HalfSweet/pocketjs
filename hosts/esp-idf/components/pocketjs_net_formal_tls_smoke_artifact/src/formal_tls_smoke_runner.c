@@ -388,7 +388,8 @@ finish:
   ESP_LOGI(TAG,
            "POCKET_NET_FORMAL_TLS_RUN status=%s rounds=%u/%u requests=%u/%u "
            "frame_calls=%u service_turns=%llu jobs=%llu shutdown=%d "
-           "poison=0x%08x elapsed_ms=%llu",
+           "poison=0x%08x core_poison=0x%08x poisoned_cores=%u "
+           "core_cause=%ld elapsed_ms=%llu",
            esp_err_to_name(run_error),
            (unsigned)out_result->report.rounds_passed,
            (unsigned)POCKETJS_NET_FORMAL_TLS_SMOKE_ROUNDS,
@@ -398,6 +399,9 @@ finish:
            (unsigned long long)out_result->service_turns,
            (unsigned long long)out_result->guest_jobs_executed,
            out_result->shutdown_complete, out_result->runtime.poison_flags,
+           out_result->runtime.core_poison_flags,
+           (unsigned)out_result->runtime.poisoned_core_slots,
+           (long)out_result->runtime.first_core_poison_cause_code,
            (unsigned long long)out_result->elapsed_ms);
   return run_error;
 }

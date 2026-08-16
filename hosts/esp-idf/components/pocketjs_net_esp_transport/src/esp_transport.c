@@ -900,7 +900,8 @@ void pocketjs_net_esp_transport_begin_shutdown(
   for (size_t index = 0; index < POCKETJS_NET_ESP_TRANSPORT_MAX_OPERATIONS;
        ++index) {
     operation_slot_t *operation = &transport->operations[index];
-    if (operation->lifecycle == POCKETJS_NET_OPERATION_ACTIVE) {
+    if (operation->lifecycle == POCKETJS_NET_OPERATION_ACTIVE &&
+        pocketjs_net_operation_shutdown_requests_cancel(operation->kind)) {
       atomic_store_explicit(&operation->cancel_requested, true,
                             memory_order_release);
     }
@@ -1755,6 +1756,9 @@ static void pump_close(pocketjs_net_esp_transport_t *transport,
       }
       if (system_error != 0) {
         cause = system_error;
+      } else if (cause == 0) {
+        /* Preserve the direct close_notify result for poison diagnostics. */
+        cause = tls_code;
       }
       operation_cleanup_for_error(transport, operation, true);
       enqueue_error(transport, operation,

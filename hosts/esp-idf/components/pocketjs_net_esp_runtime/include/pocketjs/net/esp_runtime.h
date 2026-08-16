@@ -181,6 +181,9 @@ typedef struct {
   uint64_t leases_cleaned_up;
   uint64_t permission_checks;
   uint32_t poison_flags;
+  uint16_t poisoned_core_slots;
+  uint32_t core_poison_flags;
+  int32_t first_core_poison_cause_code;
   size_t runtime_instance_bytes;
   size_t core_storage_bytes;
   size_t transport_instances;

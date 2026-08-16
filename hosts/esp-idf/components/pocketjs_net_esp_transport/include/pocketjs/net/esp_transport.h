@@ -259,7 +259,8 @@ esp_err_t pocketjs_net_esp_transport_create(
     pocketjs_net_esp_transport_t **out_transport);
 
 /** Thread-safe.
- * Starts quiescing and requests cancellation for every active operation.
+ * Starts quiescing and requests cancellation for every active operation except
+ * an already accepted close, which continues under its monotonic deadline.
  * The owner must continue pump/take/retire until is_quiescent returns true.
  * The wake hook is called after releasing the transport lock.
  */

@@ -383,6 +383,7 @@ bool pocketjs_net_http_client_core_get_status(
       .poison_flags = core->poisoned
                           ? POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_COMPLETION
                           : POCKETJS_NET_HTTP_CLIENT_POISON_NONE,
+      .first_poison_cause_code = core->poisoned ? -123 : 0,
       .operation_token = core->operation_token,
   };
   return true;
@@ -1008,6 +1009,10 @@ static void test_poisoned_core_retained_transport_teardown(
   assert(stats.active_operations == 0U && stats.pending_core_events == 0U &&
          stats.poison_flags == (POCKETJS_NET_ESP_RUNTIME_POISON_CORE |
                                 POCKETJS_NET_ESP_RUNTIME_POISON_SHUTDOWN));
+  assert(stats.poisoned_core_slots == 1U &&
+         stats.core_poison_flags ==
+             POCKETJS_NET_HTTP_CLIENT_POISON_CLOSE_COMPLETION &&
+         stats.first_core_poison_cause_code == -123);
   const size_t destroys_before_runtime_destroy = transport_destroys;
   const size_t poisoned_destroys_before_runtime_destroy =
       poisoned_transport_destroys;
