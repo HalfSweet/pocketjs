@@ -120,6 +120,7 @@ const SUITE: readonly Stage[] = [
       "tools/net-conformance-peer/test_phase1b_soak.py",
       "tools/net-conformance-peer/test_phase1b_version_reject.py",
       "tools/net-conformance-peer/test_phase1b_certificate_reject.py",
+      "tools/net-conformance-peer/test_phase1b_handshake_interrupt.py",
       "tools/net-conformance-peer/test_phase1b_conformance.py",
     ],
   },

@@ -490,3 +490,55 @@ Run the deterministic evidence-parser regressions with:
 ```sh
 python3 -m unittest tools/net-conformance-peer/test_phase1b_certificate_reject.py
 ```
+
+## Phase 1B handshake timeout and cancellation gate
+
+Run the valid `server.cert.pem` profile with TLS fixed to 1.2 and a 10-second
+server-side handshake delay:
+
+```sh
+python3 tools/net-conformance-peer/http_peer.py serve \
+  --host 172.16.10.126 \
+  --port 8443 \
+  --events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --tls-cert tools/net-conformance-peer/.pki/server.cert.pem \
+  --tls-key tools/net-conformance-peer/.pki/server.key.pem \
+  --tls-min-version 1.2 \
+  --tls-max-version 1.2 \
+  --tls-handshake-delay-ms 10000 \
+  --socket-timeout-ms 60000 \
+  --observe-tls-close-notify
+```
+
+Select the board harness's `handshake_timeout` mode with a 2,000,000-us
+connect/TLS deadline, or its `cancel` mode with a 500-ms AbortController delay.
+Build that mode with the board project's explicit `interrupt` artifact profile;
+the default `conformance` artifact intentionally has no cancellation entry
+point. Use a fresh evidence directory for one board and one mode. Stop the
+board monitor and both peers after the delayed server reports its handshake
+error, then validate all three streams:
+
+```sh
+python3 tools/net-conformance-peer/phase1b_handshake_interrupt.py \
+  --board s3 \
+  --profile timeout \
+  --board-log "$POCKETJS_PEER_RUN_DIR/board.log" \
+  --dns-events "$POCKETJS_PEER_RUN_DIR/dns.ndjson" \
+  --tls-events "$POCKETJS_PEER_RUN_DIR/tls.ndjson" \
+  --board-ipv4 172.16.10.231 \
+  --peer-ipv4 172.16.10.126
+```
+
+Use `--profile cancel` for the cancellation run and `--board p4
+--board-ipv4 172.16.10.145` for Tab5. The gate pins the dedicated formal TLS
+smoke artifact, valid certificate fingerprint, DNS identity, SNI, TLS version,
+server delay, client deadline or cancellation delay, and the board's stable
+error. The board must finish before the delayed server handshake, expose
+`timed_out` or `aborted`, produce zero opened TLS connections and HTTP requests,
+balance all leases, retain zero poison, and complete shutdown.
+
+Run the deterministic evidence-parser regressions with:
+
+```sh
+python3 -m unittest tools/net-conformance-peer/test_phase1b_handshake_interrupt.py
+```
