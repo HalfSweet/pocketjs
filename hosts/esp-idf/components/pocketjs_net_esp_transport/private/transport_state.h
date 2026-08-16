@@ -131,5 +131,9 @@ pocketjs_net_classify_tls_close_notify(int result, int want_read,
 
 size_t pocketjs_net_round_robin_next(size_t current, size_t capacity);
 
+/** A full fixed resolver prefix is ambiguous and must be rejected. */
+bool pocketjs_net_dns_candidate_prefix_saturated(size_t populated_slots,
+                                                 size_t slot_capacity);
+
 /** Never wraps. False permanently retires a slot at UINT64_MAX. */
 bool pocketjs_net_generation_advance(uint64_t *generation);

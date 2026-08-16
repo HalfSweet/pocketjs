@@ -195,9 +195,10 @@ static const pocketjs_net_esp_transport_descriptor_t s_descriptor = {
     .ipv4 = true,
     .asynchronous_raw_dns = true,
     .stock_lwip_dns_callbacks_only = true,
-    /* lwIP returns at most DNS_MAX_HOST_IP answers and may truncate a larger
-     * RRset, so this provider cannot claim an exhaustive DNS candidate set. */
+    /* A full cache prefix is rejected, but stock lwIP does not expose the DNS
+     * TC bit when a shorter prefix came from a truncated response. */
     .complete_dns_candidate_set = false,
+    .rejects_saturated_dns_candidate_prefix = true,
     /* Cancellation quarantines a pending context until its late callback; no
      * immutable generation ticket is carried by lwIP's callback API. */
     .dns_cancel_generation_cleanup = false,
@@ -612,10 +613,13 @@ static void read_tls_error(esp_tls_t *tls, int *cause, int *system_error,
   }
 }
 
-static size_t copy_dns_candidates(
-    const ip_addr_t *addresses,
-    uint32_t out[POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES]) {
+static size_t
+copy_dns_candidates(const ip_addr_t *addresses,
+                    uint32_t out[POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES],
+                    bool *out_saturated) {
   size_t count = 0U;
+  size_t populated_slots = 0U;
+  *out_saturated = false;
   if (addresses == NULL) {
     return 0U;
   }
@@ -625,6 +629,7 @@ static size_t copy_dns_candidates(
     if (ip_addr_isany(&addresses[index])) {
       continue;
     }
+    ++populated_slots;
 #if LWIP_IPV4 && LWIP_IPV6
     if (!IP_IS_V4(&addresses[index])) {
       continue;
@@ -639,6 +644,8 @@ static size_t copy_dns_candidates(
       out[count++] = address;
     }
   }
+  *out_saturated = pocketjs_net_dns_candidate_prefix_saturated(populated_slots,
+                                                               DNS_MAX_HOST_IP);
   return count;
 }
 
@@ -659,9 +666,11 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
                                        LWIP_DNS_ADDRTYPE_IPV4)
           : ERR_VAL;
   uint32_t candidates[POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES] = {0};
-  size_t count = cache_result == ERR_OK
-                     ? copy_dns_candidates(cached_addresses, candidates)
-                     : 0U;
+  bool saturated = false;
+  size_t count =
+      cache_result == ERR_OK
+          ? copy_dns_candidates(cached_addresses, candidates, &saturated)
+          : 0U;
 
   portENTER_CRITICAL(&transport->lock);
   if (context->state == DNS_CONTEXT_LOOKUP_PENDING) {
@@ -669,8 +678,9 @@ static void pocketjs_dns_found(const char *name, const ip_addr_t *addresses,
       context->state = DNS_CONTEXT_FREE;
     } else {
       memcpy(context->candidates, candidates, sizeof(candidates));
-      context->candidate_count = count;
-      context->result = count == 0U ? cache_result : ERR_OK;
+      context->candidate_count = saturated ? 0U : count;
+      context->result =
+          saturated ? ERR_BUF : (count == 0U ? cache_result : ERR_OK);
       if (context->result == ERR_OK && count == 0U) {
         context->result = ERR_VAL;
       }
@@ -712,15 +722,19 @@ static void submit_dns_in_tcpip_thread(void *callback_arg) {
   }
 
   uint32_t candidates[POCKETJS_NET_ESP_TRANSPORT_MAX_DNS_CANDIDATES] = {0};
-  size_t count =
-      result == ERR_OK ? copy_dns_candidates(addresses, candidates) : 0U;
+  bool saturated = false;
+  size_t count = result == ERR_OK
+                     ? copy_dns_candidates(addresses, candidates, &saturated)
+                     : 0U;
   portENTER_CRITICAL(&transport->lock);
   if (atomic_load_explicit(&context->cancelled, memory_order_acquire)) {
     context->state = DNS_CONTEXT_FREE;
   } else if (context->state == DNS_CONTEXT_LOOKUP_PENDING) {
     memcpy(context->candidates, candidates, sizeof(candidates));
-    context->candidate_count = count;
-    context->result = result == ERR_OK && count == 0U ? ERR_VAL : result;
+    context->candidate_count = saturated ? 0U : count;
+    context->result =
+        saturated ? ERR_BUF
+                  : (result == ERR_OK && count == 0U ? ERR_VAL : result);
     context->state = DNS_CONTEXT_RESULT_READY;
   }
   portEXIT_CRITICAL(&transport->lock);
@@ -1351,7 +1365,7 @@ static void pump_resolve(pocketjs_net_esp_transport_t *transport,
     completion.detail.resolved.candidate_count = count;
     enqueue_completion(transport, operation, completion);
   } else {
-    pocketjs_net_esp_error_t error = result == ERR_MEM
+    pocketjs_net_esp_error_t error = result == ERR_MEM || result == ERR_BUF
                                          ? POCKETJS_NET_ESP_ERROR_RESOURCE_LIMIT
                                          : POCKETJS_NET_ESP_ERROR_DNS_NOT_FOUND;
     enqueue_error(transport, operation, error, (int)result, 0, 0U,

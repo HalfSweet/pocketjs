@@ -231,6 +231,7 @@ static bool transport_descriptor_compatible(
       transport->implementation_version != NULL && transport->experimental &&
       transport->ipv4 && transport->asynchronous_raw_dns &&
       transport->stock_lwip_dns_callbacks_only &&
+      transport->rejects_saturated_dns_candidate_prefix &&
       !transport->synchronous_getaddrinfo_for_hostname &&
       transport->nonblocking_plain_tcp_steps &&
       transport->monotonic_deadlines &&

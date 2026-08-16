@@ -64,7 +64,9 @@ marks the operation immediately; a pending raw DNS context remains quarantined
 and cannot be reused until its late callback performs cleanup. The lwIP callback
 does not carry an immutable request-generation ticket, so the descriptor does
 not claim generation-based DNS cleanup. `.local` and non-canonical hostnames are
-rejected before native I/O.
+rejected before native I/O. If all `DNS_MAX_HOST_IP` cache slots are populated,
+the result is rejected as `resource_limit` instead of exposing a possibly
+truncated prefix.
 
 The BSP must initialize its concrete network interface, ESP-NETIF, and lwIP
 before creating this transport. This component never configures Wi-Fi or owns
@@ -111,9 +113,11 @@ The descriptor deliberately reports the following gaps:
   failures safely collapse to `tls_certificate_invalid`. The runtime does not
   claim distinct TLS errors until the provider exposes the verification flags
   and wire tests distinguish hostname mismatch from other certificate errors.
-- **The lwIP resolver retains at most `DNS_MAX_HOST_IP` records.** A larger DNS
-  RRset may be truncated, so the descriptor does not claim a complete candidate
-  set even though every returned candidate is preserved up to the fixed limit.
+- **The lwIP resolver retains at most `DNS_MAX_HOST_IP` records.** A full prefix
+  is rejected, but the stock callback does not expose the DNS `TC` bit. A
+  truncated response containing fewer records therefore remains
+  indistinguishable from a complete response, so the descriptor does not claim
+  a complete candidate set.
 - **lwIP raw DNS has no request cancellation primitive.** A cancelled query can
   retain one fixed DNS context until success, failure, or lwIP timeout.
 - **The Host owns cross-task API lifetime.** It must disable and join
@@ -132,8 +136,9 @@ descriptor's `advertises_public_capability=false` result.
 
 The host-state test covers token monotonicity, no-wrap generations, shutdown
 admission, terminal credit conservation, cancel/deadline terminal arbitration,
-round-robin progress, and pure TLS error classification without ESP-IDF. The
-nested ESP-IDF build-smoke app repeats the TLS classification assertions with
-the pinned Mbed TLS constants and asserts the public descriptor and stable
+round-robin progress, saturated DNS-prefix rejection, and pure TLS error
+classification without ESP-IDF. The nested ESP-IDF build-smoke app repeats the
+TLS classification assertions with the pinned Mbed TLS constants and asserts
+the public descriptor and stable
 numeric/name mapping. Its `sdkconfig.defaults` fixes the candidate count and TLS
 policy.

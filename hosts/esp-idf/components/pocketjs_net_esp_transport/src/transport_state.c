@@ -215,6 +215,11 @@ size_t pocketjs_net_round_robin_next(size_t current, size_t capacity) {
   return capacity == 0U || current >= capacity - 1U ? 0U : current + 1U;
 }
 
+bool pocketjs_net_dns_candidate_prefix_saturated(size_t populated_slots,
+                                                 size_t slot_capacity) {
+  return slot_capacity == 0U || populated_slots >= slot_capacity;
+}
+
 bool pocketjs_net_generation_advance(uint64_t *generation) {
   if (generation == NULL || *generation == UINT64_MAX) {
     return false;

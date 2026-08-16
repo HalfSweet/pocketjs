@@ -35,6 +35,7 @@ void app_main(void) {
   assert(descriptor->asynchronous_raw_dns);
   assert(descriptor->stock_lwip_dns_callbacks_only);
   assert(!descriptor->complete_dns_candidate_set);
+  assert(descriptor->rejects_saturated_dns_candidate_prefix);
   assert(!descriptor->dns_cancel_generation_cleanup);
   assert(!descriptor->synchronous_getaddrinfo_for_hostname);
   assert(descriptor->esp_tls_numeric_getaddrinfo_internal);

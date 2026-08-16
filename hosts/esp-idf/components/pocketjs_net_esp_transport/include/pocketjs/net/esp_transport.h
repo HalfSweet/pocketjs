@@ -125,6 +125,7 @@ typedef struct {
   bool asynchronous_raw_dns;
   bool stock_lwip_dns_callbacks_only;
   bool complete_dns_candidate_set;
+  bool rejects_saturated_dns_candidate_prefix;
   bool dns_cancel_generation_cleanup;
   bool synchronous_getaddrinfo_for_hostname;
   bool esp_tls_numeric_getaddrinfo_internal;

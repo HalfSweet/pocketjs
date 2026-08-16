@@ -57,6 +57,12 @@ int main(void) {
   pocketjs_net_token_gate_consume(&gate, UINT64_MAX);
   assert(!pocketjs_net_token_gate_can_accept(&gate, UINT64_MAX));
 
+  assert(!pocketjs_net_dns_candidate_prefix_saturated(0U, 4U));
+  assert(!pocketjs_net_dns_candidate_prefix_saturated(3U, 4U));
+  assert(pocketjs_net_dns_candidate_prefix_saturated(4U, 4U));
+  assert(pocketjs_net_dns_candidate_prefix_saturated(5U, 4U));
+  assert(pocketjs_net_dns_candidate_prefix_saturated(0U, 0U));
+
   uint64_t generation = 0;
   assert(pocketjs_net_generation_advance(&generation));
   assert(generation == 1);
