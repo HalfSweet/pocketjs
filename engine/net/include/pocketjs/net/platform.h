@@ -12,6 +12,7 @@
 #ifndef POCKETJS_NET_PLATFORM_H
 #define POCKETJS_NET_PLATFORM_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,6 +40,11 @@ typedef struct pnet_platform {
   void (*random)(void *ctx, uint8_t *out, size_t len);
   /** Optional diagnostics sink; NULL disables logging. */
   void (*log)(void *ctx, pnet_log_level level, const char *message);
+  /** Optional: whether the wall clock is trustworthy for certificate
+   * validity checks (SNTP synced, persisted RTC, provisioning). NULL means
+   * trusted. While false, a verifying TLS connection fails closed with
+   * `tls_clock_untrusted` before any I/O. */
+  bool (*wall_clock_trusted)(void *ctx);
 } pnet_platform;
 
 #ifdef __cplusplus

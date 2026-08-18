@@ -14,6 +14,7 @@
 #ifndef POCKETJS_NET_DRIVER_H
 #define POCKETJS_NET_DRIVER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -88,7 +89,55 @@ typedef struct pnet_driver_ops {
 
   /** Local address of a connected/bound socket; 0 on success. */
   int (*local_addr)(void *ctx, pnet_sock s, pnet_addr *out);
+  /** The platform handle behind `s` (a file descriptor on BSD sockets), for
+   * a TlsProvider that layers over the plain stream. Optional. */
+  int (*native_handle)(void *ctx, pnet_sock s);
 } pnet_driver_ops;
+
+/* ------------------------------------------------------------------------ */
+/* TlsProvider (docs/pocketjs-network-architecture.md §14)                  */
+/* ------------------------------------------------------------------------ */
+
+/** What the core asks of one TLS client handshake. `server_name` is the
+ * authorized hostname: it is both the SNI and the DNS-ID the certificate
+ * must match. `verify=false` is only ever set for
+ * `development-insecure` after the runtime's triple opt-in. */
+typedef struct pnet_tls_policy {
+  const char *server_name;
+  bool verify;
+  /** NULL or a single ALPN protocol id ("http/1.1"). */
+  const char *alpn;
+} pnet_tls_policy;
+
+/** Why a handshake failed: one of the four stable tls_* codes plus the
+ * library's raw code for `causeCode`. */
+typedef struct pnet_tls_failure {
+  const char *code;
+  int cause;
+} pnet_tls_failure;
+
+/** A TLS client layered over the driver's plain streams. The provider owns
+ * host trust (system store / bundle), entropy and the wire; the core owns
+ * the deadline, cancellation and the policy. Never a plaintext fallback. */
+typedef struct pnet_tls_ops {
+  /** Wrap the connected plain socket `s` and begin the client handshake.
+   * 0 on success (progress via step), or a PNET_IO_* code. */
+  int (*start)(void *ctx, pnet_sock s, const pnet_tls_policy *policy);
+  /** Drive the handshake: 0 = pending (see interest), 1 = established,
+   * -1 = failed (`failure` filled). */
+  int (*step)(void *ctx, pnet_sock s, pnet_tls_failure *failure);
+  /** Application data over the established session; same contract as the
+   * driver's read/write (bytes, PNET_IO_AGAIN, PNET_IO_EOF, errors). */
+  int (*read)(void *ctx, pnet_sock s, uint8_t *buf, size_t len);
+  int (*write)(void *ctx, pnet_sock s, const uint8_t *buf, size_t len);
+  /** Reactor interest the session currently needs (bitmask of
+   * PNET_INTEREST_*); 0 means "whatever the application wants". */
+  unsigned (*interest)(void *ctx, pnet_sock s);
+  /** Send close_notify if possible and release the session. Called before
+   * the driver closes the plain socket; a provider that took ownership of
+   * the platform handle must tell the driver (see the driver's docs). */
+  void (*close)(void *ctx, pnet_sock s);
+} pnet_tls_ops;
 
 #ifdef __cplusplus
 }

@@ -347,8 +347,10 @@ static bool maybe_redirect(pnet_runtime *rt, pnet_http_req *r, const pnet_h1_hea
   r->insecure_tls = r->insecure_tls; /* TLS policy carries over (Phase 1B) */
   r->state = RQ_DIALING;
   r->phase_deadline = rt->now + r->connect_ms;
-  if (!pnet_dial_start(rt, &r->dial, &r->conn, r->url.host, r->url.port)) {
-    req_fail(rt, r, r->dial.error_code ? r->dial.error_code : PNET_ERROR_CONNECT, "redirect connect failed", r->dial.cause);
+  bool secure = strcmp(r->url.scheme, "https") == 0;
+  if (!pnet_dial_start(rt, &r->dial, &r->conn, r->url.host, r->url.port, secure, r->url.host, !r->insecure_tls)) {
+    req_fail(rt, r, r->dial.error_code ? r->dial.error_code : PNET_ERROR_CONNECT,
+             r->dial.error_message ? r->dial.error_message : "redirect connect failed", r->dial.cause);
   }
   return true;
 }
@@ -872,9 +874,13 @@ int pnet_http_start(pnet_runtime *rt, const char *meta_json, const uint8_t *body
   r->next = rt->http_reqs;
   rt->http_reqs = r;
   result = r->handle;
-  if (!pnet_dial_start(rt, &r->dial, &r->conn, r->url.host, r->url.port)) {
-    /* Asynchronous failure: the terminal error arrives with the next tick. */
-    req_fail(rt, r, r->dial.error_code ? r->dial.error_code : PNET_ERROR_CONNECT, "connect failed", r->dial.cause);
+  {
+    bool secure = strcmp(r->url.scheme, "https") == 0;
+    if (!pnet_dial_start(rt, &r->dial, &r->conn, r->url.host, r->url.port, secure, r->url.host, !r->insecure_tls)) {
+      /* Asynchronous failure: the terminal error arrives with the next tick. */
+      req_fail(rt, r, r->dial.error_code ? r->dial.error_code : PNET_ERROR_CONNECT,
+               r->dial.error_message ? r->dial.error_message : "connect failed", r->dial.cause);
+    }
   }
   r = NULL;
 out:

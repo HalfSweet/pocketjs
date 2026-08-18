@@ -51,7 +51,7 @@ static int stub_local(void *ctx, pnet_sock s, pnet_addr *o) { (void)ctx; (void)s
 
 static const pnet_driver_ops STUB_DRIVER = {
     stub_resolve, stub_resolve_cancel, stub_connect, stub_status, stub_read, stub_write,
-    stub_shutdown, stub_close, stub_interest, stub_listen, stub_accept, stub_local,
+    stub_shutdown, stub_close, stub_interest, stub_listen, stub_accept, stub_local, NULL,
 };
 
 static pnet_runtime *make_runtime(const char *policy) {

@@ -389,6 +389,12 @@ static int drv_local_addr(void *ctx, pnet_sock s, pnet_addr *out) {
   return 0;
 }
 
+static int drv_native_handle(void *ctx, pnet_sock s) {
+  pnet_posix_driver *d = ctx;
+  sock_slot *slot = slot_get(d, s);
+  return slot ? slot->fd : -1;
+}
+
 static const pnet_driver_ops OPS = {
     .resolve = drv_resolve,
     .resolve_cancel = drv_resolve_cancel,
@@ -402,6 +408,7 @@ static const pnet_driver_ops OPS = {
     .listen = drv_listen,
     .accept = drv_accept,
     .local_addr = drv_local_addr,
+    .native_handle = drv_native_handle,
 };
 
 const pnet_driver_ops *pnet_posix_driver_ops(void) {
