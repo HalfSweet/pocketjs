@@ -39,7 +39,9 @@ board-to-board, both boards serving on :8080:
 
 Steady state after 60 s: guest heap ≈357 KB (high water ≈670 KB during
 bundle evaluation), core heap ≈4 KB, one socket per live connection, no
-growth. Bundle evaluation of the 112 KB smoke IIFE: 770 ms on the S3, 350 ms
+growth. A 12-minute board-to-board soak (43,200 frames at 60 Hz, 330 HTTP
+round trips each way, both boards serving the other) ended with zero
+failures and the same heap figures. Bundle evaluation of the 112 KB smoke IIFE: 770 ms on the S3, 350 ms
 on the P4.
 
 ## Tab5 pitfalls
