@@ -45,6 +45,11 @@ typedef struct pocketjs_esp_host_config {
   int net_task_core;
   /** Immutable network policy JSON; NULL mounts no network module. */
   const char *network_policy_json;
+  /** Which roles this host admits: `globalThis.net` is always mounted with
+   * a policy; `ws` and `httpd` only when set (default true for both). A
+   * product host mounts exactly the capabilities its target advertises. */
+  bool mount_websocket_client;
+  bool mount_http_server;
   /** Core limits; NULL = spec ceilings tightened by the host defaults. */
   const pnet_runtime_config *network_config;
   /** Sockets the driver may track (default 12). */
