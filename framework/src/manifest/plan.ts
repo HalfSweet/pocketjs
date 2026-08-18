@@ -3,7 +3,9 @@ import type { PocketManifestV2 } from "../../../contracts/spec/pocket-manifest.t
 import type { PresentationMode, Viewport } from "../../../contracts/spec/platforms.ts";
 
 export interface ResolvedBuildPlanContent {
-  readonly app: Pick<PocketManifestV2, "id" | "title"> &
+  /** Package identity travels with the plan: native hosts derive their
+   *  platform package id and version from here, never from a second copy. */
+  readonly app: Pick<PocketManifestV2, "id" | "title" | "version"> &
     Pick<PocketManifestV2["app"], "entry" | "framework"> & {
     readonly output: string;
   };

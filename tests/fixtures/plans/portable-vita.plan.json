@@ -2,6 +2,7 @@
   "app": {
     "id": "dev.pocket-stack.telemetry",
     "title": "Pocket Telemetry",
+    "version": "0.1.0",
     "entry": "app/main.tsx",
     "output": "main",
     "framework": "solid"
@@ -29,5 +30,5 @@
     "text.glyphs.baked": true
   },
   "companions": [],
-  "planHash": "sha256:5b2ab23a3d3b54e0ef54bdd706092cd8350561d978f6cb1280a0c72afa647e96"
+  "planHash": "sha256:ce59ea6fe09e18d80c3c1df83915487a4f58d082b2ff11b59c95b7d214a3a8ba"
 }

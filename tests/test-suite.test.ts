@@ -53,6 +53,17 @@ describe("declared test suite", () => {
     expect(meizuM8Tests.filter((file) => !declared.has(file))).toEqual([]);
   });
 
+  test("runs every BlackBerry Classic test in the CI unit stage", () => {
+    const declared = unitTestFiles();
+    const blackberryTests = readdirSync(join(repository, "tests"))
+      .filter((file) => /^blackberry-.*\.test\.ts$/.test(file))
+      .map((file) => `tests/${file}`)
+      .sort();
+
+    expect(blackberryTests).not.toHaveLength(0);
+    expect(blackberryTests.filter((file) => !declared.has(file))).toEqual([]);
+  });
+
   test("runs every iPhone 4S test in the CI unit stage", () => {
     const declared = unitTestFiles();
     const iphone4sTests = readdirSync(join(repository, "tests"))

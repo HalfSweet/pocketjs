@@ -13,6 +13,28 @@ int pocket_runtime_boot(
   int height
 );
 /* `pack` is borrowed by QuickJS and must remain valid until shutdown. */
+/*
+ * One guest turn followed by exactly one core tick — the frame contract
+ * (docs/RUNTIMES.md, law 3). Hosts call it once per presented frame with the
+ * portable button mask (pocket_spec.h) and the sampled touch contact in
+ * logical pixels; `touch_hit` is the host-resolved bounds hit for that
+ * contact (pocket_runtime_hit_test_bounds) or zero.
+ */
+typedef struct {
+  uint32_t buttons;
+  int touch_down;
+  int touch_x;
+  int touch_y;
+  int touch_hit;
+} PocketRuntimeInput;
+int pocket_runtime_tick(const PocketRuntimeInput *input);
+
+/*
+ * Legacy frame entry points for the original iPhone host, which presents at
+ * 30 Hz and advances two core ticks per guest turn, and for the Windows CE
+ * host's tick-count form. They pass an empty button mask. New hosts call
+ * pocket_runtime_tick.
+ */
 int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit);
 int pocket_runtime_frame_ticks(
   int touch_down,
@@ -44,13 +66,14 @@ unsigned long pocket_runtime_damage_pixels(void);
 int pocket_runtime_damage_bounds(int *bounds);
 
 /*
- * Hardware path. `pocket_runtime_gl_initialize` needs a current OpenGL ES 1.1
- * context and returns zero if the GPU pipeline cannot be established, which is
- * the host's signal to keep using the software rasterizer above.
+ * Hardware path. `pocket_runtime_gl_initialize` needs a current OpenGL ES
+ * context matching the core backend selected at compile time and returns zero
+ * if the GPU pipeline cannot be established.
  * `pocket_runtime_gl_render` draws the current retained tree into the bound
  * framebuffer; the CPU never rasterizes a pixel on this path.
  */
 int pocket_runtime_gl_initialize(void);
+void pocket_runtime_gl_reset(void);
 int pocket_runtime_gl_render(int width, int height);
 void pocket_runtime_gl_shutdown(void);
 

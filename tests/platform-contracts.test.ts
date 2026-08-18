@@ -314,6 +314,7 @@ describe("semantic resolution", () => {
     expect(result.plan.app).toEqual({
       id: "dev.pocket-stack.telemetry",
       title: "Pocket Telemetry",
+      version: "0.1.0",
       entry: "app/main.tsx",
       output: "main",
       framework: "solid",
@@ -399,6 +400,7 @@ describe("semantic resolution", () => {
     // note is dynamic-only. A new demo missing here fails the test on
     // purpose.
     const expected: Record<string, [boolean, boolean, boolean, boolean]> = {
+      "blackberry-classic-demo": [false, false, false, true], // built by the private blackberry-{qnx,android}-dev profiles; macos-app also admits its fixed 360x360 buttons+glyphs contract
       cafe: [true, true, false, true],
       cards: [true, true, false, true],
       chrome: [true, true, false, true],

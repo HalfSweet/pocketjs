@@ -8,6 +8,13 @@ import { verifyPlanHash, type ResolvedBuildPlan } from "./plan.ts";
 /** Stable subset of the internal build plan consumed by custom native hosts. */
 export interface HostBuildInputs {
   readonly appOutput: string;
+  /** Package identity from the manifest, as the plan resolved it. Hosts map
+   *  it onto their platform's package id and version scheme. */
+  readonly app: {
+    readonly id: string;
+    readonly title: string;
+    readonly version: string;
+  };
   readonly target: string;
   readonly hostAbi: number;
   readonly viewport: {
@@ -42,7 +49,8 @@ function hasHostInputShape(input: unknown): input is ResolvedBuildPlan {
   if (!isRecord(input.viewport) || !isRecord(input.features)) return false;
   if (
     typeof input.app.id !== "string" || input.app.id.length === 0 ||
-    typeof input.app.title !== "string" || input.app.title.length === 0
+    typeof input.app.title !== "string" || input.app.title.length === 0 ||
+    typeof input.app.version !== "string" || input.app.version.length === 0
   ) return false;
   if (typeof input.app.output !== "string" || input.app.output.length === 0) return false;
   if (typeof input.target.id !== "string" || input.target.id.length === 0) return false;
@@ -91,6 +99,11 @@ export function extractHostBuildInputs(
   }
   return {
     appOutput: plan.app.output,
+    app: {
+      id: plan.app.id,
+      title: plan.app.title,
+      version: plan.app.version,
+    },
     target: plan.target.id,
     hostAbi: plan.target.hostAbi,
     viewport: {
@@ -109,6 +122,9 @@ export function hostBuildEnvironment(
 ): Readonly<Record<string, string>> {
   return {
     POCKETJS_APP_OUTPUT: inputs.appOutput,
+    POCKETJS_APP_ID: inputs.app.id,
+    POCKETJS_APP_TITLE: inputs.app.title,
+    POCKETJS_APP_VERSION: inputs.app.version,
     POCKETJS_EMBED_APP: options.embedApp ? "1" : "0",
     POCKETJS_OUTPUT_DIR: options.outputDirectory,
     POCKETJS_TARGET: inputs.target,
