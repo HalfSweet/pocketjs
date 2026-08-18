@@ -28,6 +28,8 @@ void pocketjs_esp_host_config_defaults(pocketjs_esp_host_config *cfg) {
   cfg->net_task_priority = 8;
   cfg->net_task_core = tskNO_AFFINITY;
   cfg->network_policy_json = NULL;
+  cfg->mount_websocket_client = true;
+  cfg->mount_http_server = true;
   cfg->network_config = NULL;
   cfg->network_max_sockets = 12;
 }

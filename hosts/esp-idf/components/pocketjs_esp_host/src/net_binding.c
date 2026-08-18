@@ -399,7 +399,7 @@ void pocketjs_host_mount_network(pocketjs_esp_host_t *host) {
   };
   JSValue global = JS_GetGlobalObject(ctx);
   mount_namespace(ctx, global, "net", NET_OPS, sizeof NET_OPS / sizeof NET_OPS[0]);
-  mount_namespace(ctx, global, "ws", WS_OPS, sizeof WS_OPS / sizeof WS_OPS[0]);
-  mount_namespace(ctx, global, "httpd", HTTPD_OPS, sizeof HTTPD_OPS / sizeof HTTPD_OPS[0]);
+  if (host->cfg.mount_websocket_client) mount_namespace(ctx, global, "ws", WS_OPS, sizeof WS_OPS / sizeof WS_OPS[0]);
+  if (host->cfg.mount_http_server) mount_namespace(ctx, global, "httpd", HTTPD_OPS, sizeof HTTPD_OPS / sizeof HTTPD_OPS[0]);
   JS_FreeValue(ctx, global);
 }
