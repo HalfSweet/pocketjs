@@ -859,7 +859,9 @@ export const WIRE_MARK_FLAG_ENDED = 1 << 0;
 // regular + bold — see docs/DESIGN.md). Slot indices are assigned by the build and
 // carried in each atlas header; the core just indexes a table.
 
-export const MAX_FONT_SLOTS = 16;
+// 0..6 regular / 7..13 bold (FONT_PX sizes), 14/15 the 54 px display pair,
+// 16..18 monospace regular (12/14/16 px — `font-mono`, code spans).
+export const MAX_FONT_SLOTS = 24;
 
 // ---------------------------------------------------------------------------
 // STYLE TABLE binary format — styles.bin  (version 2)
@@ -1368,6 +1370,30 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           perspective variation (projectively correct UVs
 //                           at every cell corner), so interior texture lines
 //                           do not kink at triangle diagonals.
+//   TEXT_RUN    (8 + ceil(n/4) words):
+//                           op,
+//                           word1: bits 0-7 fontSlot,
+//                                  bits 8-15 TextAlign ordinal,
+//                           originX, originY, boxW, lineHeight (f32 bits;
+//                           content-box top-left + width in logical px;
+//                           lineHeight NaN = the slot's default),
+//                           color,
+//                           byteLen (u32), then ceil(n/4) words of the run
+//                           string's UTF-8 bytes packed little-endian and
+//                           zero-padded. Emitted ONLY when the host installed
+//                           a native text measurer (docs/BACKENDS.md) and the
+//                           node's recorded provider is native; every other
+//                           run keeps GLYPH_RUN, so fixed-function backends
+//                           (PSP GE, PPA, software raster) never see this op.
+//                           The backend decodes and shapes the bytes with the
+//                           host text system. The words alone are the COMPLETE
+//                           pixel truth — no side table — so DrawList
+//                           snapshots, demand-render hashes and damage diffs
+//                           stay exact by construction. originX/Y are f32
+//                           (NOT the i16 XY packing) and are exempt from the
+//                           i16 clip guarantee: a run may start off-viewport,
+//                           and the core brackets any partially-clipped run
+//                           in SCISSOR/SCISSOR_POP.
 
 export const DRAW_OP = {
   rect: 1,
@@ -1378,6 +1404,7 @@ export const DRAW_OP = {
   scissorPop: 6,
   tri: 7,
   texTri: 8,
+  textRun: 9,
 } as const;
 
 // ---------------------------------------------------------------------------

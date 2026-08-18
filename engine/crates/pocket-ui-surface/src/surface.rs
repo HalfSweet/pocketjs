@@ -16,11 +16,41 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use pocket_mod::Guest;
-use pocket_mod::qjs::{Coerced, Function, Object, TypedArray};
+use pocket_mod::qjs::{Coerced, Ctx, FromJs, Function, Object, TypedArray, Value};
 use pocketjs_core::Ui;
 
 use crate::dbg::DbgMailbox;
 use crate::pak::walk_pak;
+
+/// A JS string decoded tolerantly for host ops. JS strings are potentially
+/// ill-formed UTF-16 — an app slicing between surrogate halves is legal JS
+/// (note's wrap math measuring an emoji prefix, say) — and QuickJS hands
+/// lone surrogates to the FFI as bytes that are not valid UTF-8, which the
+/// strict conversion turns into a thrown guest frame. A host op must never
+/// abort the frame transaction over a legal JS value, so every string op
+/// decodes lossy: each lone surrogate reads as U+FFFD.
+struct LossyString(String);
+
+impl<'js> FromJs<'js> for LossyString {
+    fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> pocket_mod::qjs::Result<LossyString> {
+        // The strict coercion first: it handles non-strings (Solid passes
+        // numbers through replaceText) and every well-formed string.
+        match Coerced::<String>::from_js(ctx, value.clone()) {
+            Ok(s) => Ok(LossyString(s.0)),
+            Err(_) => {
+                let js = value
+                    .into_string()
+                    .ok_or_else(|| pocket_mod::qjs::Error::new_from_js("value", "string"))?;
+                let c = js.to_cstring()?;
+                // CString::as_str assumes valid UTF-8, which lone
+                // surrogates break — read the raw bytes instead.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(c.as_ptr() as *const u8, c.len()) };
+                Ok(LossyString(String::from_utf8_lossy(bytes).into_owned()))
+            }
+        }
+    }
+}
 
 /// One sprite-atlas registration from the pak (`ui.__sprites[name]`).
 struct SpriteReg {
@@ -44,10 +74,11 @@ struct Inner {
     /// widget host *is* the companion process, so lines just cross a queue.
     svc_in: VecDeque<String>,
     svc_out: VecDeque<String>,
-    /// Companion service names accepted by `svcOpen`. `None` preserves the
-    /// historical desktop-host default of accepting any name; a Stage sets an
-    /// exact package-authored allowlist (which may be empty).
-    svc_allowlist: Option<Vec<String>>,
+    /// Companion service names accepted by `svcOpen`. Deny-all by default —
+    /// svcOpen must answer TRUTHFULLY, and a host that serves a companion
+    /// declares it explicitly (an implicit allow-any default let apps
+    /// believe in adapters nobody feeds).
+    svc_allowlist: Vec<String>,
     /// Platform-contract identity published as `ui.__host`/`ui.__hostAbi`.
     /// Bundles built from a resolved plan refuse hosts whose identity does
     /// not match their target (framework/src/host.ts assertNativeHostContract).
@@ -84,7 +115,7 @@ impl UiSurface {
                 sprites: Vec::new(),
                 svc_in: VecDeque::new(),
                 svc_out: VecDeque::new(),
-                svc_allowlist: None,
+                svc_allowlist: Vec::new(),
                 host_id: "desktop".into(),
                 host_abi: None,
             })),
@@ -100,20 +131,17 @@ impl UiSurface {
         inner.host_abi = Some(host_abi);
     }
 
-    /// Restrict `svcOpen` to exact companion service names. An empty list
-    /// advertises no service. Call this before `mount`, which installs the
-    /// host-op closure into the guest.
+    /// Declare the exact companion service names this host serves (svcOpen
+    /// answers false for everything else — and for everything, by default).
+    /// Call this before `mount`, which installs the host-op closure into
+    /// the guest.
     pub fn set_svc_allowlist<I, S>(&self, services: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.inner.borrow_mut().svc_allowlist = Some(
-            services
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<String>>(),
-        );
+        self.inner.borrow_mut().svc_allowlist =
+            services.into_iter().map(Into::into).collect::<Vec<String>>();
     }
 
     /// Queue one JSON line for the guest's next `svcPoll` (host → guest).
@@ -223,6 +251,13 @@ impl UiSurface {
         self.inner.borrow_mut().ui.tick();
     }
 
+    /// Install a native text measurer (docs/BACKENDS.md). Call before
+    /// `mount`, like `set_tick_rate`: measurement feeds layout, so the guest
+    /// must never observe a provider swap mid-run.
+    pub fn set_text_measure(&self, f: pocketjs_core::text::MeasureFn) {
+        self.inner.borrow_mut().ui.set_text_measure(Some(f));
+    }
+
     /// Borrow the core (the renderer reads the DrawList/textures/atlases
     /// through this; hosts can use it for `set_viewport` on resize).
     pub fn with_ui<R>(&self, f: impl FnOnce(&mut Ui) -> R) -> R {
@@ -276,13 +311,13 @@ impl UiSurface {
             // Text ops coerce like the PSP FFI does (JS_ToCString semantics —
             // Solid legitimately passes numbers through replaceText).
             let ui = self.inner.clone();
-            op!("setText", move |id: i32, s: Coerced<String>| ui
+            op!("setText", move |id: i32, s: LossyString| ui
                 .borrow_mut()
                 .ui
                 .set_text(id, &s.0));
 
             let ui = self.inner.clone();
-            op!("replaceText", move |id: i32, s: Coerced<String>| {
+            op!("replaceText", move |id: i32, s: LossyString| {
                 ui.borrow_mut().ui.replace_text(id, &s.0)
             });
 
@@ -391,13 +426,13 @@ impl UiSurface {
             });
 
             let ui = self.inner.clone();
-            op!("measureText", move |s: Coerced<String>, slot: i32| {
+            op!("measureText", move |s: LossyString, slot: i32| {
                 ui.borrow_mut().ui.measure_text(&s.0, slot as u8) as f64
             });
 
             // ---- streamed textures (spec ops 23..25) ---------------------
             let ui = self.inner.clone();
-            op!("loadTileTexture", move |key: Coerced<String>, index: i32| {
+            op!("loadTileTexture", move |key: LossyString, index: i32| {
                 if index < 0 {
                     return -1;
                 }
@@ -458,7 +493,7 @@ impl UiSurface {
             });
 
             let m = mbox;
-            op!("__dbgSend", move |line: Coerced<String>| {
+            op!("__dbgSend", move |line: LossyString| {
                 if let Some(b) = m.borrow().as_ref() {
                     b.send(&line.0);
                 }
@@ -469,12 +504,9 @@ impl UiSurface {
             // provides one. Lines cross an in-process queue instead of a
             // tethered share; apps feature-detect exactly like on PSP.
             let ui = self.inner.clone();
-            op!("svcOpen", move |app: Coerced<String>| {
+            op!("svcOpen", move |app: LossyString| {
                 let inner = ui.borrow();
-                match &inner.svc_allowlist {
-                    None => true,
-                    Some(names) => names.iter().any(|name| name == &app.0),
-                }
+                inner.svc_allowlist.iter().any(|name| name == &app.0)
             });
 
             let ui = self.inner.clone();
@@ -494,7 +526,7 @@ impl UiSurface {
             });
 
             let ui = self.inner.clone();
-            op!("svcSend", move |line: Coerced<String>| {
+            op!("svcSend", move |line: LossyString| {
                 ui.borrow_mut().svc_out.push_back(line.0);
             });
 
@@ -558,6 +590,21 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svc_open_denies_by_default() {
+        // Truthful-by-default: a host that never declares a companion must
+        // answer false — apps otherwise enable UI over a channel nobody
+        // feeds (the macos-app --editor regression, review round 3).
+        let guest = Guest::new().unwrap();
+        let surface = UiSurface::new((16.0, 16.0));
+        surface.mount(&guest).unwrap();
+        guest
+            .eval("service", "globalThis.serviceOpen = ui.svcOpen('note');")
+            .unwrap();
+        let open: bool = guest.with(|ctx| ctx.globals().get("serviceOpen").unwrap());
+        assert!(!open);
+    }
 
     #[test]
     fn empty_service_allowlist_disables_the_companion() {

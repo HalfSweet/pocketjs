@@ -207,12 +207,25 @@ pub struct GlyphPos {
     pub y: f32,
 }
 
+/// A host-installed native text measurer: `(text, slot, tracking,
+/// line_h_override) -> (max line width, total height)` in logical px, with the
+/// same `'\n'`-only line-break contract as [`Fonts::measure_run`]
+/// (`line_h_override` NAN = the measurer's default for the slot). Installed by
+/// native-text backends (docs/BACKENDS.md) through `Ui::set_text_measure`
+/// before the guest mounts; fixed-function hosts never install one.
+pub type MeasureFn = alloc::boxed::Box<dyn Fn(&str, u8, f32, f32) -> (f32, f32)>;
+
 /// The per-core atlas registry.
 pub struct Fonts {
     slots: [Option<Atlas>; spec::MAX_FONT_SLOTS],
     /// cmap-miss counter (Cell: measurement is `&self` per the pinned `Ui`
     /// signature but a miss must still count).
     pub misses: Cell<u32>,
+    /// Native measurer; when present, tracking-0 runs measure through it
+    /// (and draw.rs emits TEXT_RUN instead of GLYPH_RUN for them). Tracked
+    /// runs keep the baked path on BOTH sides so a node's measured metrics
+    /// always match its painted glyphs.
+    native: Option<MeasureFn>,
 }
 
 impl Default for Fonts {
@@ -226,7 +239,20 @@ impl Fonts {
         Fonts {
             slots: Default::default(),
             misses: Cell::new(0),
+            native: None,
         }
+    }
+
+    /// Install (or clear) the native measurer. Callers relayout afterwards —
+    /// every text leaf's metrics change provider.
+    pub fn set_native_measure(&mut self, f: Option<MeasureFn>) {
+        self.native = f;
+    }
+
+    /// True when a native measurer is installed.
+    #[inline]
+    pub fn native_active(&self) -> bool {
+        self.native.is_some()
     }
 
     /// Parse + register an atlas at the slot in its header.
@@ -259,12 +285,41 @@ impl Fonts {
     }
 
     /// Measure a run: (max line width, line count x line height). Empty text
-    /// or an unregistered slot measures (0, 0).
+    /// or an unregistered slot measures (0, 0). With a native measurer
+    /// installed, tracking-0 runs route to it — the auto-gate the JS-facing
+    /// `measureText` op uses. Layout does NOT call this: it picks a provider
+    /// per node and records it (`measure_run_provider`; layout.rs build()).
     pub fn measure_run(&self, text: &str, slot: u8, tracking: f32, line_h_override: f32) -> (f32, f32) {
-        let Some(atlas) = self.atlas(slot) else { return (0.0, 0.0) };
+        self.measure_run_provider(
+            self.native.is_some() && tracking == 0.0,
+            text,
+            slot,
+            tracking,
+            line_h_override,
+        )
+    }
+
+    /// Measure with an EXPLICIT provider choice. `native: true` requires an
+    /// installed measurer (falls back to the atlas without one); layout
+    /// records the choice on the node so paint always uses the provider
+    /// that sized the box (docs/BACKENDS.md).
+    pub fn measure_run_provider(
+        &self,
+        native: bool,
+        text: &str,
+        slot: u8,
+        tracking: f32,
+        line_h_override: f32,
+    ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
+        if native {
+            if let Some(f) = &self.native {
+                return f(text, slot, tracking, line_h_override);
+            }
+        }
+        let Some(atlas) = self.atlas(slot) else { return (0.0, 0.0) };
         let lh = if line_h_override.is_nan() {
             atlas.line_height as f32
         } else {

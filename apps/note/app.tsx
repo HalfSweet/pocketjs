@@ -14,10 +14,11 @@
 
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { Focusable, Image, Portal, Text, View } from "@pocketjs/framework/components";
+import { after, virtualNow } from "@pocketjs/framework/clock";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import { BTN, focusNode, hitFocusable } from "@pocketjs/framework/input";
 import { resizeViewport, type NodeMirror } from "@pocketjs/framework";
-import { hasFeature } from "@pocketjs/framework/platform";
+import { platform } from "@pocketjs/framework/platform";
 import { parseMarkdown } from "./markdown.ts";
 import {
   BODY_LINE_H,
@@ -45,6 +46,7 @@ import {
   selBounds,
   typeText,
   undo,
+  wordRangeAt,
   type EditKind,
   type SelEdit,
 } from "./editor.ts";
@@ -53,6 +55,7 @@ import {
   rowChFromX,
   rowFromY,
   rowSelSpan,
+  rowText,
   selectedText,
   type RowPos,
 } from "./select.ts";
@@ -60,8 +63,9 @@ import { connectSvc, type HostEvent } from "./svc.ts";
 import { SAMPLE_DOC } from "./sample.ts";
 
 const HEADER_H = 30;
-/** Minimum side padding of the content column. */
-const PAD_X = 22;
+/** Minimum side padding of the content column (the floor narrow windows
+ *  pin to — kept roomy so text never hugs the window edge). */
+const PAD_X = 28;
 /** The content column stops growing here and centers (markdown-app feel). */
 const MAX_CONTENT_W = 560;
 const OVERSCAN = 40;
@@ -110,6 +114,8 @@ type Ink = (typeof INK)["dark"];
 
 function segFontClass(seg: Seg): string {
   switch (seg.slot) {
+    case 17:
+      return "absolute text-sm font-mono";
     case 12:
       return "absolute text-2xl font-bold";
     case 11:
@@ -140,17 +146,35 @@ function segColor(seg: Seg, ink: Ink): string {
 
 export default function Note(): ReturnType<typeof View> {
   const svc = connectSvc();
-  // Capability gates (build-time platform contract, compiler-foldable):
-  // no text input → the editor never opens (a PSP build is a read-only
-  // note); no pointer → d-pad drives scrolling.
-  const canEdit = hasFeature("input.text");
-  const hasPointer = hasFeature("input.pointer");
+  // Editing and pointer gestures arrive over the COMPANION svc adapter
+  // (svc.ts), so their gates track its runtime presence — never a target
+  // capability id (the macos-app profile deliberately registers neither:
+  // pointer/text there are companion-delivered, not host-generic). Without
+  // a companion (PSP, sim, goldens) the note is a read-only d-pad note —
+  // the unmodified-app base case, unchanged.
+  const canEdit = svc !== null;
+  const hasPointer = svc !== null;
+  // Widget chrome (card corners, resize grip, the Close menu item) belongs
+  // to the frameless always-on-top shell; on a real window (macos-app) the
+  // OS provides corners, resizing and closing.
+  const widgetChrome = platform.target === "macos-widget";
   const [vp, setVp] = createSignal({ w: 480, h: 272 });
   const [doc, setDoc] = createSignal(SAMPLE_DOC);
   const [editing, setEditing] = createSignal(false);
   const [dark, setDark] = createSignal(true);
   const [menuOpen, setMenuOpenRaw] = createSignal(false);
   const [caret, setCaret] = createSignal(0);
+  /** Browser caret discipline: SOLID while typing or moving, and a crisp
+   *  square-wave blink (animate-caret, pocket.config.ts) after a 0.6 s
+   *  rest. The <Show> swap remounts the blinking node, restarting the wave
+   *  at its ON phase — exactly a browser's reset-on-input. */
+  const [caretResting, setCaretResting] = createSignal(true);
+  let caretRestTimer: (() => void) | null = null;
+  const wakeCaret = () => {
+    setCaretResting(false);
+    caretRestTimer?.();
+    caretRestTimer = after(0.6, () => setCaretResting(true));
+  };
   const [anchor, setAnchor] = createSignal(0);
   const [vsel, setVsel] = createSignal<{ start: RowPos; end: RowPos } | null>(null);
   /** IME composition riding at the caret: not in the document until commit. */
@@ -445,6 +469,20 @@ export default function Note(): ReturnType<typeof View> {
    *  extends from the last plain click. */
   let pvAnchor: RowPos | null = null;
   let prevDown = false;
+  /** Double-click detection on the virtual clock: a second plain press
+   *  within 0.4 s and 3 px of the last selects the word under it. */
+  let lastPress: { t: number; x: number; y: number } | null = null;
+  const doubleClicked = (x: number, y: number, shift: boolean): boolean => {
+    const now = virtualNow();
+    const dbl =
+      !shift &&
+      lastPress !== null &&
+      now - lastPress.t <= 0.4 &&
+      Math.abs(x - lastPress.x) <= 3 &&
+      Math.abs(y - lastPress.y) <= 3;
+    lastPress = dbl ? null : { t: now, x, y }; // a triple starts a new pair
+    return dbl;
+  };
 
   const editPosAt = (x: number, y: number): number => {
     const line = Math.floor((y - HEADER_H + scrollE() - EDGE_PAD) / BODY_LINE_H);
@@ -460,8 +498,19 @@ export default function Note(): ReturnType<typeof View> {
     const content = y >= HEADER_H && !menuOpen() && !preedit();
     press = { x, y, dragged: false, content };
     if (!content) return;
+    const dbl = doubleClicked(x, y, shift);
     if (editing()) {
       const pos = editPosAt(x, y);
+      if (dbl) {
+        // Double click selects the word (or space/punctuation run) under
+        // the pointer; a drag afterwards extends from its start.
+        const [start, end] = wordRangeAt(doc(), pos);
+        setAnchor(start);
+        setCaret(end);
+        breakRun(history);
+        goalSticky = false;
+        return;
+      }
       setCaret(pos);
       // Shift-click keeps the anchor: the span from the previous caret
       // (or selection anchor) to the clicked point becomes the selection.
@@ -472,6 +521,23 @@ export default function Note(): ReturnType<typeof View> {
       const here = viewPosAt(x, y);
       const [start, end] = cmpPos(pvAnchor, here) <= 0 ? [pvAnchor, here] : [here, pvAnchor];
       setVsel({ start, end });
+    } else if (dbl) {
+      // Preview double click: word selection within the clicked row (code
+      // blocks are atomic — any hit selects the whole block, matching
+      // rowSelSpan's granularity).
+      const here = viewPosAt(x, y);
+      const row = viewLayout().rows[here.row];
+      if (row && row.kind !== "hr") {
+        const text = row.kind === "code" ? row.text : rowText(row);
+        if (text.length > 0) {
+          const [s, e] =
+            row.kind === "code" ? ([0, text.length] as const) : wordRangeAt(text, here.ch);
+          if (e > s) {
+            pvAnchor = { row: here.row, ch: s };
+            setVsel({ start: { row: here.row, ch: s }, end: { row: here.row, ch: e } });
+          }
+        }
+      }
     } else {
       setVsel(null);
       pvAnchor = viewPosAt(x, y);
@@ -522,15 +588,20 @@ export default function Note(): ReturnType<typeof View> {
         break;
       case "ch":
         if (editing() && ev.s) {
+          wakeCaret();
           setPreedit(null); // a commit replaces the preedit it finalizes
           mutate("type", (s) => typeText(s, ev.s!));
         }
         break;
       case "paste":
-        if (editing() && ev.text) mutate("other", (s) => typeText(s, ev.text!));
+        if (editing() && ev.text) {
+          wakeCaret();
+          mutate("other", (s) => typeText(s, ev.text!));
+        }
         break;
       case "ime": {
         if (!editing()) break;
+        wakeCaret();
         const text = ev.s ?? "";
         if (text === "") {
           setPreedit(null);
@@ -543,12 +614,16 @@ export default function Note(): ReturnType<typeof View> {
         break;
       }
       case "key":
-        if (ev.k) handleKey(ev.k, ev.sh ?? false);
+        if (ev.k) {
+          if (editing()) wakeCaret();
+          handleKey(ev.k, ev.sh ?? false);
+        }
         break;
       case "mouse": {
         const p = { x: ev.x ?? -1, y: ev.y ?? -1 };
         const down = ev.d ?? false;
         setMouse(p);
+        if (down && !prevDown && editing()) wakeCaret();
         if (down && !prevDown) pointerDown(p.x, p.y, ev.sh ?? false);
         else if (down) pointerMove(p.x, p.y, true);
         if (!down && prevDown) pointerUp(p.x, p.y);
@@ -651,16 +726,24 @@ export default function Note(): ReturnType<typeof View> {
   return (
     <View
       class={
-        dark()
-          ? "flex-col w-full h-full rounded-xl overflow-hidden bg-[#11151b]"
-          : "flex-col w-full h-full rounded-xl overflow-hidden bg-[#fbfaf6]"
+        widgetChrome
+          ? dark()
+            ? "flex-col w-full h-full rounded-xl overflow-hidden bg-[#11151b]"
+            : "flex-col w-full h-full rounded-xl overflow-hidden bg-[#fbfaf6]"
+          : dark()
+            ? "flex-col w-full h-full overflow-hidden bg-[#11151b]"
+            : "flex-col w-full h-full overflow-hidden bg-[#fbfaf6]"
       }
     >
-      {/* Header: the host's drag region (everything left of the buttons). */}
+      {/* Header: the host's drag region (everything left of the buttons).
+          The wordmark is widget identity — a real window already carries
+          the title in its OS titlebar. */}
       <View class="flex-row items-center gap-2 px-3" style={{ height: HEADER_H }}>
-        <Text class="text-xs font-bold tracking-wide" style={{ textColor: ink().header }}>
-          POCKET NOTE
-        </Text>
+        <Show when={widgetChrome}>
+          <Text class="text-xs font-bold tracking-wide" style={{ textColor: ink().header }}>
+            POCKET NOTE
+          </Text>
+        </Show>
         <View class="flex-1" />
         {/* Preview/edit segmented toggle (text-input hosts only). */}
         <Show when={canEdit}>
@@ -804,23 +887,41 @@ export default function Note(): ReturnType<typeof View> {
               )}
             </For>
             <Show when={!editSel()}>
-              <View
-                class="absolute animate-pulse rounded-sm"
-                style={{
-                  width: 2,
-                  insetL: caretPx() - 1,
-                  insetT: EDGE_PAD + caretRow() * BODY_LINE_H + (BODY_LINE_H - CARET_H) / 2,
-                  height: CARET_H,
-                  bgColor: ink().accent,
-                }}
-              />
+              <Show
+                when={caretResting()}
+                fallback={
+                  <View
+                    class="absolute rounded-sm"
+                    style={{
+                      width: 2,
+                      insetL: caretPx() - 1,
+                      insetT: EDGE_PAD + caretRow() * BODY_LINE_H + (BODY_LINE_H - CARET_H) / 2,
+                      height: CARET_H,
+                      bgColor: ink().accent,
+                    }}
+                  />
+                }
+              >
+                <View
+                  class="absolute animate-caret rounded-sm"
+                  style={{
+                    width: 2,
+                    insetL: caretPx() - 1,
+                    insetT: EDGE_PAD + caretRow() * BODY_LINE_H + (BODY_LINE_H - CARET_H) / 2,
+                    height: CARET_H,
+                    bgColor: ink().accent,
+                  }}
+                />
+              </Show>
             </Show>
           </View>
           {scrollbar(scrollE(), editTotal())}
         </Focusable>
       </Show>
 
-      {/* Resize grip affordance (the host claims the actual corner drag). */}
+      {/* Resize grip affordance (the widget host claims the corner drag;
+          a real window resizes at its OS edges — no affordance to draw). */}
+      <Show when={widgetChrome}>
       <View class="absolute" style={{ insetR: 4, insetB: 4, width: 12, height: 12 }}>
         <For each={[{ x: 8, y: 0 }, { x: 4, y: 4 }, { x: 8, y: 4 }, { x: 0, y: 8 }, { x: 4, y: 8 }, { x: 8, y: 8 }]}>
           {(d) => (
@@ -831,6 +932,7 @@ export default function Note(): ReturnType<typeof View> {
           )}
         </For>
       </View>
+      </Show>
 
       {/* The ••• menu: portal overlay, backdrop press closes. */}
       <Show when={menuOpen()}>
@@ -881,6 +983,9 @@ export default function Note(): ReturnType<typeof View> {
                 setMenuOpen(false);
               }}
             />
+            {/* A real window closes from its titlebar / Cmd-W — the item is
+                widget-shell chrome only. */}
+            <Show when={widgetChrome}>
             <View style={{ height: 1, bgColor: ink().hr }} />
             <MenuItem
               label="Close widget"
@@ -892,6 +997,7 @@ export default function Note(): ReturnType<typeof View> {
                 setMenuOpen(false);
               }}
             />
+            </Show>
           </View>
         </Portal>
       </Show>
@@ -985,7 +1091,7 @@ function MdRow(props: {
       >
         {highlight}
         <Text
-          class="absolute text-sm"
+          class="absolute text-sm font-mono"
           style={{ insetL: 8, insetT: 8, lineHeight: 18, textColor: props.ink().code }}
         >
           {row.text}

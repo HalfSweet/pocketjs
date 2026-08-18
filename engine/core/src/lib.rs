@@ -1171,7 +1171,7 @@ impl Ui {
         } else {
             None
         };
-        let (target, drawn) = draw::build(
+        let (target, drawn, provider_stale) = draw::build(
             &self.tree,
             &self.styles,
             &self.fonts,
@@ -1186,6 +1186,36 @@ impl Ui {
             self.inspect_drawn,
             cursor,
         );
+        let (mut target, mut drawn) = (target, drawn);
+        if provider_stale {
+            // A paint-only transform change (rotate/scale never relayout)
+            // left some text node's recorded provider stale. Re-decide and
+            // REPAINT within this same draw — the frame that leaves here is
+            // always provider-correct. One retry suffices: the draw walk
+            // and layout build share one gate (Resolved::declares_transform
+            // accumulated down identical recursions), so the rebuilt record
+            // matches the repaint's expectation by construction.
+            self.layout.dirty = true;
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+            let retry = draw::build(
+                &self.tree,
+                &self.styles,
+                &self.fonts,
+                self.frame,
+                self.layout.viewport,
+                &mut self.textures,
+                &mut self.tex_free,
+                &mut self.discs,
+                self.raster_density,
+                &mut self.draw_list,
+                self.inspect_id,
+                self.inspect_drawn,
+                cursor,
+            );
+            target = retry.0;
+            drawn = retry.1;
+            debug_assert!(!retry.2, "provider gate must be stable after re-decision");
+        }
         self.inspect_drawn = drawn;
         if self.inspect_id != 0 {
             self.inspect_rect = target;
@@ -1198,6 +1228,16 @@ impl Ui {
     /// several dirty strips from one stable frame snapshot.
     pub fn current_draw_list(&self) -> &DrawList {
         &self.draw_list
+    }
+
+    /// Install (or clear) a native text measurer (text::MeasureFn). Native-
+    /// text backends (docs/BACKENDS.md) call this BEFORE the guest mounts:
+    /// every text leaf's metrics change provider, so the layout tree is
+    /// rebuilt. Fixed-function hosts never call this, so goldens are
+    /// unaffected.
+    pub fn set_text_measure(&mut self, f: Option<text::MeasureFn>) {
+        self.fonts.set_native_measure(f);
+        self.layout.dirty = true;
     }
 
     /// Resize the logical viewport (root node + layout bounds + draw clip).
