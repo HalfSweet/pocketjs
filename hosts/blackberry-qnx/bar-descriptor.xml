@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<qnx xmlns="http://www.qnx.com/schemas/application/1.0">
+    <id>dev.pocketstack.blackberry.classic.hero</id>
+    <name>PocketJS Classic Hero</name>
+    <versionNumber>0.1.0</versionNumber>
+    <buildId>1</buildId>
+    <description>PocketJS Hero running as a native BlackBerry 10 application.</description>
+    <author>PocketJS</author>
+    <platformVersion>10.3.1.995</platformVersion>
+
+    <asset path="icon.png">icon.png</asset>
+    <asset path="app.js">app.js</asset>
+    <asset path="app.pak">app.pak</asset>
+
+    <configuration name="Device-Release">
+        <platformArchitecture>armle-v7</platformArchitecture>
+        <asset path="pocketjs-classic" entry="true" type="Qnx/Elf">pocketjs-classic</asset>
+    </configuration>
+
+    <initialWindow>
+        <autoOrients>false</autoOrients>
+        <systemChrome>none</systemChrome>
+    </initialWindow>
+
+    <icon>
+        <image>icon.png</image>
+    </icon>
+
+    <env var="LD_LIBRARY_PATH" value="app/native/lib"/>
+</qnx>

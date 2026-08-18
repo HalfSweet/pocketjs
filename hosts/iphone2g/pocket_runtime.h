@@ -21,6 +21,14 @@ int pocket_runtime_frame_ticks(
   int touch_hit,
   unsigned int tick_count
 );
+int pocket_runtime_frame_input_ticks(
+  uint32_t buttons,
+  int touch_down,
+  int touch_x,
+  int touch_y,
+  int touch_hit,
+  unsigned int tick_count
+);
 int pocket_runtime_hit_test(float x, float y);
 int pocket_runtime_hit_test_bounds(float x, float y);
 const char *pocket_runtime_action_name(void);
@@ -44,13 +52,14 @@ unsigned long pocket_runtime_damage_pixels(void);
 int pocket_runtime_damage_bounds(int *bounds);
 
 /*
- * Hardware path. `pocket_runtime_gl_initialize` needs a current OpenGL ES 1.1
- * context and returns zero if the GPU pipeline cannot be established, which is
- * the host's signal to keep using the software rasterizer above.
+ * Hardware path. `pocket_runtime_gl_initialize` needs a current OpenGL ES
+ * context matching the core backend selected at compile time and returns zero
+ * if the GPU pipeline cannot be established.
  * `pocket_runtime_gl_render` draws the current retained tree into the bound
  * framebuffer; the CPU never rasterizes a pixel on this path.
  */
 int pocket_runtime_gl_initialize(void);
+void pocket_runtime_gl_reset(void);
 int pocket_runtime_gl_render(int width, int height);
 void pocket_runtime_gl_shutdown(void);
 

@@ -629,7 +629,8 @@ int pocket_runtime_boot(
   return 1;
 }
 
-int pocket_runtime_frame_ticks(
+int pocket_runtime_frame_input_ticks(
+  uint32_t buttons,
   int touch_down,
   int touch_x,
   int touch_y,
@@ -673,7 +674,7 @@ int pocket_runtime_frame_ticks(
     }
   }
   JSValue arguments[4] = {
-    JS_NewInt32(context, 0),
+    JS_NewUint32(context, buttons),
     JS_NewInt32(context, POCKETJS_ANALOG_CENTER),
     touch_array,
     hit_array,
@@ -693,6 +694,23 @@ int pocket_runtime_frame_ticks(
   }
   for (tick = 0; tick < tick_count; ++tick) ui_tick();
   return 1;
+}
+
+int pocket_runtime_frame_ticks(
+  int touch_down,
+  int touch_x,
+  int touch_y,
+  int touch_hit,
+  unsigned int tick_count
+) {
+  return pocket_runtime_frame_input_ticks(
+    0,
+    touch_down,
+    touch_x,
+    touch_y,
+    touch_hit,
+    tick_count
+  );
 }
 
 int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit) {
@@ -761,6 +779,11 @@ int pocket_runtime_damage_bounds(int *bounds) {
 int pocket_runtime_gl_initialize(void) {
   if (runtime == 0 || context == 0 || runtime_failed) return 0;
   return ui_gl_initialize() != 0;
+}
+
+void pocket_runtime_gl_reset(void) {
+  if (runtime == 0 || context == 0) return;
+  ui_gl_reset_resources();
 }
 
 int pocket_runtime_gl_render(int width, int height) {
