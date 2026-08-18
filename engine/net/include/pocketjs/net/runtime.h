@@ -105,6 +105,15 @@ pnet_runtime *pnet_runtime_create(const pnet_platform *platform,
                                   const pnet_driver_ops *driver, void *driver_ctx,
                                   const pnet_runtime_config *config,
                                   const char *policy_json);
+
+/** Same, with a TlsProvider. When `tls` is non-NULL the host advertises the
+ * "tls" feature for the HTTP and WebSocket client roles, https:/wss: URLs
+ * are accepted, and every handshake runs under the core's connect deadline. */
+pnet_runtime *pnet_runtime_create_tls(const pnet_platform *platform,
+                                      const pnet_driver_ops *driver, void *driver_ctx,
+                                      const pnet_tls_ops *tls, void *tls_ctx,
+                                      const pnet_runtime_config *config,
+                                      const char *policy_json);
 void pnet_runtime_destroy(pnet_runtime *rt);
 
 /* ------------------------------------------------------------------------ */

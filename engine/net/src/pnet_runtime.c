@@ -136,6 +136,12 @@ void pnet_set_last_error(pnet_runtime *rt, pnet_sb *sb, const char *code, const 
 
 pnet_runtime *pnet_runtime_create(const pnet_platform *platform, const pnet_driver_ops *driver, void *driver_ctx,
                                   const pnet_runtime_config *config, const char *policy_json) {
+  return pnet_runtime_create_tls(platform, driver, driver_ctx, NULL, NULL, config, policy_json);
+}
+
+pnet_runtime *pnet_runtime_create_tls(const pnet_platform *platform, const pnet_driver_ops *driver, void *driver_ctx,
+                                      const pnet_tls_ops *tls, void *tls_ctx, const pnet_runtime_config *config,
+                                      const char *policy_json) {
   if (!platform || !platform->alloc || !platform->free || !platform->now_ms || !platform->random || !driver) return NULL;
   pnet_runtime *rt = platform->alloc(platform->ctx, sizeof *rt);
   if (!rt) return NULL;
@@ -143,6 +149,9 @@ pnet_runtime *pnet_runtime_create(const pnet_platform *platform, const pnet_driv
   rt->platform = *platform;
   rt->driver = *driver;
   rt->driver_ctx = driver_ctx;
+  rt->tls = tls;
+  rt->tls_ctx = tls_ctx;
+  rt->has_features_tls = tls != NULL;
   if (config) rt->cfg = *config;
   else pnet_runtime_config_defaults(&rt->cfg);
   clamp_config(&rt->cfg);
@@ -533,11 +542,12 @@ bool pnet_conn_write(pnet_runtime *rt, pnet_conn *c, const void *data, size_t le
 
 bool pnet_conn_flush(pnet_runtime *rt, pnet_conn *c) {
   if (c->state != PNET_CONN_OPEN) return c->state == PNET_CONN_CONNECTING;
+  if (c->secure && c->tls_phase != PNET_TLS_UP) return true; /* handshake pending */
   while (c->tx.bytes > 0) {
     const uint8_t *ptr;
     size_t n = pnet_bq_peek(&c->tx, &ptr);
     if (n == 0) break;
-    int w = rt->driver.write(rt->driver_ctx, c->sock, ptr, n);
+    int w = c->secure ? c->tls->write(c->tls_ctx, c->sock, ptr, n) : rt->driver.write(rt->driver_ctx, c->sock, ptr, n);
     if (w == PNET_IO_AGAIN || w == 0) break;
     if (w < 0) {
       c->tx_error = true;
@@ -557,8 +567,9 @@ bool pnet_conn_flush(pnet_runtime *rt, pnet_conn *c) {
 
 int pnet_conn_read(pnet_runtime *rt, pnet_conn *c, uint8_t *buf, size_t len) {
   if (c->state != PNET_CONN_OPEN) return PNET_IO_AGAIN;
+  if (c->secure && c->tls_phase != PNET_TLS_UP) return PNET_IO_AGAIN;
   if (c->eof) return PNET_IO_EOF;
-  int r = rt->driver.read(rt->driver_ctx, c->sock, buf, len);
+  int r = c->secure ? c->tls->read(c->tls_ctx, c->sock, buf, len) : rt->driver.read(rt->driver_ctx, c->sock, buf, len);
   if (r == PNET_IO_EOF) c->eof = true;
   else if (r < 0 && r != PNET_IO_AGAIN) c->last_error = r;
   return r;
@@ -568,9 +579,15 @@ void pnet_conn_update_interest(pnet_runtime *rt, pnet_conn *c) {
   if (c->sock == PNET_SOCK_INVALID || c->state == PNET_CONN_CLOSED) return;
   unsigned want = 0;
   if (c->state == PNET_CONN_CONNECTING) want = PNET_INTEREST_WRITE;
-  else {
+  else if (c->secure && c->tls_phase == PNET_TLS_HANDSHAKE) {
+    want = c->tls->interest ? c->tls->interest(c->tls_ctx, c->sock) : (PNET_INTEREST_READ | PNET_INTEREST_WRITE);
+    if (want == 0) want = PNET_INTEREST_READ;
+  } else {
     if (c->read_wanted && !c->eof) want |= PNET_INTEREST_READ;
     if (c->tx.bytes > 0 && !c->tx_error) want |= PNET_INTEREST_WRITE;
+    /* A TLS session may hold buffered records: keep read interest so the
+     * provider can flush them even when the app is momentarily satisfied. */
+    if (c->secure && c->tls_phase == PNET_TLS_UP && c->read_wanted) want |= PNET_INTEREST_READ;
   }
   if (want != c->interest) {
     c->interest = want;
@@ -587,7 +604,57 @@ void pnet_conn_shutdown_write(pnet_runtime *rt, pnet_conn *c) {
   }
 }
 
+void pnet_conn_set_tls(pnet_conn *c, const pnet_tls_ops *tls, void *tls_ctx, const char *server_name, bool verify) {
+  c->tls = tls;
+  c->tls_ctx = tls_ctx;
+  c->secure = tls != NULL;
+  c->tls_verify = verify;
+  size_t n = server_name ? strlen(server_name) : 0;
+  if (n >= sizeof c->server_name) n = sizeof c->server_name - 1;
+  if (n) memcpy(c->server_name, server_name, n);
+  c->server_name[n] = 0;
+}
+
+int pnet_conn_tls_step(pnet_runtime *rt, pnet_conn *c) {
+  (void)rt;
+  if (!c->secure || !c->tls) return 1;
+  if (c->tls_phase == PNET_TLS_UP) return 1;
+  if (c->tls_phase == PNET_TLS_ERROR) return -1;
+  if (c->tls_phase == PNET_TLS_NONE) {
+    pnet_tls_policy policy = {.server_name = c->server_name, .verify = c->tls_verify, .alpn = "http/1.1"};
+    int rc = c->tls->start(c->tls_ctx, c->sock, &policy);
+    if (rc != 0) {
+      c->tls_phase = PNET_TLS_ERROR;
+      c->tls_failure.code = PNET_ERROR_TLS_HANDSHAKE_FAILED;
+      c->tls_failure.cause = rc;
+      return -1;
+    }
+    c->tls_phase = PNET_TLS_HANDSHAKE;
+  }
+  int rc = c->tls->step(c->tls_ctx, c->sock, &c->tls_failure);
+  if (rc == 1) {
+    c->tls_phase = PNET_TLS_UP;
+    pnet_conn_update_interest(rt, c);
+    return 1;
+  }
+  if (rc < 0) {
+    c->tls_phase = PNET_TLS_ERROR;
+    if (!c->tls_failure.code) c->tls_failure.code = PNET_ERROR_TLS_HANDSHAKE_FAILED;
+    return -1;
+  }
+  /* pending: the provider dictates interest */
+  pnet_conn_update_interest(rt, c);
+  return 0;
+}
+
 void pnet_conn_close(pnet_runtime *rt, pnet_conn *c) {
+  /* Release the TLS session for any started handshake (up, in progress or
+   * failed) so the provider's per-socket slot cannot outlive the socket and
+   * collide with a reused socket id. */
+  if (c->tls && c->tls_phase != PNET_TLS_NONE && c->sock != PNET_SOCK_INVALID) {
+    c->tls->close(c->tls_ctx, c->sock);
+  }
+  c->tls_phase = PNET_TLS_NONE;
   if (c->sock != PNET_SOCK_INVALID) {
     rt->driver.close(rt->driver_ctx, c->sock);
     c->sock = PNET_SOCK_INVALID;
@@ -627,10 +694,28 @@ static void dial_try_next(pnet_runtime *rt, pnet_dial *d, pnet_conn *c) {
   }
 }
 
-bool pnet_dial_start(pnet_runtime *rt, pnet_dial *d, pnet_conn *c, const char *host, uint16_t port) {
+bool pnet_dial_start(pnet_runtime *rt, pnet_dial *d, pnet_conn *c, const char *host, uint16_t port, bool secure,
+                     const char *server_name, bool verify) {
   memset(d, 0, sizeof *d);
   d->port = port;
   d->filtered_all = true;
+  d->secure = secure;
+  if (secure) {
+    if (!rt->tls) {
+      d->state = PNET_DIAL_FAILED;
+      d->error_code = PNET_ERROR_UNSUPPORTED;
+      return false;
+    }
+    /* Fail closed before any I/O when the wall clock is not trusted and the
+     * certificate's validity must be checked (docs §14.1). */
+    if (verify && rt->platform.wall_clock_trusted && !rt->platform.wall_clock_trusted(rt->platform.ctx)) {
+      d->state = PNET_DIAL_FAILED;
+      d->error_code = PNET_ERROR_TLS_CLOCK_UNTRUSTED;
+      d->error_message = "wall clock is not trusted for certificate validation";
+      return false;
+    }
+    pnet_conn_set_tls(c, rt->tls, rt->tls_ctx, server_name, verify);
+  }
   pnet_addr literal;
   if (pnet_parse_ip_literal(host, strlen(host), &literal)) {
     d->candidates[0] = literal;
@@ -702,14 +787,37 @@ int pnet_dial_step(pnet_runtime *rt, pnet_dial *d, pnet_conn *c) {
       if (d->state != PNET_DIAL_CONNECTING) return d->state;
       /* fall through */
     case PNET_DIAL_CONNECTING: {
-      int st = pnet_conn_connect_status(rt, c);
-      if (st == 1) {
+      if (!d->tls_up) {
+        int st = pnet_conn_connect_status(rt, c);
+        if (st < 0) {
+          d->cause = st;
+          bool was_secure = c->secure;
+          const pnet_tls_ops *tls = c->tls;
+          void *tls_ctx = c->tls_ctx;
+          char sni[256];
+          bool verify = c->tls_verify;
+          memcpy(sni, c->server_name, sizeof sni);
+          pnet_conn_close(rt, c);
+          pnet_conn_init(c);
+          if (was_secure) pnet_conn_set_tls(c, tls, tls_ctx, sni, verify);
+          dial_try_next(rt, d, c);
+          return d->state;
+        }
+        if (st != 1) return d->state; /* plain connect still pending */
+        if (!d->secure) {
+          d->state = PNET_DIAL_OPEN;
+          return d->state;
+        }
+      }
+      /* TLS handshake over the connected socket. */
+      int hs = pnet_conn_tls_step(rt, c);
+      if (hs == 1) {
+        d->tls_up = true;
         d->state = PNET_DIAL_OPEN;
-      } else if (st < 0) {
-        d->cause = st;
-        pnet_conn_close(rt, c);
-        pnet_conn_init(c);
-        dial_try_next(rt, d, c);
+      } else if (hs < 0) {
+        d->error_code = c->tls_failure.code ? c->tls_failure.code : PNET_ERROR_TLS_HANDSHAKE_FAILED;
+        d->cause = c->tls_failure.cause;
+        d->state = PNET_DIAL_FAILED;
       }
       return d->state;
     }

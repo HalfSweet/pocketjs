@@ -394,6 +394,13 @@ typedef enum pnet_conn_state {
   PNET_CONN_CLOSED,
 } pnet_conn_state;
 
+typedef enum pnet_tls_phase {
+  PNET_TLS_NONE = 0,     /* plaintext connection */
+  PNET_TLS_HANDSHAKE,    /* TLS handshake in progress */
+  PNET_TLS_UP,           /* TLS session established */
+  PNET_TLS_ERROR,        /* handshake failed (failure captured) */
+} pnet_tls_phase;
+
 typedef struct pnet_conn {
   pnet_sock sock;
   uint8_t state;
@@ -406,9 +413,23 @@ typedef struct pnet_conn {
   unsigned interest;
   pnet_bq tx;
   pnet_addr remote;
+  /* TLS (client). `tls` is the runtime's provider or NULL. */
+  const pnet_tls_ops *tls;
+  void *tls_ctx;
+  uint8_t tls_phase;
+  bool secure;
+  pnet_tls_failure tls_failure;
+  char server_name[256];
+  bool tls_verify;
 } pnet_conn;
 
 void pnet_conn_init(pnet_conn *c);
+/** Arm this connection for TLS: once the plain socket connects, a handshake
+ * runs before the connection reports open. `server_name` is SNI + DNS-ID. */
+void pnet_conn_set_tls(pnet_conn *c, const pnet_tls_ops *tls, void *tls_ctx, const char *server_name, bool verify);
+/** Drive the TLS handshake after the plain connect completed: 0 pending,
+ * 1 established, <0 failed (c->tls_failure set). */
+int pnet_conn_tls_step(pnet_runtime *rt, pnet_conn *c);
 /** Start a non-blocking connect; false when the driver refused. */
 bool pnet_conn_connect(pnet_runtime *rt, pnet_conn *c, const pnet_addr *addr, int *err);
 /** Adopt an accepted socket. */
@@ -449,13 +470,18 @@ typedef struct pnet_dial {
   size_t next_candidate;
   uint16_t port;
   const char *error_code;    /* stable code on failure */
+  const char *error_message; /* set for TLS/clock failures */
   int cause;                 /* PNET_IO_* */
   bool filtered_all;         /* every address rejected by policy */
+  bool secure;               /* run a TLS handshake before reporting open */
+  bool tls_up;               /* handshake completed */
 } pnet_dial;
 
 /** Begin: literal IPs skip the resolver. false = synchronous failure
- * (error_code set). */
-bool pnet_dial_start(pnet_runtime *rt, pnet_dial *d, pnet_conn *c, const char *host, uint16_t port);
+ * (error_code set). When `secure`, the connection is armed for TLS with
+ * `server_name` (SNI/DNS-ID) and the handshake runs before PNET_DIAL_OPEN. */
+bool pnet_dial_start(pnet_runtime *rt, pnet_dial *d, pnet_conn *c, const char *host, uint16_t port,
+                     bool secure, const char *server_name, bool verify);
 /** Advance (call from service or after resolve_done). Returns the state. */
 int pnet_dial_step(pnet_runtime *rt, pnet_dial *d, pnet_conn *c);
 void pnet_dial_resolved(pnet_runtime *rt, pnet_dial *d, const pnet_addr *addrs, size_t count, int err);
@@ -480,6 +506,8 @@ struct pnet_runtime {
   pnet_platform platform;
   pnet_driver_ops driver;
   void *driver_ctx;
+  const pnet_tls_ops *tls;
+  void *tls_ctx;
   pnet_runtime_config cfg;
   pnet_policy policy;
   size_t heap_bytes;

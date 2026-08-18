@@ -1004,8 +1004,12 @@ int pnet_ws_connect(pnet_runtime *rt, const char *meta_json) {
   s->next = rt->ws_socks;
   rt->ws_socks = s;
   result = s->handle;
-  if (!pnet_dial_start(rt, &s->dial, &s->conn, s->url.host, s->url.port)) {
-    ws_fail(rt, s, s->dial.error_code ? s->dial.error_code : PNET_ERROR_CONNECT, "connect failed", 0);
+  {
+    bool secure = strcmp(s->url.scheme, "wss") == 0;
+    if (!pnet_dial_start(rt, &s->dial, &s->conn, s->url.host, s->url.port, secure, s->url.host, true)) {
+      ws_fail(rt, s, s->dial.error_code ? s->dial.error_code : PNET_ERROR_CONNECT,
+              s->dial.error_message ? s->dial.error_message : "connect failed", 0);
+    }
   }
   s = NULL;
 out:
