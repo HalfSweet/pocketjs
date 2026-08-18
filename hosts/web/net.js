@@ -3,14 +3,14 @@
 // adapter supplies the spec-shaped ops, the bounded receive queue and the
 // tick batching without exposing browser globals as the guest API.
 //
-// Delivery contract (docs/pocketjs-network-architecture.md §15 / §22): fetch
+// Delivery contract: fetch
 // callbacks only ever append to `completed`; `beginFrame()` (the host's tick
 // boundary) freezes each handle's readable watermark and moves the facts into
 // `visible`; `poll()` reads `visible` alone. Bytes read from the response
 // stream stay in a per-handle queue until the guest copies them out with
 // `readInto`; the reader stops pulling while the queue is at capacity.
 //
-// Browser profile deviations (§22): credentials "omit", cache "no-store",
+// Browser profile deviations: credentials "omit", cache "no-store",
 // redirect "manual" — a redirect the browser hides ends the request with
 // `unsupported`; TLS is the browser's, so "tls" is advertised.
 

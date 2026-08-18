@@ -1,5 +1,5 @@
-// Public support types shared by every network module
-// (docs/pocketjs-network-architecture.md §2.1). Values cross the boundary as
+// Public support types shared by every network module.
+// Values cross the boundary as
 // JSON; the types keep one object identity across `@pocketjs/framework/net`
 // and its protocol subpaths.
 

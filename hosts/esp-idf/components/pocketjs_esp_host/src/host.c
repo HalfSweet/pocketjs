@@ -322,7 +322,7 @@ static void guest_task(void *arg) {
     guest_frame(host, ++frame);
     vTaskDelayUntil(&last, period);
   }
-  /* Wind-down: bounded frames so cancellations reach the guest (docs §24). */
+  /* Wind-down: bounded frames so cancellations reach the guest. */
   if (host->rt) {
     if (host->net) {
       pocketjs_host_net_lock(host);

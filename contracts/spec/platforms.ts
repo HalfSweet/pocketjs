@@ -144,8 +144,8 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // appends the id to its profile only when its native host ships the module
   // (the ring/thread discipline to copy is hosts/psp/src/audio.rs).
   "audio.pcm",
-  // Network capabilities are split by protocol, role and TLS
-  // (docs/pocketjs-network-architecture.md §8). Each id names one module
+  // Network capabilities are split by protocol, role and TLS.
+  // Each id names one module
   // boundary: `network.http.client` is `fetch()` over `globalThis.net`
   // (contracts/spec/net.ts), `network.http.server` is `serve()` over
   // `globalThis.httpd` (contracts/spec/httpd.ts), `network.websocket.client`
@@ -154,7 +154,7 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // stock TARGET advertising them: the sim hosts, the browser dev host and
   // the reference cores (engine/net, engine/crates/pocket-net) implement and
   // test the contracts; a device target appends an id only after its
-  // conformance and resource gate (§25) — the ESP-IDF profiles in
+  // conformance and resource gate — the ESP-IDF profiles in
   // hosts/esp-idf are Phase 1A candidates and advertise nothing yet.
   "network.http.client",
   "network.http.client.tls",

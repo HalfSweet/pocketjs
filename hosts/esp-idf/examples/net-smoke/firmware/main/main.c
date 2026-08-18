@@ -24,8 +24,8 @@ extern const char app_js_end[] asm("_binary_app_js_end");
 static char s_self_ip[16] = "0.0.0.0";
 static char s_policy[1024];
 
-/* Every endpoint the smoke touches must be an explicit connect/listen rule
- * (docs/pocketjs-network-spec-v2.md §9): the workstation peer's HTTP and
+/* Every endpoint the smoke touches must be an explicit connect/listen rule:
+ * the workstation peer's HTTP and
  * WebSocket ports, the peer board's HTTP port, plus the same host on the
  * port after the WebSocket one so the "connection refused" case is a real
  * refusal and not a permission denial. Everything here is plaintext on the LAN, so

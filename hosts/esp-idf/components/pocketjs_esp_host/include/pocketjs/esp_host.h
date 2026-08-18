@@ -3,7 +3,7 @@
  * modules (`globalThis.net` / `ws` / `httpd`) mounted over the portable core
  * (engine/net) and a network task driving lwIP sockets.
  *
- * Execution model (docs/pocketjs-network-architecture.md §15): every guest
+ * Execution model: every guest
  * turn is one `frame()` call followed by the job drain, on the owner task
  * only. Before each frame the owner task runs `pnet_runtime_begin_tick()`
  * under the runtime lock; the network task services sockets under the same
@@ -77,7 +77,7 @@ esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const cha
                                   pocketjs_esp_host_t **out_host);
 
 /** Quiesce the network, run a bounded number of wind-down frames, then
- * release the guest and the runtime (docs §24). */
+ * release the guest and the runtime. */
 void pocketjs_esp_host_stop(pocketjs_esp_host_t *host);
 
 typedef struct pocketjs_esp_host_stats {

@@ -3,9 +3,7 @@
 // The public SDK is `@pocketjs/framework/net/http` (`fetch`, `Headers`,
 // `Request`, `Response`, `BodyStream`). This file fixes the guest ↔ core
 // boundary underneath it: numeric op codes, event names, the JSON data
-// contract, portable limits and the shared error vocabulary. The complete
-// discussion is docs/pocketjs-network-spec-v2.md; the execution model is
-// docs/pocketjs-network-architecture.md §15.
+// contract, portable limits and the shared error vocabulary.
 //
 // The four parts of the boundary:
 //
@@ -24,7 +22,7 @@
 //   and copies bytes that became visible at the last tick boundary into it,
 //   releasing the corresponding native queue space.
 //
-// Host obligations (docs/pocketjs-network-spec-v2.md §7, §8):
+// Host obligations:
 //   - `begin_tick()` before every `frame()`: swap transport completions into
 //     the visible set and freeze each handle's `readable` watermark;
 //   - no network task or callback ever calls QuickJS;
@@ -192,7 +190,7 @@ export const NET_TLS_MIN_VERSION = "1.2";
 export const NET_METHODS_FORBIDDEN = ["CONNECT", "TRACE"] as const;
 
 // ---------------------------------------------------------------------------
-// Errors — the vocabulary shared by net, ws and httpd (spec v2 §6). A core
+// Errors — the vocabulary shared by net, ws and httpd. A core
 // maps platform/library failures into these codes before crossing the
 // boundary; the raw code may travel in `causeCode`.
 // ---------------------------------------------------------------------------

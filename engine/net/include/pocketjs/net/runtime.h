@@ -94,8 +94,7 @@ typedef struct pnet_runtime_config {
 /** Fill `cfg` with the spec ceilings. */
 void pnet_runtime_config_defaults(pnet_runtime_config *cfg);
 
-/** Create a runtime. `policy_json` is the immutable Build Plan projection
- * (docs/pocketjs-network-spec-v2.md §9):
+/** Create a runtime. `policy_json` is the immutable Build Plan projection:
  *   { "connect": [{"protocol":"http","host":"example.com","port":80}],
  *     "listen":  [{"protocol":"http","address":"0.0.0.0","port":8080}],
  *     "credentials": [], "insecureTransport": true, "localNetwork": true,
@@ -131,7 +130,7 @@ bool pnet_runtime_has_pending_output(pnet_runtime *rt);
 /** Resolver completion. `err` 0 with `count` addresses, else a PNET_IO_* code. */
 void pnet_runtime_resolve_done(pnet_runtime *rt, uint32_t req_id, const pnet_addr *addrs,
                                size_t count, int err);
-/** Quiesce (docs/pocketjs-network-architecture.md §24 step 1): refuse new
+/** Quiesce: refuse new
  * operations, cancel every live one; terminal events still arrive at
  * subsequent ticks. */
 void pnet_runtime_quiesce(pnet_runtime *rt);

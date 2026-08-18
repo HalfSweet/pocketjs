@@ -287,7 +287,8 @@ static bool maybe_redirect(pnet_runtime *rt, pnet_http_req *r, const pnet_h1_hea
     req_fail(rt, r, PNET_ERROR_PERMISSION_DENIED, "redirect target is not an allowed endpoint", 0);
     return true;
   }
-  /* Method / body rewriting (docs §3.2). */
+  /* Method / body rewriting on redirect: 303 (non-HEAD) and 301/302 POST
+   * become GET, dropping the request body. */
   bool to_get = false;
   if (st == 303 && !pnet_ieq_n(r->method, r->method_len, "HEAD")) to_get = true;
   if ((st == 301 || st == 302) && pnet_ieq_n(r->method, r->method_len, "POST")) to_get = true;

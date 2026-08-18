@@ -6,8 +6,7 @@
 // its own spec, core, capability (`network.websocket.client` / `.tls`) and
 // namespace, mounted only by hosts that ship it. It shares the transport/TLS/
 // queue substrate, the policy input, the frame contract and the error
-// vocabulary (contracts/spec/net.ts NET_ERROR) with the HTTP modules. See
-// docs/pocketjs-network-spec-v2.md §11.
+// vocabulary (contracts/spec/net.ts NET_ERROR) with the HTTP modules.
 //
 // Frame contract: identical to net — completions become visible at
 // `begin_tick()`, `poll()` runs once per tick from the framework service pump,

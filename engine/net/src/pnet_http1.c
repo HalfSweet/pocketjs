@@ -1,5 +1,5 @@
-/* HTTP/1.1 message syntax (RFC 9112) with the strict framing profile of
- * docs/pocketjs-network-architecture.md §21: TE+CL rejected, only a single
+/* HTTP/1.1 message syntax (RFC 9112) with a strict framing profile:
+ * TE+CL rejected, only a single
  * `chunked`, a single Content-Length, no obs-fold, bounded head, chunked
  * trailers parsed and validated then discarded. Shared by the client and the
  * server cores. */

@@ -2,8 +2,8 @@
  *
  * The driver is the host's non-blocking socket layer: resolver, byte-stream
  * connect/read/write/shutdown/close, listener accept, local/remote address
- * metadata and reactor interest. It never sees HTTP, WebSocket or TLS
- * (docs/pocketjs-network-architecture.md §13). lwIP, BSD sockets, Winsock and
+ * metadata and reactor interest. It never sees HTTP, WebSocket or TLS.
+ * lwIP, BSD sockets, Winsock and
  * console SDK sockets all fit this shape.
  *
  * Threading: the core calls the driver only from inside `pnet_runtime_service`
@@ -95,7 +95,7 @@ typedef struct pnet_driver_ops {
 } pnet_driver_ops;
 
 /* ------------------------------------------------------------------------ */
-/* TlsProvider (docs/pocketjs-network-architecture.md §14)                  */
+/* TlsProvider                                                              */
 /* ------------------------------------------------------------------------ */
 
 /** What the core asks of one TLS client handshake. `server_name` is the

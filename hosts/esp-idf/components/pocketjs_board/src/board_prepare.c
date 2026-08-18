@@ -12,8 +12,7 @@ static const char *TAG = "board";
  * over SDIO through esp_hosted. The expander register values are the ones
  * M5Stack's Tab5 demo programs; only bit 0 matters here. GPIO15 (P4) drives
  * the C6 EN pin through 1 kΩ and is left to esp_hosted's reset sequence,
- * which the sdkconfig must configure active-high
- * (docs/pocketjs-network-architecture.md §1.2). */
+ * which the sdkconfig must configure active-high. */
 #include "driver/i2c_master.h"
 #include "esp_hosted.h"
 #include "freertos/FreeRTOS.h"

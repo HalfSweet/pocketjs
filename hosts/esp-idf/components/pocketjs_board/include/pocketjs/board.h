@@ -7,8 +7,8 @@
  *            (SDA GPIO31, SCL GPIO32) and must be on before esp_wifi_init().
  *
  * The public network modules never see any of this: link driver, BSP and
- * credentials are product/host concerns (docs/pocketjs-network-architecture.md
- * §1.2). This component gives the smoke firmware one call that brings the
+ * credentials are product/host concerns. This component gives the smoke
+ * firmware one call that brings the
  * station interface up with DHCP and returns the address.
  */
 #ifndef POCKETJS_BOARD_H

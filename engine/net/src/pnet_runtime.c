@@ -707,7 +707,7 @@ bool pnet_dial_start(pnet_runtime *rt, pnet_dial *d, pnet_conn *c, const char *h
       return false;
     }
     /* Fail closed before any I/O when the wall clock is not trusted and the
-     * certificate's validity must be checked (docs §14.1). */
+     * certificate's validity must be checked. */
     if (verify && rt->platform.wall_clock_trusted && !rt->platform.wall_clock_trusted(rt->platform.ctx)) {
       d->state = PNET_DIAL_FAILED;
       d->error_code = PNET_ERROR_TLS_CLOCK_UNTRUSTED;

@@ -4,7 +4,7 @@
 // batch per tick from the framework service pump while a module has live
 // handles, and hands each event to the module. Nothing here is public API.
 //
-// Delivery order (docs/pocketjs-network-architecture.md §15.2): the host runs
+// Delivery order: the host runs
 // `begin_tick` before `frame()`; inside `frame()` the service pump calls a
 // module's `poll` exactly once; the module updates JS state, calls handlers
 // and settles Promises synchronously; Promise reactions run in the same

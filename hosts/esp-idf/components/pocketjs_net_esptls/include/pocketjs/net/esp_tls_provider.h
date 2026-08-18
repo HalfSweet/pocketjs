@@ -4,9 +4,9 @@
  * lwIP sockets the driver already connected. Uses the ESP-IDF certificate
  * bundle for host trust, SNI = the authorized hostname, DNS-ID/IP-ID
  * hostname verification, TLS 1.2 minimum, non-blocking handshake. It maps
- * ESP-TLS/Mbed TLS failures onto the four stable tls_* codes and takes a
- * private duplicate of the socket fd so the core's driver keeps sole
- * ownership of the original (docs/pocketjs-network-architecture.md §14.1).
+ * ESP-TLS/Mbed TLS failures onto the four stable tls_* codes. esp_tls drives
+ * the handshake over the fd the driver already connected; on close esp_tls
+ * closes the fd and the driver's own close is a harmless no-op.
  */
 #ifndef POCKETJS_NET_ESP_TLS_PROVIDER_H
 #define POCKETJS_NET_ESP_TLS_PROVIDER_H

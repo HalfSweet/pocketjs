@@ -7,7 +7,7 @@
  * runtime (owner-thread ops, `pnet_runtime_service`, `pnet_runtime_begin_tick`)
  * must be serialized by the host — one mutex around all of them is the
  * reference arrangement, a single-threaded loop calling service() then
- * begin_tick() is another (docs/pocketjs-network-architecture.md §17.2).
+ * begin_tick() is another.
  */
 #ifndef POCKETJS_NET_PLATFORM_H
 #define POCKETJS_NET_PLATFORM_H
