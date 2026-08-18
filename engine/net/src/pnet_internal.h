@@ -339,7 +339,7 @@ typedef struct pnet_event {
   struct pnet_event *next;
   uint64_t seq;
   int handle;          /* h or req */
-  bool terminal;       /* last event of the handle */
+  bool terminal;       /* barrier: a frozen `readable` for the handle is inserted before it */
   bool readable;       /* a frozen `readable` announcement */
   size_t weight;       /* bytes charged to the tick budget */
   char *json;
@@ -399,7 +399,8 @@ typedef struct pnet_conn {
   uint8_t state;
   bool read_wanted;      /* protocol wants to read (queue not full) */
   bool eof;              /* peer finished writing */
-  bool write_shutdown;
+  bool write_shutdown;   /* shutdown requested; performed once tx drains */
+  bool shutdown_done;
   bool tx_error;
   int last_error;        /* PNET_IO_* */
   unsigned interest;

@@ -241,8 +241,6 @@ static void ws_send_close_frame(pnet_runtime *rt, pnet_ws_sock *s, int code, con
 static void ws_protocol_close(pnet_runtime *rt, pnet_ws_sock *s, int code, const char *error_code, const char *message) {
   if (s->state != WS_OPEN && s->state != WS_CLOSING) return;
   if (s->pending_error) return; /* the first violation wins */
-  s->conn.read_wanted = false;   /* nothing after a violation is trusted */
-  pnet_conn_update_interest(rt, &s->conn);
   s->pending_error = error_code;
   s->pending_error_msg = message;
   s->local_close = true;
@@ -337,6 +335,8 @@ static bool valid_close_code(int code) {
 
 /** Handle one complete frame whose payload is in `payload`. */
 static void ws_on_frame(pnet_runtime *rt, pnet_ws_sock *s, uint8_t opcode, bool fin, const uint8_t *payload, size_t len) {
+  /* After our Close frame only control frames matter (RFC 6455 §7.1.1). */
+  if (s->close_sent && opcode < 0x8) return;
   switch (opcode) {
     case 0x8: { /* close */
       int code = 1005;

@@ -647,6 +647,8 @@ static void test_server(harness *h) {
   CHECK(strstr(log, "\"method\":\"POST\"") != NULL);
   CHECK(strstr(log, "\"length\":11") != NULL);
   CHECK(strstr(log, "\"t\":\"readable\"") != NULL);
+  /* readable must precede end so the guest reads the bytes before EOF */
+  CHECK(strstr(log, "\"t\":\"readable\"") < strstr(log, "\"t\":\"end\""));
   req = extract_int(log, "\"req\":");
   char body[64];
   pthread_mutex_lock(&h->lock);
