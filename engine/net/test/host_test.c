@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "pnet_internal.h"
 #include "pnet_posix_driver.h"
 #include "pocketjs/net/runtime.h"
 
@@ -812,13 +813,378 @@ static void test_server(harness *h) {
   pthread_mutex_unlock(&h->lock);
 }
 
+
+/* --- scripted WebSocket peer ------------------------------------------- */
+
+typedef struct ws_peer {
+  int listen_fd;
+  uint16_t port;
+  pthread_t thread;
+  volatile int stop;
+  volatile int pongs_seen;
+  volatile int closes_seen;
+  volatile int last_close_code;
+} ws_peer;
+
+static void ws_peer_send_frame(int fd, uint8_t opcode, bool fin, const uint8_t *payload, size_t len) {
+  uint8_t head[10];
+  size_t hl = 0;
+  head[hl++] = (uint8_t)((fin ? 0x80 : 0) | opcode);
+  if (len < 126) head[hl++] = (uint8_t)len;
+  else if (len <= 0xffff) {
+    head[hl++] = 126;
+    head[hl++] = (uint8_t)(len >> 8);
+    head[hl++] = (uint8_t)len;
+  } else {
+    head[hl++] = 127;
+    for (int i = 7; i >= 0; i--) head[hl++] = (uint8_t)((uint64_t)len >> (8 * i));
+  }
+  send_all(fd, (const char *)head, hl);
+  if (len) send_all(fd, (const char *)payload, len);
+}
+
+static bool recv_exact(int fd, uint8_t *buf, size_t len) {
+  size_t got = 0;
+  while (got < len) {
+    ssize_t n = recv(fd, buf + got, len - got, 0);
+    if (n <= 0) return false;
+    got += (size_t)n;
+  }
+  return true;
+}
+
+/* Read one masked client frame; returns opcode or -1. */
+static int ws_peer_recv_frame(int fd, uint8_t *payload, size_t cap, size_t *out_len, bool *fin) {
+  uint8_t h[2];
+  if (!recv_exact(fd, h, 2)) return -1;
+  int opcode = h[0] & 0x0f;
+  *fin = (h[0] & 0x80) != 0;
+  if (!(h[1] & 0x80)) return -1; /* client frames must be masked */
+  uint64_t len = h[1] & 0x7f;
+  if (len == 126) {
+    uint8_t e[2];
+    if (!recv_exact(fd, e, 2)) return -1;
+    len = ((uint64_t)e[0] << 8) | e[1];
+  } else if (len == 127) {
+    uint8_t e[8];
+    if (!recv_exact(fd, e, 8)) return -1;
+    len = 0;
+    for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
+  }
+  uint8_t mask[4];
+  if (!recv_exact(fd, mask, 4)) return -1;
+  if (len > cap) return -1;
+  if (!recv_exact(fd, payload, (size_t)len)) return -1;
+  for (size_t i = 0; i < len; i++) payload[i] ^= mask[i & 3];
+  *out_len = (size_t)len;
+  return opcode;
+}
+
+static void *ws_peer_thread(void *arg) {
+  ws_peer *p = arg;
+  while (!p->stop) {
+    struct sockaddr_in a;
+    socklen_t al = sizeof a;
+    int fd = accept(p->listen_fd, (struct sockaddr *)&a, &al);
+    if (fd < 0) {
+      if (p->stop) break;
+      continue;
+    }
+    char head[4096];
+    if (read_head(fd, head, sizeof head) < 0) {
+      close(fd);
+      continue;
+    }
+    char target[256] = {0};
+    sscanf(head, "%*s %255s", target);
+    const char *keyh = strcasestr(head, "sec-websocket-key:");
+    char key[64] = {0};
+    if (keyh) sscanf(keyh + 18, " %63s", key);
+    if (strcmp(target, "/deny") == 0) {
+      const char *r = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+      send_all(fd, r, strlen(r));
+      close(fd);
+      continue;
+    }
+    char concat[128];
+    snprintf(concat, sizeof concat, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+    uint8_t digest[20];
+    pnet_sha1((const uint8_t *)concat, strlen(concat), digest);
+    char accept_key[32];
+    pnet_base64_encode(digest, 20, accept_key, sizeof accept_key);
+    char resp[512];
+    const char *proto_line = strcasestr(head, "sec-websocket-protocol:") ? "Sec-WebSocket-Protocol: chat.v1\r\n" : "";
+    if (strcmp(target, "/badaccept") == 0) accept_key[0] = accept_key[0] == 'A' ? 'B' : 'A';
+    int n = snprintf(resp, sizeof resp,
+                     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                     "Sec-WebSocket-Accept: %s\r\n%s\r\n", accept_key, proto_line);
+    send_all(fd, resp, (size_t)n);
+    if (strcmp(target, "/fragments") == 0) {
+      /* server → client: a fragmented text message with a ping in between */
+      ws_peer_send_frame(fd, 1, false, (const uint8_t *)"Hel", 3);
+      ws_peer_send_frame(fd, 9, true, (const uint8_t *)"pp", 2);
+      ws_peer_send_frame(fd, 0, false, (const uint8_t *)"lo ", 3);
+      ws_peer_send_frame(fd, 0, true, (const uint8_t *)"\xE4\xB8\x96\xE7\x95\x8C", 6);
+      /* expect the pong echo */
+      uint8_t buf[256];
+      size_t len;
+      bool fin;
+      int op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op == 10 && len == 2 && memcmp(buf, "pp", 2) == 0) p->pongs_seen++;
+      /* then a server-initiated close */
+      uint8_t cl[16] = {0x03, 0xE9, 'b', 'y', 'e'};
+      ws_peer_send_frame(fd, 8, true, cl, 5);
+      op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op == 8) p->closes_seen++;
+      close(fd);
+      continue;
+    }
+    if (strcmp(target, "/oversized") == 0) {
+      uint8_t big[300];
+      memset(big, 'x', sizeof big);
+      ws_peer_send_frame(fd, 2, true, big, sizeof big);
+      uint8_t buf[256];
+      size_t len;
+      bool fin;
+      int op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op == 8 && len >= 2) {
+        p->last_close_code = (buf[0] << 8) | buf[1];
+        ws_peer_send_frame(fd, 8, true, buf, 2);
+      }
+      close(fd);
+      continue;
+    }
+    if (strcmp(target, "/badutf8") == 0) {
+      ws_peer_send_frame(fd, 1, true, (const uint8_t *)"\xff\xfe", 2);
+      uint8_t buf[256];
+      size_t len;
+      bool fin;
+      int op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op == 8 && len >= 2) {
+        p->last_close_code = (buf[0] << 8) | buf[1];
+        ws_peer_send_frame(fd, 8, true, buf, 2);
+      }
+      close(fd);
+      continue;
+    }
+    if (strcmp(target, "/masked") == 0) {
+      /* server frame with the mask bit set: protocol error 1002 */
+      uint8_t bad[8] = {0x81, 0x81, 1, 2, 3, 4, 'x' ^ 1};
+      send_all(fd, (const char *)bad, 7);
+      uint8_t buf[256];
+      size_t len;
+      bool fin;
+      int op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op == 8 && len >= 2) p->last_close_code = (buf[0] << 8) | buf[1];
+      close(fd);
+      continue;
+    }
+    if (strcmp(target, "/drop") == 0) {
+      usleep(50000);
+      close(fd);
+      continue;
+    }
+    /* echo server: echo data frames, answer pings, mirror close */
+    for (;;) {
+      uint8_t buf[70000];
+      size_t len;
+      bool fin;
+      int op = ws_peer_recv_frame(fd, buf, sizeof buf, &len, &fin);
+      if (op < 0) break;
+      if (op == 1 || op == 2) ws_peer_send_frame(fd, (uint8_t)op, true, buf, len);
+      else if (op == 9) ws_peer_send_frame(fd, 10, true, buf, len);
+      else if (op == 10) p->pongs_seen++;
+      else if (op == 8) {
+        p->closes_seen++;
+        if (len >= 2) p->last_close_code = (buf[0] << 8) | buf[1];
+        ws_peer_send_frame(fd, 8, true, buf, len);
+        break;
+      }
+    }
+    usleep(10000);
+    close(fd);
+  }
+  return NULL;
+}
+
+static bool ws_peer_start(ws_peer *p) {
+  memset(p, 0, sizeof *p);
+  p->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int one = 1;
+  setsockopt(p->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(p->listen_fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(p->listen_fd, 8) < 0) return false;
+  socklen_t al = sizeof a;
+  getsockname(p->listen_fd, (struct sockaddr *)&a, &al);
+  p->port = ntohs(a.sin_port);
+  pthread_create(&p->thread, NULL, ws_peer_thread, p);
+  return true;
+}
+
+static void ws_peer_stop(ws_peer *p) {
+  p->stop = 1;
+  shutdown(p->listen_fd, SHUT_RDWR);
+  close(p->listen_fd);
+  pthread_join(p->thread, NULL);
+}
+
+static int ws_connect(harness *h, uint16_t port, const char *path, const char *extra) {
+  char meta[512];
+  snprintf(meta, sizeof meta, "{\"url\":\"ws://127.0.0.1:%u%s\"%s}", port, path, extra ? extra : "");
+  pthread_mutex_lock(&h->lock);
+  int handle = pnet_ws_connect(h->rt, meta);
+  if (handle < 0) fprintf(stderr, "ws connect refused: %s\n", pnet_ws_last_error(h->rt));
+  pthread_mutex_unlock(&h->lock);
+  pnet_posix_driver_wake(h->driver);
+  return handle;
+}
+
+static void test_websocket(harness *h, ws_peer *p) {
+  char log[16384];
+
+  /* 1. Handshake with subprotocol; text and binary echo. */
+  log[0] = 0;
+  int handle = ws_connect(h, p->port, "/echo", ",\"protocols\":[\"chat.v1\",\"other\"],\"headers\":{\"origin\":\"pocket\"}");
+  CHECK(handle > 0);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"open\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"protocol\":\"chat.v1\"") != NULL);
+  pthread_mutex_lock(&h->lock);
+  CHECK(pnet_ws_send(h->rt, handle, 1, (const uint8_t *)"h\xC3\xA9llo", 6) == 0);
+  CHECK(pnet_ws_send(h->rt, handle, 2, (const uint8_t *)"\x01\x02\x03", 3) == 0);
+  CHECK(pnet_ws_send(h->rt, handle, 1, (const uint8_t *)"\xff", 1) == PWS_SEND_INVALID); /* invalid UTF-8 text */
+  CHECK(pnet_ws_send(h->rt, handle, 9, (const uint8_t *)"ping!", 5) == 0);
+  CHECK(pnet_ws_send(h->rt, handle, 9, (const uint8_t *)log, 126) == PWS_SEND_INVALID);
+  pthread_mutex_unlock(&h->lock);
+  pnet_posix_driver_wake(h->driver);
+  log[0] = 0;
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"pong\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"kind\":\"text\",\"text\":\"h\xC3\xA9llo\"") != NULL);
+  CHECK(strstr(log, "\"kind\":\"binary\",\"bytes\":3") != NULL);
+  CHECK(strstr(log, "\"payload\":{\"$b\":\"cGluZyE=\"}") != NULL);
+  {
+    uint8_t buf[8];
+    pthread_mutex_lock(&h->lock);
+    CHECK(pnet_ws_receive_into(h->rt, handle, buf, 2) == -1); /* too small: nothing dequeued */
+    int got = pnet_ws_receive_into(h->rt, handle, buf, sizeof buf);
+    CHECK(got == 3 && buf[0] == 1 && buf[2] == 3);
+    CHECK(pnet_ws_receive_into(h->rt, handle, buf, sizeof buf) == -1);
+    CHECK(pnet_ws_buffered_amount(h->rt, handle) >= 0);
+    pthread_mutex_unlock(&h->lock);
+  }
+  /* client-initiated close: clean, local, code echoed */
+  pthread_mutex_lock(&h->lock);
+  CHECK(pnet_ws_close(h->rt, handle, 4001, "done", 4) == 0);
+  CHECK(pnet_ws_close(h->rt, handle, 1000, NULL, 0) == -1);
+  CHECK(pnet_ws_send(h->rt, handle, 1, (const uint8_t *)"x", 1) == PWS_SEND_CLOSED);
+  pthread_mutex_unlock(&h->lock);
+  pnet_posix_driver_wake(h->driver);
+  log[0] = 0;
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":4001,\"reason\":\"done\",\"clean\":true,\"local\":true") != NULL);
+  CHECK(p->last_close_code == 4001);
+
+  /* 2. Fragmented server message + interleaved ping (auto pong) + server close. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/fragments", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"text\":\"Hello \xE4\xB8\x96\xE7\x95\x8C\"") != NULL);
+  CHECK(strstr(log, "\"t\":\"ping\"") != NULL);
+  CHECK(strstr(log, "\"code\":1001,\"reason\":\"bye\",\"clean\":true,\"local\":false") != NULL);
+  usleep(50000);
+  CHECK(p->pongs_seen >= 1);
+
+  /* 3. Oversized message → error message_too_large + close 1009. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/oversized", ",\"limits\":{\"maxMessageBytes\":100}");
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":\"message_too_large\"") != NULL);
+  CHECK(strstr(log, "\"code\":1009") != NULL);
+  CHECK(p->last_close_code == 1009);
+
+  /* 4. Invalid UTF-8 → 1007; masked server frame → 1002. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/badutf8", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":\"websocket_protocol_error\"") != NULL && strstr(log, "\"code\":1007") != NULL);
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/masked", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":1002") != NULL);
+
+  /* 5. Transport loss → error closed + close 1006. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/drop", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":\"closed\"") != NULL && strstr(log, "\"code\":1006") != NULL);
+
+  /* 6. Handshake failures: 403 and a bad accept key. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/deny", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"code\":\"websocket_handshake_failed\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"status\":403") != NULL);
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/badaccept", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"code\":\"websocket_handshake_failed\"", 3000, log, sizeof log));
+
+  /* 7. Terminate: close 1006 local without a Close frame. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/echo", NULL);
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"open\"", 3000, log, sizeof log));
+  pthread_mutex_lock(&h->lock);
+  pnet_ws_terminate(h->rt, handle);
+  pthread_mutex_unlock(&h->lock);
+  log[0] = 0;
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+  CHECK(strstr(log, "\"code\":1006,\"reason\":\"\",\"clean\":false,\"local\":true") != NULL);
+
+  /* 8. Backpressure and drain with a tiny send queue. */
+  log[0] = 0;
+  handle = ws_connect(h, p->port, "/echo", ",\"limits\":{\"sendQueueBytes\":64}");
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"open\"", 3000, log, sizeof log));
+  {
+    uint8_t payload[40];
+    memset(payload, 'z', sizeof payload);
+    pthread_mutex_lock(&h->lock);
+    int rc1 = pnet_ws_send(h->rt, handle, 2, payload, sizeof payload);
+    int rc2 = pnet_ws_send(h->rt, handle, 2, payload, sizeof payload);
+    pthread_mutex_unlock(&h->lock);
+    pnet_posix_driver_wake(h->driver);
+    CHECK(rc1 == 0 || rc1 == 1);
+    CHECK(rc2 == PWS_SEND_BACKPRESSURE);
+    log[0] = 0;
+    CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"drain\"", 3000, log, sizeof log));
+  }
+  pthread_mutex_lock(&h->lock);
+  pnet_ws_close(h->rt, handle, 1000, NULL, 0);
+  pthread_mutex_unlock(&h->lock);
+  log[0] = 0;
+  CHECK(wait_for(h, pnet_ws_poll, "\"t\":\"close\"", 3000, log, sizeof log));
+
+  /* 9. Refusals. */
+  pthread_mutex_lock(&h->lock);
+  CHECK(pnet_ws_connect(h->rt, "{\"url\":\"wss://127.0.0.1/\"}") == -1);
+  CHECK(strncmp(pnet_ws_last_error(h->rt), "unsupported", 11) == 0);
+  CHECK(pnet_ws_connect(h->rt, "{\"url\":\"ws://127.0.0.1/\",\"headers\":{\"Host\":\"x\"}}") == -1);
+  CHECK(pnet_ws_connect(h->rt, "{\"url\":\"ws://127.0.0.1/\",\"protocols\":[\"a\",\"a\"]}") == -1);
+  CHECK(pnet_ws_connect(h->rt, "{\"url\":\"ws://127.0.0.2/\"}") == -1);
+  CHECK(strncmp(pnet_ws_last_error(h->rt), "permission_denied", 17) == 0);
+  CHECK(!pnet_runtime_has_live_handles(h->rt));
+  pthread_mutex_unlock(&h->lock);
+}
+
 int main(void) {
   srand(1234);
   peer p;
   CHECK(peer_start(&p));
+  ws_peer wp;
+  CHECK(ws_peer_start(&wp));
   char policy[512];
   snprintf(policy, sizeof policy,
-           "{\"connect\":[{\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}}],"
+           "{\"connect\":[{\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}},"
+           "{\"protocol\":\"ws\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}}],"
            "\"listen\":[{\"protocol\":\"http\",\"address\":\"127.0.0.1\",\"port\":\"ephemeral\"}],"
            "\"insecureTransport\":true,\"localNetwork\":true}");
   harness h;
@@ -827,9 +1193,11 @@ int main(void) {
   if (h.rt) {
     test_client(&h, &p);
     test_server(&h);
+    test_websocket(&h, &wp);
   }
   harness_stop(&h);
   peer_stop(&p);
+  ws_peer_stop(&wp);
   printf("host: %d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
