@@ -9,6 +9,7 @@
 //      (framework/compiler/subpaths.ts) and byte-compares: the npm surface
 //      can never drift from the one declaration. Fix = `bun tools/gen-exports.ts`.
 
+import { generateC } from "../contracts/spec/gen-c.ts";
 import { generateRust } from "../contracts/spec/gen-rust.ts";
 import { withGeneratedExports } from "../tools/gen-exports.ts";
 import {
@@ -45,6 +46,16 @@ check(
   committed !== null && committed === expected,
   "engine/core/src/spec.rs matches spec.ts",
   "run `bun contracts/spec/gen-rust.ts` and commit the result",
+);
+
+// ---- (a2) generated network spec.h is in sync ------------------------------
+
+const specHPath = new URL("../engine/net/include/pocketjs/net/spec.h", import.meta.url).pathname;
+const committedH = await Bun.file(specHPath).text().catch(() => null);
+check(
+  committedH !== null && committedH === generateC(),
+  "engine/net/include/pocketjs/net/spec.h matches contracts/spec/{net,ws,httpd}.ts",
+  "run `bun contracts/spec/gen-c.ts` and commit the result",
 );
 
 // ---- (c) package.json exports match the subpath registry ---------------------
