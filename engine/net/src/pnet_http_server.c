@@ -269,7 +269,9 @@ static bool request_body_sink(void *vctx, const uint8_t *data, size_t len) {
 static void body_finished(pnet_runtime *rt, pnet_httpd_conn *c) {
   if (c->body_end_pushed) return;
   c->body_end_pushed = true;
-  if (c->req_delivered && !c->req_terminal) push_req_event(rt, "end", c->req, NULL, 0, false, 0);
+  /* `end` is a queue barrier: the tick boundary inserts the request's
+   * `readable` ahead of it so the guest sees the last bytes before EOF. */
+  if (c->req_delivered && !c->req_terminal) push_req_event(rt, "end", c->req, NULL, 0, true, 0);
 }
 
 static bool deliver_request(pnet_runtime *rt, pnet_httpd_conn *c, const pnet_h1_head *head, bool secure) {

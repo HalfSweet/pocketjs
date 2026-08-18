@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 typedef SemaphoreHandle_t drv_mutex_t;

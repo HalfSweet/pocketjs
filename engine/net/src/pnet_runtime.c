@@ -134,16 +134,9 @@ void pnet_set_last_error(pnet_runtime *rt, pnet_sb *sb, const char *code, const 
   pnet_sb_puts(rt, sb, message);
 }
 
-static void *plain_alloc_shim(void *ctx, size_t size) {
-  (void)ctx;
-  (void)size;
-  return NULL;
-}
-
 pnet_runtime *pnet_runtime_create(const pnet_platform *platform, const pnet_driver_ops *driver, void *driver_ctx,
                                   const pnet_runtime_config *config, const char *policy_json) {
   if (!platform || !platform->alloc || !platform->free || !platform->now_ms || !platform->random || !driver) return NULL;
-  (void)plain_alloc_shim;
   pnet_runtime *rt = platform->alloc(platform->ctx, sizeof *rt);
   if (!rt) return NULL;
   memset(rt, 0, sizeof *rt);
@@ -554,6 +547,10 @@ bool pnet_conn_flush(pnet_runtime *rt, pnet_conn *c) {
     }
     pnet_bq_consume(rt, &c->tx, (size_t)w);
   }
+  if (c->write_shutdown && !c->shutdown_done && c->tx.bytes == 0) {
+    c->shutdown_done = true;
+    if (rt->driver.shutdown_write) rt->driver.shutdown_write(rt->driver_ctx, c->sock);
+  }
   pnet_conn_update_interest(rt, c);
   return true;
 }
@@ -584,7 +581,10 @@ void pnet_conn_update_interest(pnet_runtime *rt, pnet_conn *c) {
 void pnet_conn_shutdown_write(pnet_runtime *rt, pnet_conn *c) {
   if (c->state != PNET_CONN_OPEN || c->write_shutdown) return;
   c->write_shutdown = true;
-  if (c->tx.bytes == 0 && rt->driver.shutdown_write) rt->driver.shutdown_write(rt->driver_ctx, c->sock);
+  if (c->tx.bytes == 0) {
+    c->shutdown_done = true;
+    if (rt->driver.shutdown_write) rt->driver.shutdown_write(rt->driver_ctx, c->sock);
+  }
 }
 
 void pnet_conn_close(pnet_runtime *rt, pnet_conn *c) {
@@ -621,8 +621,9 @@ static void dial_try_next(pnet_runtime *rt, pnet_dial *d, pnet_conn *c) {
   if (d->filtered_all) {
     d->error_code = PNET_ERROR_PERMISSION_DENIED;
   } else if (!d->error_code) {
-    d->error_code = pnet_io_error_code(d->cause ? d->cause : PNET_IO_REFUSED);
-    if (strcmp(d->error_code, PNET_ERROR_OTHER) == 0) d->error_code = PNET_ERROR_CONNECT;
+    /* Every failure while establishing the transport is `connect`; the
+     * driver's code (refused/reset/unreachable/no memory) rides in cause. */
+    d->error_code = d->cause == PNET_IO_NOMEM ? PNET_ERROR_RESOURCE_LIMIT : PNET_ERROR_CONNECT;
   }
 }
 
