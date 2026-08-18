@@ -18,8 +18,8 @@ component registry, Bun for the guest bundle.
 
 ## Execution model
 
-The guest runs only inside `frame()` on the owner task
-(docs/pocketjs-network-architecture.md §15). Before every frame the owner
+The guest runs only inside `frame()` on the owner task. Before every
+frame the owner
 task calls `pnet_runtime_begin_tick()`, which freezes the visible event set;
 inside `frame()` the framework service pump calls each module's `poll` once
 and copies bodies out with `readInto`; Promise reactions run in the job

@@ -1,5 +1,5 @@
 /* Immutable network policy: the Build Plan projection the host hands to the
- * runtime at creation (docs/pocketjs-network-spec-v2.md §9). Endpoint tuples
+ * runtime at creation. Endpoint tuples
  * are matched before DNS, each candidate address after DNS, and listen
  * tuples before bind. The guest can never widen it. */
 #include "pnet_internal.h"

@@ -1,5 +1,5 @@
-// NetworkError — the one public error class of the network modules
-// (docs/pocketjs-network-architecture.md §19). Codes are the stable strings
+// NetworkError — the one public error class of the network modules.
+// Codes are the stable strings
 // of contracts/spec/net.ts NET_ERROR, shared by net, ws and httpd; the
 // category is derived from the code, never sent by a host.
 

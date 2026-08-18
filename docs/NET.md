@@ -4,9 +4,8 @@ PocketJS networking is a set of explicitly imported modules over three
 spec-pinned guest boundaries. Applications import from
 `@pocketjs/framework/net/*`; hosts mount `globalThis.net`, `globalThis.ws`
 and `globalThis.httpd`; the cores in between own the wire, the limits and
-the tick-boundary delivery. The complete design is
-[docs/pocketjs-network-architecture.md](./pocketjs-network-architecture.md);
-the boundary catalog is [docs/pocketjs-network-spec-v2.md](./pocketjs-network-spec-v2.md).
+the tick-boundary delivery. The pinned boundaries live in
+`contracts/spec/net.ts`, `contracts/spec/ws.ts` and `contracts/spec/httpd.ts`.
 
 ```ts
 import { fetch, serve, Response } from "@pocketjs/framework/net/http";
@@ -44,8 +43,8 @@ const socket = await connect("ws://broker.example.test/telemetry", {
 | `@pocketjs/framework/net/websocket` `connect` | `globalThis.ws` — `contracts/spec/ws.ts` | `network.websocket.client` (+ `.tls`) | Phase 1C contract, implemented in the C core and sim host |
 
 The capability ids are registered in `contracts/spec/platforms.ts`. **No stock
-target advertises them yet**: a target appends an id only after the
-conformance and resource gate of the architecture §25. Importing a module
+target advertises them yet**: a target appends an id only after it passes the
+conformance and resource gate. Importing a module
 never grants access; the host's immutable policy (connect/listen rules,
 `insecureTransport`, `localNetwork`) is checked again on every command.
 

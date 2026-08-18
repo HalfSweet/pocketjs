@@ -10,7 +10,7 @@
 //! completions; it never sees QuickJS. The `mount` feature installs the six
 //! v2 ops on a `pocket_mod::Guest`.
 //!
-//! Frame contract (docs/pocketjs-network-architecture.md §15): the host calls
+//! Frame contract: the host calls
 //! [`NetCore::begin_tick`] before every guest `frame()`; the framework
 //! service pump then calls `poll` exactly once; completions that arrive
 //! after `begin_tick` wait for the next tick.
@@ -112,7 +112,7 @@ pub trait HttpClientBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Policy (docs/pocketjs-network-spec-v2.md §9)
+// Policy — immutable host build inputs, never passed through an op
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Deserialize)]

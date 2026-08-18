@@ -110,6 +110,5 @@ raise a limit.
 | Browser host | `hosts/web/net.js` |
 | ESP-IDF host | `hosts/esp-idf` (AtomS3R, Tab5) |
 
-The full design is `docs/pocketjs-network-architecture.md`; the boundary
-catalog is `docs/pocketjs-network-spec-v2.md`; the engineering summary is
-`docs/NET.md`.
+The pinned boundaries are `contracts/spec/net.ts`, `contracts/spec/ws.ts`
+and `contracts/spec/httpd.ts`; the engineering summary is `docs/NET.md`.

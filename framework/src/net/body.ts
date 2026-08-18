@@ -1,5 +1,5 @@
-// BodyStream — the single-consumer byte stream every HTTP body uses
-// (docs/pocketjs-network-architecture.md §3.2). Three flavours share one
+// BodyStream — the single-consumer byte stream every HTTP body uses.
+// Three flavours share one
 // public shape: bytes already in JS (request bodies built from NetworkData,
 // Response bodies constructed by the app), bytes that live in a native queue
 // and cross only through the module's `readInto` op (client responses,

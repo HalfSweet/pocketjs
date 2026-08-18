@@ -1,8 +1,8 @@
 // tools/net-peer.ts — the independent HTTP + WebSocket peer for the network
 // hardware smoke (hosts/esp-idf/examples/net-smoke). Runs on the workstation
 // with Bun; the boards reach it over the LAN. It is deliberately a different
-// implementation from the PocketJS core (docs/pocketjs-network-architecture.md
-// §25 asks for an independent peer).
+// implementation from the PocketJS core, so the smoke tests the wire against
+// an independent peer instead of the same code on both ends.
 //
 //   bun tools/net-peer.ts [--http=8790] [--ws=8791] [--host=0.0.0.0]
 //

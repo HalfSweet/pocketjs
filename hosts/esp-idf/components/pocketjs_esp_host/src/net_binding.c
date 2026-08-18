@@ -1,7 +1,7 @@
 /* `globalThis.net` / `ws` / `httpd` on QuickJS-ng: each op takes the runtime
  * lock, forwards to the portable core and marshals the result. Buffers are
  * borrowed for the duration of the synchronous call only; the core copies
- * everything it keeps (docs/pocketjs-network-spec-v2.md §1, §11.1, §12.1). */
+ * everything it keeps. */
 #include "host_internal.h"
 
 #include <string.h>

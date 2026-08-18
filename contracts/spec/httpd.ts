@@ -8,7 +8,7 @@
 // input and error vocabulary (contracts/spec/net.ts NET_ERROR) with the HTTP
 // Client. The guest sees a server handle and request ids, never connections:
 // keep-alive, the pipelining ban, `Expect: 100-continue` and HEAD body
-// discard are core rules. See docs/pocketjs-network-spec-v2.md §12.
+// discard are core rules.
 //
 // Frame contract: identical to net — completions become visible at
 // `begin_tick()`, `poll()` runs once per tick, `respond`/`write` only place

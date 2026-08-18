@@ -1,8 +1,7 @@
 // @pocketjs/framework/net/http — HTTP Client (`fetch`) and HTTP Server
 // (`serve`) over the `globalThis.net` / `globalThis.httpd` boundaries
 // (contracts/spec/net.ts, contracts/spec/httpd.ts). Object shapes follow the
-// WHATWG Fetch snapshot named in docs/pocketjs-network-architecture.md §3.1
-// with the PocketJS deviations listed there: body locking, repeat
+// WHATWG Fetch standard, with these PocketJS deviations: body locking, repeat
 // consumption and detached input fail with a stable NetworkError; every
 // network, permission, timeout and resource failure is a NetworkError too.
 //
