@@ -55,11 +55,35 @@ never grants access; the host's immutable policy (connect/listen rules,
 | --- | --- | --- |
 | SDK | `framework/src/net/*.ts` | Fetch-shaped objects, body locking, `BodyStream` over `readInto`, the per-module guest binding (one `poll` per tick from the service pump), Promise settlement, `NetworkError` |
 | Spec | `contracts/spec/{net,ws,httpd}.ts` | op codes (append-only), event shapes, metadata JSON, portable ceilings, the shared error vocabulary; generated mirrors `engine/core/src/spec.rs` and `engine/net/include/pocketjs/net/spec.h` (drift-guarded by `tests/contract.ts`) |
-| C core | `engine/net` | HTTP/1.1 client and server, RFC 6455 client, strict framing, bounded queues, policy, tick queues; a `pnet_driver_ops` socket driver is the only host interface (`drivers/posix` covers BSD sockets and lwIP) |
+| C core | `engine/net` | HTTP/1.1 client and server, RFC 6455 client, strict framing, bounded queues, policy, tick queues, and the TLS handshake state machine; a `pnet_driver_ops` socket driver (`drivers/posix`) and an optional `pnet_tls_ops` TLS provider (`drivers/openssl`, ESP-TLS) are the only host interfaces |
 | Rust core | `engine/crates/pocket-net` | The HTTP Client core for Rust hosts over an `HttpClientBackend`; `mount` installs the six v2 ops through rquickjs |
 | Deterministic hosts | `hosts/sim/{net,ws,httpd}.ts` | fixture routes/peers/injected requests with virtual-tick visibility for the SDK tests |
 | Browser host | `hosts/web/net.js` | browser `fetch` behind the v2 ops (Browser profile: no redirect following, TLS by the browser) |
 | ESP-IDF host | `hosts/esp-idf` | QuickJS-ng owner task, network task, bindings, AtomS3R/Tab5 bring-up, the hardware smoke |
+
+## TLS
+
+TLS is an add-on capability per protocol role (`network.http.client.tls`,
+`network.websocket.client.tls`, …). A host advertises the `"tls"` feature —
+and `https:`/`wss:` become usable — only when it supplies a **TlsProvider**
+(`pnet_tls_ops`) to `pnet_runtime_create_tls`; there is never a plaintext
+fallback. The core owns the connect deadline, cancellation and the policy;
+the provider owns host trust, entropy and the wire. `serverName` equals the
+authorized hostname and is both the SNI sent and the DNS-ID/IP-ID the
+certificate must match (TLS 1.2 minimum, renegotiation and 0-RTT off).
+Before any I/O, a verifying connection fails closed with
+`tls_clock_untrusted` when the platform reports the wall clock untrusted
+(the ESP host requires an SNTP/RTC sync first). Handshake failures map to the
+four stable codes `tls_certificate_invalid`, `tls_hostname_mismatch`,
+`tls_handshake_failed` and `tls_clock_untrusted`.
+
+Providers in the tree: `engine/net/drivers/openssl` (the reference
+`NativeTlsProvider` for POSIX, and the peer for the conformance suite) and
+`hosts/esp-idf/components/pocketjs_net_esptls` (ESP-TLS + the IDF certificate
+bundle). The desktop conformance harness (`engine/net/test/tls_test.c`)
+covers a valid chain, unknown CA, expired cert, hostname mismatch, an
+untrusted clock, the development-insecure refusal and a WSS echo against an
+in-process OpenSSL PKI.
 
 ## Delivery
 
@@ -118,6 +142,6 @@ model. The ESP-IDF smoke firmware uses it.
 ## Testing
 
 - `bun test tests/net.test.ts tests/net-httpd.test.ts tests/net-websocket.test.ts tests/net-web.test.js` — SDK against the deterministic hosts.
-- `cmake -S engine/net -B engine/net/build && cmake --build engine/net/build && ctest --test-dir engine/net/build` — C core unit tests and the socket harness (ASan/UBSan).
+- `cmake -S engine/net -B engine/net/build && cmake --build engine/net/build && ctest --test-dir engine/net/build` — C core unit tests, the socket harness, and (when OpenSSL is present) the TLS conformance suite, all under ASan/UBSan.
 - `cargo test -p pocket-net --manifest-path engine/Cargo.toml` — Rust core.
 - `bun tools/net-peer.ts` + `hosts/esp-idf/examples/net-smoke` — the hardware gate against an independent peer and board-to-board.

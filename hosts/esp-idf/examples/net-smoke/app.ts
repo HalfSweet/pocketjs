@@ -25,6 +25,8 @@ interface SmokeConfig {
   macPort: number;
   macWsPort: number;
   ping: boolean;
+  tls: boolean;
+  tlsHost: string;
 }
 
 const cfg: SmokeConfig = (globalThis as { __pocketSmoke?: SmokeConfig }).__pocketSmoke ?? {
@@ -36,6 +38,8 @@ const cfg: SmokeConfig = (globalThis as { __pocketSmoke?: SmokeConfig }).__pocke
   macPort: 8790,
   macWsPort: 8791,
   ping: true,
+  tls: false,
+  tlsHost: "example.com",
 };
 
 let passed = 0;
@@ -307,6 +311,34 @@ function schedulePing(): void {
   });
 }
 
+// --- TLS (base .tls: host trust, SNI, hostname verification) --------------------
+
+async function tlsSuite(): Promise<void> {
+  const limits = getNetworkLimits();
+  ok("tls advertised", limits.httpClient?.features.includes("tls") === true, JSON.stringify(limits.httpClient?.features));
+  // positive control: a real public HTTPS host with a valid chain
+  try {
+    const r = await fetch(`https://${cfg.tlsHost}/`, { timeouts: { connectMs: 15000, headersMs: 15000 } });
+    const text = await r.text();
+    ok(`https ${cfg.tlsHost}`, r.status >= 200 && r.status < 500 && text.length >= 0, `${r.status} ${text.length} bytes`);
+  } catch (error) {
+    ok(`https ${cfg.tlsHost}`, false, describeError(error));
+  }
+  const expectTlsError = async (name: string, url: string, code: string): Promise<void> => {
+    try {
+      const r = await fetch(url, { timeouts: { connectMs: 15000, headersMs: 15000 } });
+      await r.text();
+      ok(name, false, `resolved ${r.status}`);
+    } catch (error) {
+      ok(name, error instanceof NetworkError && (error.code === code || error.category === "tls"), describeError(error));
+    }
+  };
+  await expectTlsError("https expired cert", "https://expired.badssl.com/", "tls_certificate_invalid");
+  await expectTlsError("https wrong host", "https://wrong.host.badssl.com/", "tls_hostname_mismatch");
+  await expectTlsError("https self-signed", "https://self-signed.badssl.com/", "tls_certificate_invalid");
+  await expectTlsError("https untrusted root", "https://untrusted-root.badssl.com/", "tls_certificate_invalid");
+}
+
 // --- main -----------------------------------------------------------------------
 
 mountHeadless();
@@ -316,6 +348,7 @@ async function main(): Promise<void> {
   const limits = getNetworkLimits();
   ok("limits mounted", !!limits.httpClient && !!limits.httpServer && !!limits.websocketClient, `httpClient.maxInflight=${limits.httpClient?.maxInflight}`);
   await startServer();
+  if (cfg.tls) await tlsSuite();
   if (cfg.macHost) await macSuite();
   if (cfg.peerHost) {
     // Give the peer time to boot when both boards start together.

@@ -41,6 +41,10 @@ esp_err_t pocketjs_board_wifi_connect(const pocketjs_board_wifi_config *cfg, esp
 /** Current station IPv4 address as text ("0.0.0.0" when down). */
 void pocketjs_board_ip_text(char *out, size_t cap);
 
+/** Sync the wall clock over SNTP (needed before TLS certificate validation).
+ * Returns ESP_OK once the time is set, ESP_ERR_TIMEOUT otherwise. */
+esp_err_t pocketjs_board_sync_time(uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

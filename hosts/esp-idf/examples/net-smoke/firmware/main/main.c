@@ -44,6 +44,18 @@ static void build_policy(void) {
     used += snprintf(rules + used, sizeof rules - used, "{\"protocol\":\"http\",\"host\":\"%s\",\"port\":%d},",
                      CONFIG_SMOKE_PEER_HOST, CONFIG_SMOKE_PEER_PORT);
   }
+#if CONFIG_SMOKE_ENABLE_TLS
+  /* Public HTTPS endpoints for the base-TLS gate: one positive control plus
+   * badssl.com's negative certificates (expired, wrong host, self-signed,
+   * untrusted root). host trust comes from the IDF certificate bundle. */
+  used += snprintf(rules + used, sizeof rules - used,
+                   "{\"protocol\":\"https\",\"host\":\"%s\",\"port\":443},"
+                   "{\"protocol\":\"https\",\"host\":\"expired.badssl.com\",\"port\":443},"
+                   "{\"protocol\":\"https\",\"host\":\"wrong.host.badssl.com\",\"port\":443},"
+                   "{\"protocol\":\"https\",\"host\":\"self-signed.badssl.com\",\"port\":443},"
+                   "{\"protocol\":\"https\",\"host\":\"untrusted-root.badssl.com\",\"port\":443},",
+                   CONFIG_SMOKE_TLS_HOST);
+#endif
   if (used > 0 && rules[used - 1] == ',') rules[used - 1] = 0;
   snprintf(s_policy, sizeof s_policy,
            "{\"connect\":[%s],\"listen\":[{\"protocol\":\"http\",\"address\":\"0.0.0.0\",\"port\":%d}],"
@@ -56,9 +68,14 @@ static void install_smoke_config(JSContext *ctx, void *user) {
   char json[512];
   snprintf(json, sizeof json,
            "({\"board\":\"%s\",\"selfIp\":\"%s\",\"peerHost\":\"%s\",\"peerPort\":%d,\"macHost\":\"%s\",\"macPort\":%d,"
-           "\"macWsPort\":%d,\"ping\":%s})",
+           "\"macWsPort\":%d,\"ping\":%s,\"tls\":%s,\"tlsHost\":\"%s\"})",
            CONFIG_SMOKE_BOARD_NAME, s_self_ip, CONFIG_SMOKE_PEER_HOST, CONFIG_SMOKE_PEER_PORT, CONFIG_SMOKE_MAC_HOST,
-           CONFIG_SMOKE_MAC_HTTP_PORT, CONFIG_SMOKE_MAC_WS_PORT, CONFIG_SMOKE_PEER_PING ? "true" : "false");
+           CONFIG_SMOKE_MAC_HTTP_PORT, CONFIG_SMOKE_MAC_WS_PORT, CONFIG_SMOKE_PEER_PING ? "true" : "false",
+#if CONFIG_SMOKE_ENABLE_TLS
+           "true", CONFIG_SMOKE_TLS_HOST);
+#else
+           "false", "");
+#endif
   JSValue value = JS_Eval(ctx, json, strlen(json), "smoke-config", JS_EVAL_TYPE_GLOBAL);
   JSValue global = JS_GetGlobalObject(ctx);
   JS_SetPropertyStr(ctx, global, "__pocketSmoke", value);
@@ -93,6 +110,9 @@ void app_main(void) {
   }
   pocketjs_board_ip_text(s_self_ip, sizeof s_self_ip);
   ESP_LOGI(TAG, "station ip %s, serving http://%s:%d/", s_self_ip, s_self_ip, CONFIG_SMOKE_SERVE_PORT);
+#if CONFIG_SMOKE_ENABLE_TLS
+  if (pocketjs_board_sync_time(20000) != ESP_OK) ESP_LOGW(TAG, "TLS certificate validity may fail without a synced clock");
+#endif
   build_policy();
   ESP_LOGI(TAG, "policy %s", s_policy);
 
@@ -100,6 +120,9 @@ void app_main(void) {
   pocketjs_esp_host_config_defaults(&cfg);
   cfg.tick_hz = CONFIG_SMOKE_TICK_HZ;
   cfg.network_policy_json = s_policy;
+#if CONFIG_SMOKE_ENABLE_TLS
+  cfg.network_tls = true;
+#endif
   cfg.guest_in_psram = true;
   cfg.guest_memory_limit = CONFIG_SMOKE_GUEST_MEMORY_KB * 1024;
   cfg.guest_task_stack = CONFIG_SMOKE_GUEST_STACK_KB * 1024;

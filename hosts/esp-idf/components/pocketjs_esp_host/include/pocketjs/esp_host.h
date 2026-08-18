@@ -45,6 +45,11 @@ typedef struct pocketjs_esp_host_config {
   int net_task_core;
   /** Immutable network policy JSON; NULL mounts no network module. */
   const char *network_policy_json;
+  /** Enable TLS (https:/wss:) through the ESP-TLS provider with the IDF
+   * certificate bundle. The wall clock must be trusted (SNTP/RTC) for
+   * certificate validity; until then verifying connections fail closed with
+   * tls_clock_untrusted. */
+  bool network_tls;
   /** Which roles this host admits: `globalThis.net` is always mounted with
    * a policy; `ws` and `httpd` only when set (default true for both). A
    * product host mounts exactly the capabilities its target advertises. */
