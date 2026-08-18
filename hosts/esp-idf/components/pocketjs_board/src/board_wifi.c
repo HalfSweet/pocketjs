@@ -10,8 +10,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include <time.h>
 
 static const char *TAG = "board";
 
@@ -79,6 +82,25 @@ esp_err_t pocketjs_board_wifi_connect(const pocketjs_board_wifi_config *cfg, esp
     return ESP_ERR_TIMEOUT;
   }
   if (ip) *ip = s_ip;
+  return ESP_OK;
+}
+
+esp_err_t pocketjs_board_sync_time(uint32_t timeout_ms) {
+  static bool started;
+  if (!started) {
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    ESP_ERROR_CHECK(esp_netif_sntp_init(&cfg));
+    started = true;
+  }
+  if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(timeout_ms ? timeout_ms : 15000)) != ESP_OK) {
+    ESP_LOGW(TAG, "SNTP did not sync in time");
+    return ESP_ERR_TIMEOUT;
+  }
+  time_t now = time(NULL);
+  struct tm tm;
+  localtime_r(&now, &tm);
+  ESP_LOGI(TAG, "time synced: %04d-%02d-%02d %02d:%02d:%02d UTC", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec);
   return ESP_OK;
 }
 

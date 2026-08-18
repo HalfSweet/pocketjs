@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include <time.h>
 
 static const char *TAG = "pocketjs";
 
@@ -127,6 +128,13 @@ static void plat_free(void *ctx, void *ptr, size_t size) {
 static void plat_random(void *ctx, uint8_t *out, size_t len) {
   (void)ctx;
   esp_fill_random(out, len);
+}
+
+static bool plat_clock_trusted(void *ctx) {
+  (void)ctx;
+  /* time() reads the system clock, set by SNTP or a persisted RTC. Before it
+   * is synced it sits near the epoch; require a plausible recent year. */
+  return time(NULL) > 1704067200; /* 2024-01-01 */
 }
 
 static void plat_log(void *ctx, pnet_log_level level, const char *msg) {
@@ -351,7 +359,7 @@ esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const cha
   if (cfg->network_policy_json) {
     host->net_lock = xSemaphoreCreateMutex();
     host->driver = pnet_posix_driver_create(cfg->network_max_sockets > 0 ? cfg->network_max_sockets : 12);
-    pnet_platform plat = {host, plat_now_ms, plat_alloc, plat_free, plat_random, plat_log};
+    pnet_platform plat = {host, plat_now_ms, plat_alloc, plat_free, plat_random, plat_log, plat_clock_trusted};
     pnet_runtime_config ncfg;
     if (cfg->network_config) ncfg = *cfg->network_config;
     else {
@@ -382,10 +390,19 @@ esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const cha
       ncfg.max_heap_bytes = 1024 * 1024;
       ncfg.io_chunk_bytes = 1460;
     }
-    host->net = pnet_runtime_create(&plat, pnet_posix_driver_ops(), host->driver, &ncfg, cfg->network_policy_json);
-    if (!host->net || !host->driver || !host->net_lock) {
+    if (cfg->network_tls) {
+      host->tls_provider = pnet_esp_tls_create(pnet_posix_driver_ops(), host->driver);
+    }
+    if (cfg->network_tls && host->tls_provider) {
+      host->net = pnet_runtime_create_tls(&plat, pnet_posix_driver_ops(), host->driver, pnet_esp_tls_ops(),
+                                          pnet_esp_tls_ctx(host->tls_provider), &ncfg, cfg->network_policy_json);
+    } else {
+      host->net = pnet_runtime_create(&plat, pnet_posix_driver_ops(), host->driver, &ncfg, cfg->network_policy_json);
+    }
+    if (!host->net || !host->driver || !host->net_lock || (cfg->network_tls && !host->tls_provider)) {
       ESP_LOGE(TAG, "network runtime creation failed (policy?)");
       if (host->net) pnet_runtime_destroy(host->net);
+      if (host->tls_provider) pnet_esp_tls_destroy(host->tls_provider);
       if (host->driver) pnet_posix_driver_destroy(host->driver);
       if (host->net_lock) vSemaphoreDelete(host->net_lock);
       free(host);
@@ -421,6 +438,7 @@ void pocketjs_esp_host_stop(pocketjs_esp_host_t *host) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   if (host->net) pnet_runtime_destroy(host->net);
+  if (host->tls_provider) pnet_esp_tls_destroy(host->tls_provider);
   if (host->driver) pnet_posix_driver_destroy(host->driver);
   if (host->net_lock) vSemaphoreDelete(host->net_lock);
   free(host);

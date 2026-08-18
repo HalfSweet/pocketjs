@@ -52,4 +52,12 @@ menu "PocketJS network smoke"
         int "Guest owner task stack (KiB)"
         default 32
 
+    config SMOKE_ENABLE_TLS
+        bool "Run the HTTPS/TLS suite against public hosts (needs internet + SNTP)"
+        default n
+
+    config SMOKE_TLS_HOST
+        string "Public HTTPS host for the positive TLS check"
+        default "example.com"
+
 endmenu

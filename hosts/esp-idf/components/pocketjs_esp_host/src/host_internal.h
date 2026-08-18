@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "pnet_posix_driver.h"
 #include "pocketjs/esp_host.h"
+#include "pocketjs/net/esp_tls_provider.h"
 
 struct pocketjs_esp_host {
   pocketjs_esp_host_config cfg;
@@ -22,6 +23,7 @@ struct pocketjs_esp_host {
   /* network */
   pnet_runtime *net;
   pnet_posix_driver *driver;
+  pnet_esp_tls *tls_provider;
   SemaphoreHandle_t net_lock;
   TaskHandle_t net_task;
   volatile bool net_dirty; /* an op ran during this frame: wake the network task */

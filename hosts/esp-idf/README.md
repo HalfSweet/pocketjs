@@ -9,7 +9,8 @@ The renderer side for ESP32-P4 lives in `hosts/esp32p4` (PPA backend).
 |---|---|
 | `components/pocketjs_net_core` | `engine/net` (HTTP client, HTTP server, WebSocket client cores) plus the BSD-socket driver compiled against lwIP |
 | `components/pocketjs_esp_host` | QuickJS-ng guest on one owner task, fixed-rate `frame()` ticks with `begin_tick` before each, `globalThis.net` / `ws` / `httpd` bindings, a network task that services sockets under the runtime lock |
-| `components/pocketjs_board` | Wi-Fi station + DHCP for the AtomS3R (native Wi-Fi) and the Tab5 (ESP32-P4 rev 1.3 + ESP32-C6 over SDIO via esp_hosted 2.12.12 / esp_wifi_remote 1.6.4, WLAN rail on the PI4IOE5V6408 @0x44 bit 0) |
+| `components/pocketjs_net_esptls` | ESP-TLS TlsProvider (ESP-TLS + the IDF certificate bundle) for `https:`/`wss:` |
+| `components/pocketjs_board` | Wi-Fi station + DHCP + SNTP for the AtomS3R (native Wi-Fi) and the Tab5 (ESP32-P4 rev 1.3 + ESP32-C6 over SDIO via esp_hosted 2.12.12 / esp_wifi_remote 1.6.4, WLAN rail on the PI4IOE5V6408 @0x44 bit 0) |
 | `examples/net-smoke` | Headless smoke app (`app.ts`) and the firmware template used by the hardware gate |
 
 Toolchain: ESP-IDF v6.0.2 (`7101770dc6db`), QuickJS-ng 0.14.0 from the
@@ -34,8 +35,17 @@ board-to-board, both boards serving on :8080:
 
 | Board | Result |
 |---|---|
-| AtomS3R (ESP32-S3-PICO-1-N8R8) | 20/20: GET/POST/JSON/chunked/404, redirect follow+manual, 200 KB body through an 8 KiB queue at ~350 KiB/s, aggregate limit, headers timeout, permission_denied, connect refused, WebSocket echo (text/binary/ping/pong/close), peer board GET/POST/JSON/stream/404, continuous pings |
-| Tab5 (ESP32-P4 rev 1.3 + C6) | 20/20, same suite, ~370 KiB/s |
+| AtomS3R (ESP32-S3-PICO-1-N8R8) | 20/20 plaintext + 6 TLS = 26/26: GET/POST/JSON/chunked/404, redirect follow+manual, 200 KB body through an 8 KiB queue at ~350 KiB/s, aggregate limit, headers timeout, permission_denied, connect refused, WebSocket echo (text/binary/ping/pong/close), peer board GET/POST/JSON/stream/404, continuous pings |
+| Tab5 (ESP32-P4 rev 1.3 + C6) | 26/26, same suite, ~370 KiB/s |
+
+The TLS block (Phase 1B, enable `CONFIG_SMOKE_ENABLE_TLS=y`) needs internet and
+an SNTP sync: HTTPS/1.1 to a public host with a valid chain from the IDF
+certificate bundle, plus badssl.com's expired / wrong-host / self-signed /
+untrusted-root endpoints, all failing closed. Hostname mismatch reports
+`tls_hostname_mismatch`; the other certificate faults report
+`tls_certificate_invalid` or `tls_handshake_failed` (ESP-TLS exposes the
+Mbed TLS verify flags inconsistently on the async path) — the precise
+per-fault codes are proven in the desktop OpenSSL conformance suite.
 
 Steady state after 60 s: guest heap ≈357 KB (high water ≈670 KB during
 bundle evaluation), core heap ≈4 KB, one socket per live connection, no
