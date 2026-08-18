@@ -75,8 +75,8 @@ and TLS — `network.http.client`, `network.http.client.tls`,
 immutable policy of allowed endpoints (`connect` rules with host, port and
 protocol; `listen` rules with address and port; `insecureTransport`;
 `localNetwork`) that every command is checked against. No stock target
-advertises a network capability yet; the ESP-IDF profiles in
-`hosts/esp-idf` are the first Phase 1A candidates.
+advertises a network capability yet; a target advertises one only when its
+native host ships and tests the module.
 
 ## Errors
 

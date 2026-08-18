@@ -153,9 +153,9 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // ids are the TLS roles a host admits separately. Registered ahead of any
   // stock TARGET advertising them: the sim hosts, the browser dev host and
   // the reference cores (engine/net, engine/crates/pocket-net) implement and
-  // test the contracts; a device target appends an id only after its
-  // conformance and resource gate — the ESP-IDF profiles in
-  // hosts/esp-idf are Phase 1A candidates and advertise nothing yet.
+  // test the contracts, so apps can already declare the requirement and fail
+  // admission where the modules are absent. A device target appends an id to
+  // its profile only when its native host ships and tests the module.
   "network.http.client",
   "network.http.client.tls",
   "network.http.server",

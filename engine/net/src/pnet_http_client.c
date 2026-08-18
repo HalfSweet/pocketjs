@@ -345,7 +345,7 @@ static bool maybe_redirect(pnet_runtime *rt, pnet_http_req *r, const pnet_h1_hea
   pnet_conn_close(rt, &r->conn);
   pnet_conn_init(&r->conn);
   r->rx_len = 0;
-  r->insecure_tls = r->insecure_tls; /* TLS policy carries over (Phase 1B) */
+  r->insecure_tls = r->insecure_tls; /* TLS policy carries over across the hop */
   r->state = RQ_DIALING;
   r->phase_deadline = rt->now + r->connect_ms;
   bool secure = strcmp(r->url.scheme, "https") == 0;

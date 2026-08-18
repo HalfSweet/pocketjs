@@ -38,13 +38,13 @@ const socket = await connect("ws://broker.example.test/telemetry", {
 | Import | Boundary | Capability | Status |
 | --- | --- | --- | --- |
 | `@pocketjs/framework/net` | none (support module: types, `AbortController`, `AbortSignal`, `URL`, `NetworkError`, `getNetworkLimits`) | — | delivered |
-| `@pocketjs/framework/net/http` `fetch`, `Headers`, `Request`, `Response` | `globalThis.net` — `contracts/spec/net.ts` | `network.http.client` (+ `.tls`) | Phase 1A: plaintext, admitted per host |
+| `@pocketjs/framework/net/http` `fetch`, `Headers`, `Request`, `Response` | `globalThis.net` — `contracts/spec/net.ts` | `network.http.client` (+ `.tls`) | plaintext + TLS; C/Rust cores, sim/web/ESP-IDF hosts |
 | `@pocketjs/framework/net/http` `serve` | `globalThis.httpd` — `contracts/spec/httpd.ts` | `network.http.server` (+ `.tls`) | staged contract, implemented in the C core and sim host |
-| `@pocketjs/framework/net/websocket` `connect` | `globalThis.ws` — `contracts/spec/ws.ts` | `network.websocket.client` (+ `.tls`) | Phase 1C contract, implemented in the C core and sim host |
+| `@pocketjs/framework/net/websocket` `connect` | `globalThis.ws` — `contracts/spec/ws.ts` | `network.websocket.client` (+ `.tls`) | implemented in the C core and the sim and ESP-IDF hosts |
 
 The capability ids are registered in `contracts/spec/platforms.ts`. **No stock
-target advertises them yet**: a target appends an id only after it passes the
-conformance and resource gate. Importing a module
+target advertises them yet**: a target appends an id only when its native host
+ships and tests the module. Importing a module
 never grants access; the host's immutable policy (connect/listen rules,
 `insecureTransport`, `localNetwork`) is checked again on every command.
 

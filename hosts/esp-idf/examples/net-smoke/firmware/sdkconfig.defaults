@@ -12,7 +12,7 @@ CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_TCP_MSL=5000
 CONFIG_LWIP_DNS_MAX_HOST_IP=4
-# No TLS in Phase 1A: keep mbedTLS out of the network core's path (Wi-Fi WPA2 still uses it)
+# TLS off by default: keep mbedTLS out of the network core's path (Wi-Fi WPA2 still uses it)
 CONFIG_ESP_TLS_INSECURE=n
 # Log the guest at info level
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

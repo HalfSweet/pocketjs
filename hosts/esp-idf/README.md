@@ -28,7 +28,7 @@ runs `pnet_runtime_service()` under the same mutex the bindings take, waits
 in `select()` with the core's next deadline, and is woken through a
 loopback UDP socket whenever the guest issued an op.
 
-## Hardware gate (Phase 1A, plaintext)
+## Hardware smoke (plaintext)
 
 `examples/net-smoke` against `bun tools/net-peer.ts` on the workstation and
 board-to-board, both boards serving on :8080:
@@ -38,7 +38,7 @@ board-to-board, both boards serving on :8080:
 | AtomS3R (ESP32-S3-PICO-1-N8R8) | 20/20 plaintext + 6 TLS = 26/26: GET/POST/JSON/chunked/404, redirect follow+manual, 200 KB body through an 8 KiB queue at ~350 KiB/s, aggregate limit, headers timeout, permission_denied, connect refused, WebSocket echo (text/binary/ping/pong/close), peer board GET/POST/JSON/stream/404, continuous pings |
 | Tab5 (ESP32-P4 rev 1.3 + C6) | 26/26, same suite, ~370 KiB/s |
 
-The TLS block (Phase 1B, enable `CONFIG_SMOKE_ENABLE_TLS=y`) needs internet and
+The TLS block (enable `CONFIG_SMOKE_ENABLE_TLS=y`) needs internet and
 an SNTP sync: HTTPS/1.1 to a public host with a valid chain from the IDF
 certificate bundle, plus badssl.com's expired / wrong-host / self-signed /
 untrusted-root endpoints, all failing closed. Hostname mismatch reports
