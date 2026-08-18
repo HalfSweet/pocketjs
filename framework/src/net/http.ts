@@ -28,7 +28,6 @@ import {
   type NetStartMeta,
 } from "../../../contracts/spec/net.ts";
 import {
-  HTTPD_DEFAULT_REQUEST_QUEUE_BYTES,
   HTTPD_MAX_BACKLOG,
   HTTPD_MAX_CONNECTIONS,
   HTTPD_MAX_INFLIGHT,
@@ -1440,7 +1439,6 @@ export function serve(options: HttpServeOptions): Promise<HttpServer> {
         if (v !== undefined) meta.timeouts[key] = integerOption(v, `timeouts.${key}`, 1, HTTPD_MAX_TIMEOUT_MS, "serve", PROTOCOL);
       }
     }
-    void HTTPD_DEFAULT_REQUEST_QUEUE_BYTES;
     handle = ops.listen(JSON.stringify(meta));
     if (!Number.isInteger(handle) || handle < 0) throw errorFromLastError(ops.lastError(), "serve", PROTOCOL);
   } catch (error) {
