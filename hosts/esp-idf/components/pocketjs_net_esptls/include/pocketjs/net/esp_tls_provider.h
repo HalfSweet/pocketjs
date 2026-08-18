@@ -1,4 +1,4 @@
-/* PocketJS network core — ESP-TLS TlsProvider (ESP-IDF Phase 1B).
+/* PocketJS network core — ESP-TLS TlsProvider (ESP-IDF).
  *
  * A `pnet_tls_ops` over ESP-TLS + its default Mbed TLS backend, layered on the
  * lwIP sockets the driver already connected. Uses the ESP-IDF certificate
