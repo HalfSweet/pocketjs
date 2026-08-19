@@ -45,6 +45,9 @@ enable_testing()
 add_executable(pnet_unit_test test/unit_test.c)
 target_include_directories(pnet_unit_test PRIVATE src)
 target_link_libraries(pnet_unit_test PRIVATE pocketjs_net)
+# The shared conformance vectors (TypeScript reference, C core, Rust core).
+get_filename_component(PNET_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+target_compile_definitions(pnet_unit_test PRIVATE "PNET_VECTORS_DIR=\"${PNET_REPO_ROOT}/contracts/spec/vectors\"")
 add_test(NAME unit COMMAND pnet_unit_test)
 
 add_executable(pnet_host_test test/host_test.c)

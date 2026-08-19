@@ -148,9 +148,16 @@ static int parse_value(jparser *p) {
   if (++p->depth > 32) return -1;
   int result = -1;
   char c = p->s[p->pos];
-  if (c == '{') result = parse_object(p);
-  else if (c == '[') result = parse_array(p);
-  else if (c == '"') {
+  if (c == '{' || c == '[') {
+    /* Containers record their source span so a caller can hand a
+     * sub-document (a nested policy, a vector) to another parser verbatim. */
+    size_t start = p->pos;
+    result = c == '{' ? parse_object(p) : parse_array(p);
+    if (result >= 0) {
+      p->doc->nodes[result].raw = p->s + start;
+      p->doc->nodes[result].raw_len = p->pos - start;
+    }
+  } else if (c == '"') {
     const char *raw;
     size_t raw_len;
     if (parse_string_raw(p, &raw, &raw_len)) {

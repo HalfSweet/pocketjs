@@ -463,6 +463,9 @@ bool pnet_parse_ipv4(const char *s, size_t len, uint8_t out[4]) {
       digits++;
     }
     if (digits == 0 || digits > 3) return false;
+    /* No leading zeros: "010" is octal to some resolvers and decimal to
+     * others, so it is not a literal here (nor a valid hostname). */
+    if (digits > 1 && s[i - digits] == '0') return false;
     out[part] = (uint8_t)v;
     if (part < 3) {
       if (i >= len || s[i] != '.') return false;
@@ -591,6 +594,35 @@ void pnet_format_addr(const pnet_addr *addr, char *out, size_t cap) {
   }
   if (o < cap) out[o] = 0;
   else out[cap - 1] = 0;
+}
+
+bool pnet_hostname_valid(const char *s, size_t len) {
+  /* Lowercase ASCII DNS name: labels of [a-z0-9-], 1..63 bytes, not starting
+   * or ending with '-', whole name <= 253 bytes. Mirrors
+   * normalizeNetworkHostname() in contracts/spec/network-policy.ts. */
+  if (len == 0 || len > 253) return false;
+  /* A name whose last label is all digits is a (malformed) IPv4 literal,
+   * never a DNS name (WHATWG URL "ends in a number"). */
+  size_t last = len;
+  while (last > 0 && s[last - 1] != '.') last--;
+  bool numeric = last < len;
+  for (size_t i = last; i < len; i++)
+    if (s[i] < '0' || s[i] > '9') numeric = false;
+  if (numeric) return false;
+  size_t label = 0;
+  for (size_t i = 0; i <= len; i++) {
+    if (i == len || s[i] == '.') {
+      if (label == 0 || label > 63) return false;
+      if (s[i - 1] == '-' || s[i - label] == '-') return false;
+      label = 0;
+      continue;
+    }
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    if (!ok) return false;
+    label++;
+  }
+  return true;
 }
 
 bool pnet_addr_is_multicast(const pnet_addr *addr) {

@@ -270,6 +270,161 @@ static void test_policy(pnet_runtime *rt) {
   CHECK(make_runtime("not json") == NULL);
 }
 
+/* --- shared policy vectors -------------------------------------------------- */
+
+/* contracts/spec/vectors/network-policy.json: the same documents and
+ * decisions the TypeScript reference and the Rust core run. The path comes
+ * from CMake (PNET_VECTORS_DIR). */
+#ifndef PNET_VECTORS_DIR
+#define PNET_VECTORS_DIR "../../contracts/spec/vectors"
+#endif
+
+static char *read_file(const char *path, size_t *len) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { fclose(f); return NULL; }
+  if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+  fclose(f);
+  buf[n] = 0;
+  *len = (size_t)n;
+  return buf;
+}
+
+static pnet_runtime *vector_runtime(const pnet_jdoc *doc, int policies, const char *name) {
+  int node = pnet_json_get(doc, policies, name);
+  if (node < 0) return NULL;
+  size_t len = doc->nodes[node].raw_len;
+  char *text = malloc(len + 1);
+  memcpy(text, doc->nodes[node].raw, len);
+  text[len] = 0;
+  pnet_runtime *rt = make_runtime(text);
+  free(text);
+  return rt;
+}
+
+static void test_policy_vectors(void) {
+  size_t len = 0;
+  char *text = read_file(PNET_VECTORS_DIR "/network-policy.json", &len);
+  CHECK(text != NULL);
+  if (!text) return;
+  enum { CAP = 4096 };
+  pnet_jnode *nodes = malloc(sizeof(pnet_jnode) * CAP);
+  pnet_jdoc doc;
+  int root = pnet_json_parse(&doc, nodes, CAP, text, len);
+  CHECK(root >= 0);
+  if (root < 0) { free(nodes); free(text); return; }
+  int policies = pnet_json_get(&doc, root, "policies");
+  CHECK(policies >= 0);
+
+  /* Every named policy parses. */
+  for (int k = doc.nodes[policies].first_child; k >= 0; k = doc.nodes[k].next) {
+    char name[64];
+    size_t nl;
+    pnet_json_string(&doc, k, name, sizeof name, &nl);
+    pnet_runtime *rt = vector_runtime(&doc, policies, name);
+    if (!rt) fprintf(stderr, "vector policy %s did not parse\n", name);
+    CHECK(rt != NULL);
+    if (rt) pnet_runtime_destroy(rt);
+  }
+
+  /* Invalid documents are refused. */
+  int invalid = pnet_json_get(&doc, root, "invalid");
+  for (int e = pnet_json_first(&doc, invalid); e >= 0; e = pnet_json_next(&doc, e)) {
+    char name[96];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "name"), name, sizeof name, NULL);
+    int pol = pnet_json_get(&doc, e, "policy");
+    size_t plen = doc.nodes[pol].raw_len;
+    char *ptext = malloc(plen + 1);
+    memcpy(ptext, doc.nodes[pol].raw, plen);
+    ptext[plen] = 0;
+    pnet_runtime *rt = make_runtime(ptext);
+    if (rt) fprintf(stderr, "invalid vector accepted: %s\n", name);
+    CHECK(rt == NULL);
+    if (rt) pnet_runtime_destroy(rt);
+    free(ptext);
+  }
+
+  /* Connect decisions. */
+  int connect = pnet_json_get(&doc, root, "connect");
+  for (int e = pnet_json_first(&doc, connect); e >= 0; e = pnet_json_next(&doc, e)) {
+    char pname[64], proto[8], host[256];
+    int64_t port;
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "policy"), pname, sizeof pname, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "protocol"), proto, sizeof proto, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "host"), host, sizeof host, NULL);
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "port"), &port);
+    int allowed_node = pnet_json_get(&doc, e, "allowed");
+    bool allowed = doc.nodes[allowed_node].truthy;
+    pnet_runtime *rt = vector_runtime(&doc, policies, pname);
+    CHECK(rt != NULL);
+    if (!rt) continue;
+    /* The core sees URL hosts the way pnet_url hands them over: lowercase,
+     * brackets stripped, trailing dot removed. */
+    char norm[256];
+    size_t hl = strlen(host);
+    const char *h = host;
+    if (hl >= 2 && host[0] == '[' && host[hl - 1] == ']') { h = host + 1; hl -= 2; }
+    memcpy(norm, h, hl);
+    norm[hl] = 0;
+    pnet_lower(norm, hl);
+    if (hl > 1 && norm[hl - 1] == '.') norm[--hl] = 0;
+    bool got = pnet_policy_allows_connect(&rt->policy, pnet_proto_from_scheme(proto), norm, (uint16_t)port);
+    if (got != allowed) fprintf(stderr, "connect vector mismatch: %s %s %s %lld -> %d\n", pname, proto, host, (long long)port, got);
+    CHECK(got == allowed);
+    pnet_runtime_destroy(rt);
+  }
+
+  /* Address classification + the localNetwork gate. */
+  pnet_runtime *open = vector_runtime(&doc, policies, "standard");
+  pnet_runtime *closed = vector_runtime(&doc, policies, "secure-only");
+  CHECK(open && closed);
+  int address = pnet_json_get(&doc, root, "address");
+  for (int e = pnet_json_first(&doc, address); e >= 0 && open && closed; e = pnet_json_next(&doc, e)) {
+    char lit[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "address"), lit, sizeof lit, NULL);
+    bool is_public = doc.nodes[pnet_json_get(&doc, e, "public")].truthy;
+    bool is_multicast = doc.nodes[pnet_json_get(&doc, e, "multicast")].truthy;
+    pnet_addr a;
+    bool parsed = pnet_parse_ip_literal(lit, strlen(lit), &a);
+    CHECK(parsed);
+    if (!parsed) continue;
+    if (pnet_addr_is_public(&a) != is_public) fprintf(stderr, "address vector public mismatch: %s\n", lit);
+    CHECK(pnet_addr_is_public(&a) == is_public);
+    CHECK(pnet_addr_is_multicast(&a) == is_multicast);
+    CHECK(pnet_policy_allows_address(&closed->policy, &a) == is_public);
+    CHECK(pnet_policy_allows_address(&open->policy, &a) == !is_multicast);
+  }
+  if (open) pnet_runtime_destroy(open);
+  if (closed) pnet_runtime_destroy(closed);
+
+  /* Listen decisions. */
+  int listen = pnet_json_get(&doc, root, "listen");
+  for (int e = pnet_json_first(&doc, listen); e >= 0; e = pnet_json_next(&doc, e)) {
+    char pname[64], proto[8], lit[64];
+    int64_t port;
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "policy"), pname, sizeof pname, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "protocol"), proto, sizeof proto, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "address"), lit, sizeof lit, NULL);
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "port"), &port);
+    bool allowed = doc.nodes[pnet_json_get(&doc, e, "allowed")].truthy;
+    pnet_runtime *rt = vector_runtime(&doc, policies, pname);
+    CHECK(rt != NULL);
+    if (!rt) continue;
+    pnet_addr a;
+    CHECK(pnet_parse_ip_literal(lit, strlen(lit), &a));
+    bool got = pnet_policy_allows_listen(&rt->policy, pnet_proto_from_scheme(proto), &a, (uint16_t)port);
+    if (got != allowed) fprintf(stderr, "listen vector mismatch: %s %s %s %lld -> %d\n", pname, proto, lit, (long long)port, got);
+    CHECK(got == allowed);
+    pnet_runtime_destroy(rt);
+  }
+  free(nodes);
+  free(text);
+}
+
 /* --- JSON --------------------------------------------------------------- */
 
 static void test_json(pnet_runtime *rt) {
@@ -449,6 +604,7 @@ int main(void) {
   test_h1_body();
   test_url(rt);
   test_policy(rt);
+  test_policy_vectors();
   test_json(rt);
   test_codecs();
   test_queue(rt);

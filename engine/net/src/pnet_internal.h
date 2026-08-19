@@ -114,6 +114,7 @@ bool pnet_parse_ip_literal(const char *s, size_t len, pnet_addr *out);
 /** Format an address (without port) into `out` (>= 46 bytes). */
 void pnet_format_addr(const pnet_addr *addr, char *out, size_t cap);
 /** Loopback / link-local / private / multicast / unspecified classification. */
+bool pnet_hostname_valid(const char *s, size_t len);
 bool pnet_addr_is_public(const pnet_addr *addr);
 bool pnet_addr_is_multicast(const pnet_addr *addr);
 
@@ -133,7 +134,8 @@ typedef enum pnet_jtype {
 typedef struct pnet_jnode {
   uint8_t type;
   bool truthy;        /* for bool */
-  const char *raw;    /* string body (without quotes, still escaped) / number text / key */
+  const char *raw;    /* string body (without quotes, still escaped) / number text / key;
+                         for objects and arrays the whole source span `{…}` / `[…]` */
   size_t raw_len;
   int first_child;    /* array element / object member (member = key node with one child) */
   int next;           /* next sibling */

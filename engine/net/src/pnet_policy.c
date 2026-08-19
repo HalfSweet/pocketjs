@@ -1,8 +1,15 @@
-/* Immutable network policy: the Build Plan projection the host hands to the
- * runtime at creation. Endpoint tuples
- * are matched before DNS, each candidate address after DNS, and listen
- * tuples before bind. The guest can never widen it. */
+/* Immutable network policy: the canonical ResolvedNetworkPolicy JSON of the
+ * application's Build Plan (contracts/spec/network-policy.ts, version 1),
+ * handed to the runtime at creation by the host — which derives it from the
+ * plan (HostBuildInputs.network.policyJson) and never authors one. Endpoint
+ * tuples are matched before DNS, each candidate address after DNS, and
+ * listen tuples before bind; redirects re-run the endpoint check. The guest
+ * can never widen it. The parser accepts exactly the shapes the TypeScript
+ * reference produces; contracts/spec/vectors/network-policy.json pins the
+ * parse and match decisions shared with the Rust core. */
 #include "pnet_internal.h"
+
+#define PNET_POLICY_VERSION 1
 
 static const char *PROTO_NAMES[PNET_PROTO_COUNT] = {"http", "https", "ws", "wss"};
 
@@ -31,14 +38,31 @@ static bool parse_rule(pnet_runtime *rt, const pnet_jdoc *doc, int obj, bool lis
   int host = pnet_json_get(doc, obj, listen ? "address" : "host");
   size_t host_len;
   if (!pnet_json_string(doc, host, buf, sizeof buf, &host_len) || host_len == 0) return false;
+  for (size_t i = 0; i < host_len; i++) {
+    unsigned char ch = (unsigned char)buf[i];
+    if (ch <= 0x20 || ch >= 0x7f) return false; /* ASCII (A-label) names only */
+  }
   pnet_lower(buf, host_len);
   if (buf[host_len - 1] == '.' && host_len > 1) buf[--host_len] = 0;
   if (pnet_parse_ip_literal(buf, host_len, &rule->ip)) {
     rule->is_ip = true;
+    /* Canonical storage: the literal's text form is irrelevant, matching
+     * compares the binary address. */
   } else if (listen) {
     return false; /* listen addresses are IP literals */
-  } else if (host_len > 2 && buf[0] == '*' && buf[1] == '.') {
-    rule->wildcard = true;
+  } else {
+    const char *name = buf;
+    size_t name_len = host_len;
+    if (buf[0] == '*') {
+      /* `*.suffix`: exactly one label; a bare `*` or `*.` is refused. */
+      if (host_len < 3 || buf[1] != '.') return false;
+      rule->wildcard = true;
+      name = buf + 2;
+      name_len = host_len - 2;
+      pnet_addr tmp;
+      if (pnet_parse_ip_literal(name, name_len, &tmp)) return false;
+    }
+    if (!pnet_hostname_valid(name, name_len)) return false;
   }
   rule->host = pnet_strdup_n(rt, buf, host_len);
   if (!rule->host) return false;
@@ -99,6 +123,13 @@ bool pnet_policy_parse(pnet_runtime *rt, pnet_policy *policy, const char *json) 
   pnet_jdoc doc;
   int root = pnet_json_parse(&doc, nodes, cap, json, len);
   bool ok = root >= 0 && pnet_json_type(&doc, root) == PNET_J_OBJECT;
+  if (ok) {
+    /* `version` is the contract version of the document; absent means 1
+     * (host-authored test policies), anything else is a different contract. */
+    int ver = pnet_json_get(&doc, root, "version");
+    int64_t v;
+    if (ver >= 0 && (!pnet_json_i64(&doc, ver, &v) || v != PNET_POLICY_VERSION)) ok = false;
+  }
   if (ok) ok = parse_rules(rt, &doc, pnet_json_get(&doc, root, "connect"), false, &policy->connect, &policy->connect_count);
   if (ok) ok = parse_rules(rt, &doc, pnet_json_get(&doc, root, "listen"), true, &policy->listen, &policy->listen_count);
   if (ok) {
