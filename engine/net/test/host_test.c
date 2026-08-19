@@ -597,6 +597,55 @@ static int extract_int(const char *json, const char *key) {
   return atoi(p + strlen(key));
 }
 
+/* The resolver path: a hostname goes through getaddrinfo on the driver's
+ * resolver worker, the worker wakes the network task, dispatch hands the
+ * candidates to the dialer, and the exchange completes over the first
+ * permitted address. An unresolvable name reports `dns` without touching a
+ * socket — and while that lookup is in flight the network task keeps
+ * serving another exchange (a literal-address request completes even
+ * though a resolve is pending). */
+static void test_resolver(harness *h, peer *p) {
+  char log[16384];
+  char body[1024];
+  log[0] = 0;
+  char meta[512];
+  snprintf(meta, sizeof meta, "{\"url\":\"http://localhost:%u/hello\",\"method\":\"GET\",\"headers\":{}}", p->port);
+  pthread_mutex_lock(&h->lock);
+  int handle = pnet_http_start(h->rt, meta, NULL, 0);
+  pthread_mutex_unlock(&h->lock);
+  pnet_posix_driver_wake(h->driver);
+  CHECK(handle > 0);
+  CHECK(wait_for(h, pnet_http_poll, "\"t\":\"headers\"", 4000, log, sizeof log));
+  size_t n = read_body(h, handle, body, sizeof body, 2000);
+  CHECK(n == 5 && memcmp(body, "hello", 5) == 0);
+
+  /* NXDOMAIN: `dns`, no socket. */
+  log[0] = 0;
+  pthread_mutex_lock(&h->lock);
+  int bad = pnet_http_start(h->rt, "{\"url\":\"http://nope.invalid/x\",\"method\":\"GET\",\"headers\":{}}", NULL, 0);
+  /* Concurrently a literal-address request must not wait for the lookup. */
+  char meta2[256];
+  snprintf(meta2, sizeof meta2, "{\"url\":\"http://127.0.0.1:%u/hello\",\"method\":\"GET\",\"headers\":{}}", p->port);
+  int literal = pnet_http_start(h->rt, meta2, NULL, 0);
+  pthread_mutex_unlock(&h->lock);
+  pnet_posix_driver_wake(h->driver);
+  CHECK(bad > 0 && literal > 0);
+  char needle[64];
+  snprintf(needle, sizeof needle, "\"t\":\"headers\",\"h\":%d", literal);
+  CHECK(wait_for(h, pnet_http_poll, needle, 4000, log, sizeof log));
+  /* The lookup's failure may already sit in the accumulated log (the
+   * batches are shared), otherwise keep ticking for it. */
+  snprintf(needle, sizeof needle, "\"h\":%d,\"code\":\"dns\"", bad);
+  bool got_dns = strstr(log, needle) != NULL || wait_for(h, pnet_http_poll, needle, 10000, log, sizeof log);
+  if (!got_dns) fprintf(stderr, "resolver log:\n%s\n", log);
+  CHECK(got_dns);
+  n = read_body(h, literal, body, sizeof body, 2000);
+  CHECK(n == 5);
+  pthread_mutex_lock(&h->lock);
+  CHECK(!pnet_runtime_has_live_handles(h->rt));
+  pthread_mutex_unlock(&h->lock);
+}
+
 static void test_server(harness *h) {
   char log[16384];
   char resp[65536];
@@ -1186,7 +1235,9 @@ int main(void) {
   char policy[512];
   snprintf(policy, sizeof policy,
            "{\"connect\":[{\"protocol\":\"http\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}},"
-           "{\"protocol\":\"ws\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}}],"
+           "{\"protocol\":\"ws\",\"host\":\"127.0.0.1\",\"port\":{\"min\":1,\"max\":65535}},"
+           "{\"protocol\":\"http\",\"host\":\"localhost\",\"port\":{\"min\":1,\"max\":65535}},"
+           "{\"protocol\":\"http\",\"host\":\"*.invalid\",\"port\":{\"min\":1,\"max\":65535}}],"
            "\"listen\":[{\"protocol\":\"http\",\"address\":\"127.0.0.1\",\"port\":\"ephemeral\"}],"
            "\"insecureTransport\":true,\"localNetwork\":true}");
   harness h;
@@ -1194,6 +1245,7 @@ int main(void) {
   CHECK(h.rt != NULL);
   if (h.rt) {
     test_client(&h, &p);
+    test_resolver(&h, &p);
     test_server(&h);
     test_websocket(&h, &wp);
   }
