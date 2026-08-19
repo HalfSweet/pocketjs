@@ -55,8 +55,9 @@ through `response.body`, a `BodyStream` that supports `for await`,
 `response_too_large` past their cap. Bytes wait in a bounded native queue
 until the application reads them; **when the queue is full the host stops
 reading the socket and TCP flow control holds the peer**, so a slow reader
-never grows memory. `clone()` creates a bounded tee — cancel the branch you
-do not read.
+never grows memory past `queueBytes`. `clone()` creates a bounded tee whose
+backlog never exceeds the aggregate limit — cancel the branch you do not
+read.
 
 ## When results arrive
 
@@ -71,12 +72,17 @@ is the same on every host and in a replay.
 
 Importing a module grants nothing. Capabilities are split by protocol, role
 and TLS — `network.http.client`, `network.http.client.tls`,
-`network.http.server`, `network.websocket.client`, … — and the host holds an
-immutable policy of allowed endpoints (`connect` rules with host, port and
-protocol; `listen` rules with address and port; `insecureTransport`;
-`localNetwork`) that every command is checked against. No stock target
-advertises a network capability yet; a target advertises one only when its
-native host ships and tests the module.
+`network.http.server`, `network.websocket.client`, … — and the application
+declares its endpoints in the manifest (format 3, `permissions.network`:
+`connect` rules with protocol, host and port or range; `listen` rules with
+address and port; `insecureTransport`; `localNetwork`). The Build Plan
+resolver normalizes them into the plan's network policy, the host hands that
+policy to its core verbatim, and **every command is checked against it**:
+the connect rule before DNS, each resolved address after DNS, the listen rule
+before bind, the endpoint rule again on every redirect. A format-2 manifest
+resolves to a deny-all policy. No stock target advertises a network
+capability yet; a target advertises one only when its native host ships and
+tests the module.
 
 ## Errors
 

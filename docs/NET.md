@@ -44,9 +44,57 @@ const socket = await connect("ws://broker.example.test/telemetry", {
 
 The capability ids are registered in `contracts/spec/platforms.ts`. **No stock
 target advertises them yet**: a target appends an id only when its native host
-ships and tests the module. Importing a module
-never grants access; the host's immutable policy (connect/listen rules,
-`insecureTransport`, `localNetwork`) is checked again on every command.
+ships and tests the module. Importing a module never grants access: every
+command is checked against the application's network policy, which the
+Build Plan owns (next section).
+
+## Network policy: manifest → plan → host
+
+The policy has one author, the application manifest, and one carrier, the
+Build Plan. A **format 3** `pocket.json` (`"pocket": 3`,
+`https://pocketjs.dev/schema/pocket-3.json`) declares it under
+`permissions.network`:
+
+```json
+"permissions": {
+  "network": {
+    "connect": [
+      { "protocol": "https", "host": "api.example.com", "port": 443 },
+      { "protocol": "https", "host": "*.devices.example.com", "port": { "min": 8443, "max": 8443 } },
+      { "protocol": "http", "host": "192.168.1.20", "port": 8080 }
+    ],
+    "listen": [{ "protocol": "http", "address": "0.0.0.0", "port": 8080 }],
+    "credentials": ["device-cert"],
+    "localNetwork": false,
+    "insecureTransport": false,
+    "allowInvalidTlsForDevelopment": false
+  }
+}
+```
+
+`contracts/spec/network-policy.ts` is the typed contract: the rule shapes, the
+normalization the resolver applies (lowercase A-label hostnames, canonical IP
+literals, single-port ranges collapsed, rules sorted, exact duplicates and
+reversed ranges refused, `allowInvalidTlsForDevelopment` refused outside a
+development build), the reference matcher, and the canonical JSON. The
+resolver writes the normalized policy into `ResolvedBuildPlan.network`, so
+`planHash` covers it; a format-2 manifest resolves to the deny-all policy.
+`extractHostBuildInputs()` hands custom hosts `network.policyJson` (also
+`POCKETJS_NETWORK_POLICY` in the host build environment) — **the exact string
+a host passes to its core** (`pnet_runtime_create` in C, `NetPolicy::parse`
+in Rust, the sim hosts' `policy` option). A host never authors or widens a
+policy; the ESP-IDF smoke firmware embeds the projection its plan produced
+(`tools/esp-idf.ts`).
+
+Enforcement is the same in every core, and the shared vectors
+(`contracts/spec/vectors/network-policy.json`, run by the TypeScript
+reference, `pnet_unit_test` and the Rust tests) pin it: the connect rule and
+`insecureTransport` before DNS; every resolved candidate address after DNS
+(loopback, link-local, RFC 1918, CGNAT, ULA only with `localNetwork`,
+multicast never); the listen rule before bind; the endpoint rule again on
+every redirect hop. In the Rust core these wire-side decisions go through
+the `PolicyGate` the backend receives with each request, and the core
+refuses a response whose URL the gate did not authorize.
 
 ## Ownership
 
@@ -54,8 +102,9 @@ never grants access; the host's immutable policy (connect/listen rules,
 | --- | --- | --- |
 | SDK | `framework/src/net/*.ts` | Fetch-shaped objects, body locking, `BodyStream` over `readInto`, the per-module guest binding (one `poll` per tick from the service pump), Promise settlement, `NetworkError` |
 | Spec | `contracts/spec/{net,ws,httpd}.ts` | op codes (append-only), event shapes, metadata JSON, portable ceilings, the shared error vocabulary; generated mirrors `engine/core/src/spec.rs` and `engine/net/include/pocketjs/net/spec.h` (drift-guarded by `tests/contract.ts`) |
-| C core | `engine/net` | HTTP/1.1 client and server, RFC 6455 client, strict framing, bounded queues, policy, tick queues, and the TLS handshake state machine; a `pnet_driver_ops` socket driver (`drivers/posix`) and an optional `pnet_tls_ops` TLS provider (`drivers/openssl`, ESP-TLS) are the only host interfaces |
-| Rust core | `engine/crates/pocket-net` | The HTTP Client core for Rust hosts over an `HttpClientBackend`; `mount` installs the six v2 ops through rquickjs |
+| Spec vectors | `contracts/spec/vectors/*.json` | the policy and HTTP-semantics decisions (methods, core-owned headers, bodyless / null-body statuses, redirect rewrites) every implementation reproduces |
+| C core | `engine/net` | HTTP/1.1 client and server, RFC 6455 client, strict framing, bounded queues, policy, tick queues (transactional `poll`), and the TLS handshake state machine; a `pnet_driver_ops` socket driver (`drivers/posix`, with its own resolver worker so `getaddrinfo` never blocks the network task) and an optional `pnet_tls_ops` TLS provider (`drivers/openssl`, ESP-TLS) are the only host interfaces |
+| Rust core | `engine/crates/pocket-net` | The HTTP Client core for Rust hosts over an `HttpClientBackend` that receives a `PolicyGate` (address / redirect / TLS authority); `mount` installs the six v2 ops through rquickjs |
 | Deterministic hosts | `hosts/sim/{net,ws,httpd}.ts` | fixture routes/peers/injected requests with virtual-tick visibility for the SDK tests |
 | Browser host | `hosts/web/net.js` | browser `fetch` behind the v2 ops (Browser profile: no redirect following, TLS by the browser) |
 | ESP-IDF host | `hosts/esp-idf` | QuickJS-ng owner task, network task, bindings, AtomS3R/Tab5 bring-up, the hardware smoke |
@@ -71,8 +120,11 @@ the provider owns host trust, entropy and the wire. `serverName` equals the
 authorized hostname and is both the SNI sent and the DNS-ID/IP-ID the
 certificate must match (TLS 1.2 minimum, renegotiation and 0-RTT off).
 Before any I/O, a verifying connection fails closed with
-`tls_clock_untrusted` when the platform reports the wall clock untrusted
-(the ESP host requires an SNTP/RTC sync first). Handshake failures map to the
+`tls_clock_untrusted` when the platform reports the wall clock untrusted.
+"Trusted" is a state the platform maintains, not a date check: the ESP-IDF
+board layer latches it when an SNTP sync completes (and on every re-sync) or
+when the product asserts it from a validated RTC; until then TLS fails
+closed. Handshake failures map to the
 four stable codes `tls_certificate_invalid`, `tls_hostname_mismatch`,
 `tls_handshake_failed` and `tls_clock_untrusted`.
 
@@ -96,13 +148,24 @@ once, and the SDK copies body bytes with `readInto` in the same call graph.
 Promise reactions run in the same tick's job drain. **The upper bound for a
 network round trip to reach application code is one frame period**; the
 per-tick budget (`maxEventsPerTick`, `maxTickBytes`) leaves excess events
-queued natively in sequence order for the next tick.
+queued natively in sequence order for the next tick. `poll()` is
+transactional: the core sizes and reserves the batch before it dequeues a
+single event, so memory pressure can delay a batch (the next poll retries)
+but never drops one — a handle's terminal `end`/`error` is never lost to an
+allocation failure. Hosts that marshal the batch into a guest value use the
+two-phase `*_poll_render` / `*_poll_consume` and consume only once the guest
+holds its copy.
 
 Body bytes never live in JS until read: the native receive queue
 (`queueBytes`, default 32 KiB, host-tightened on MCUs) is the backpressure
-window — when it is full the core stops reading the socket and TCP flow
-control holds the peer. `text()`, `json()` and `arrayBuffer()` are SDK
-helpers over the same path with an aggregate cap (`response_too_large`).
+window and a **hard bound** — the core reads at most the free space, and
+when the queue is full it stops reading the socket so TCP flow control
+holds the peer. `clone()` is a bounded tee: a branch's backlog never exceeds
+the aggregate limit (each pull is sized to the remaining room). `text()`,
+`json()` and `arrayBuffer()` are SDK helpers over the same path with an
+aggregate cap (`response_too_large`). The browser dev host holds the same
+bound through a BYOB reader where the body is a byte stream; its default
+reader fallback can overshoot by one browser chunk.
 
 ## Errors
 
