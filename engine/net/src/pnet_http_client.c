@@ -916,6 +916,14 @@ const char *pnet_http_poll(pnet_runtime *rt, size_t *len) {
   return pnet_queue_poll(rt, &rt->http_queue, len);
 }
 
+const char *pnet_http_poll_render(pnet_runtime *rt, size_t *len) {
+  return pnet_queue_render(rt, &rt->http_queue, len);
+}
+
+void pnet_http_poll_consume(pnet_runtime *rt) {
+  pnet_queue_consume(rt, &rt->http_queue);
+}
+
 const char *pnet_http_last_error(pnet_runtime *rt) {
   return pnet_sb_cstr(&rt->http_last_error);
 }

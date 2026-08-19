@@ -153,9 +153,19 @@ bool pnet_runtime_has_live_handles(pnet_runtime *rt);
 
 int pnet_http_start(pnet_runtime *rt, const char *meta_json, const uint8_t *body, size_t body_len);
 void pnet_http_cancel(pnet_runtime *rt, int handle);
-/** The visible batch as one JSON array, or NULL. The string stays valid
- * until the next pnet_http_poll / begin_tick / destroy. */
+/** The visible batch as one JSON array, or NULL (nothing visible, or the
+ * batch could not be allocated — then nothing is consumed and the next poll
+ * retries). The string stays valid until the next poll / render / destroy.
+ * Transactional: events leave the visible set only after the batch text
+ * exists; resource exhaustion can delay a batch, never drop one. */
 const char *pnet_http_poll(pnet_runtime *rt, size_t *len);
+/** Two-phase poll for hosts that marshal the batch into a guest value:
+ * `render` returns the batch without consuming it (calling it again returns
+ * the same text); `consume` releases it once the guest holds a copy. A host
+ * whose marshalling failed simply does not consume — the batch is rendered
+ * again next tick. pnet_http_poll = render + consume. */
+const char *pnet_http_poll_render(pnet_runtime *rt, size_t *len);
+void pnet_http_poll_consume(pnet_runtime *rt);
 const char *pnet_http_last_error(pnet_runtime *rt);
 int pnet_http_read_into(pnet_runtime *rt, int handle, uint8_t *dst, size_t len);
 const char *pnet_http_limits(pnet_runtime *rt);
@@ -170,6 +180,8 @@ int pnet_ws_close(pnet_runtime *rt, int handle, int code, const char *reason, si
 void pnet_ws_terminate(pnet_runtime *rt, int handle);
 int pnet_ws_buffered_amount(pnet_runtime *rt, int handle);
 const char *pnet_ws_poll(pnet_runtime *rt, size_t *len);
+const char *pnet_ws_poll_render(pnet_runtime *rt, size_t *len);
+void pnet_ws_poll_consume(pnet_runtime *rt);
 const char *pnet_ws_last_error(pnet_runtime *rt);
 const char *pnet_ws_limits(pnet_runtime *rt);
 
@@ -183,6 +195,8 @@ int pnet_httpd_end_body(pnet_runtime *rt, int req);
 int pnet_httpd_read_into(pnet_runtime *rt, int req, uint8_t *dst, size_t len);
 void pnet_httpd_abort(pnet_runtime *rt, int req);
 const char *pnet_httpd_poll(pnet_runtime *rt, size_t *len);
+const char *pnet_httpd_poll_render(pnet_runtime *rt, size_t *len);
+void pnet_httpd_poll_consume(pnet_runtime *rt);
 const char *pnet_httpd_last_error(pnet_runtime *rt);
 const char *pnet_httpd_limits(pnet_runtime *rt);
 

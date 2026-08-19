@@ -551,6 +551,52 @@ static void test_queue(pnet_runtime *rt) {
   pnet_queue_drop_handle(rt, &q, 3);
   CHECK(q.pending_count == 0);
   pnet_queue_free(rt, &q);
+
+  /* Transactional poll: with the heap capped at its current usage the batch
+   * cannot be allocated — nothing is consumed, the terminal event survives,
+   * and the next poll (memory back) delivers the whole batch. */
+  pnet_queue tq;
+  pnet_queue_init(&tq, 64, 65536);
+  char *e1 = pnet_event_json(rt, "headers", "h", 7, ",\"status\":200", 13, &len);
+  CHECK(pnet_queue_push(rt, &tq, 7, false, 10, e1, len));
+  CHECK(pnet_queue_push_readable(rt, &tq, 7, "h", 5));
+  char *e2 = pnet_event_json(rt, "end", "h", 7, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 7, true, 0, e2, len));
+  pnet_queue_freeze(rt, &tq);
+  CHECK(tq.visible_count == 3);
+  size_t saved_cap = rt->cfg.max_heap_bytes;
+  rt->cfg.max_heap_bytes = pnet_runtime_heap_bytes(rt);
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+  CHECK(tq.visible_count == 3); /* nothing consumed */
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+  CHECK(tq.visible_count == 3);
+  rt->cfg.max_heap_bytes = saved_cap;
+  batch = pnet_queue_poll(rt, &tq, &len);
+  CHECK(batch != NULL);
+  CHECK(batch && strstr(batch, "\"t\":\"end\",\"h\":7") != NULL);
+  CHECK(batch && strstr(batch, "\"t\":\"readable\",\"h\":7") != NULL);
+  CHECK(tq.visible_count == 0);
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+
+  /* Two-phase poll: render is idempotent until consume; a freeze in between
+   * keeps its new events visible for the next render. */
+  char *e3 = pnet_event_json(rt, "headers", "h", 8, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 8, false, 1, e3, len));
+  pnet_queue_freeze(rt, &tq);
+  const char *r1 = pnet_queue_render(rt, &tq, &len);
+  CHECK(r1 && strstr(r1, "\"h\":8") != NULL);
+  const char *r2 = pnet_queue_render(rt, &tq, &len);
+  CHECK(r2 == r1 && tq.visible_count == 1);
+  char *e4 = pnet_event_json(rt, "end", "h", 8, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 8, true, 0, e4, len));
+  pnet_queue_freeze(rt, &tq); /* appended behind the rendered batch */
+  CHECK(tq.visible_count == 2);
+  pnet_queue_consume(rt, &tq);
+  CHECK(tq.visible_count == 1);
+  batch = pnet_queue_poll(rt, &tq, &len);
+  CHECK(batch && strstr(batch, "\"t\":\"end\",\"h\":8") != NULL && strstr(batch, "headers") == NULL);
+  pnet_queue_consume(rt, &tq); /* no-op without a rendered batch */
+  pnet_queue_free(rt, &tq);
 }
 
 /* --- HTTP client refusals (no I/O) -------------------------------------- */

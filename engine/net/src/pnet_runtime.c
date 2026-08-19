@@ -313,6 +313,8 @@ void pnet_queue_free(pnet_runtime *rt, pnet_queue *q) {
   q->pending_head = q->pending_tail = NULL;
   q->visible_head = q->visible_tail = NULL;
   q->pending_count = q->visible_count = 0;
+  q->rendered = false;
+  q->rendered_count = 0;
 }
 
 static void pending_append(pnet_queue *q, pnet_event *e) {
@@ -398,35 +400,84 @@ void pnet_queue_freeze(pnet_runtime *rt, pnet_queue *q) {
   }
 }
 
-const char *pnet_queue_poll(pnet_runtime *rt, pnet_queue *q, size_t *len) {
+const char *pnet_queue_render(pnet_runtime *rt, pnet_queue *q, size_t *len) {
+  if (q->rendered) {
+    /* A batch rendered but not yet consumed (two-phase host): hand it out
+     * again unchanged; the visible set is untouched. */
+    if (len) *len = q->poll_buf.len;
+    return pnet_sb_cstr(&q->poll_buf);
+  }
   if (!q->visible_head) {
     if (len) *len = 0;
     return NULL;
   }
+  /* Transactional: size the batch — '[' + json joined by ',' + ']' — and
+   * reserve it up front. Nothing is dequeued until the buffer is certain, so
+   * memory pressure can delay a batch (the next poll retries) but can never
+   * drop a visible event, least of all a terminal one. */
+  size_t need = 2;
+  size_t count = 0;
+  for (pnet_event *e = q->visible_head; e; e = e->next) {
+    need += e->json_len;
+    count++;
+  }
+  need += count - 1;
   pnet_sb_clear(&q->poll_buf);
+  if (q->poll_buf.cap < need + 1) {
+    /* Release the undersized buffer before growing: the contents are stale
+     * and keeping both halves alive is what pushes a tight heap over. */
+    pnet_sb_free(rt, &q->poll_buf);
+  }
+  if (!pnet_sb_reserve(rt, &q->poll_buf, need)) {
+    if (!q->starved) {
+      q->starved = true;
+      pnet_logf(rt, PNET_LOG_WARN, "pnet: poll batch of %zu bytes deferred (out of memory); events stay visible", need);
+    }
+    if (len) *len = 0;
+    return NULL;
+  }
+  q->starved = false;
   pnet_sb_putc(rt, &q->poll_buf, '[');
   bool first = true;
-  while (q->visible_head) {
+  for (pnet_event *e = q->visible_head; e; e = e->next) {
+    if (!first) pnet_sb_putc(rt, &q->poll_buf, ',');
+    first = false;
+    pnet_sb_append(rt, &q->poll_buf, e->json, e->json_len);
+  }
+  pnet_sb_putc(rt, &q->poll_buf, ']');
+  /* Reserved exactly: rendering cannot have failed. */
+  if (q->poll_buf.failed) {
+    pnet_logf(rt, PNET_LOG_ERROR, "pnet: poll batch render failed after reservation");
+    pnet_sb_clear(&q->poll_buf);
+    if (len) *len = 0;
+    return NULL;
+  }
+  q->rendered = true;
+  q->rendered_count = count;
+  if (len) *len = q->poll_buf.len;
+  return pnet_sb_cstr(&q->poll_buf);
+}
+
+void pnet_queue_consume(pnet_runtime *rt, pnet_queue *q) {
+  if (!q->rendered) return;
+  /* Exactly the events the rendered batch carries; anything a later freeze
+   * appended behind them stays visible for the next render. */
+  while (q->rendered_count > 0 && q->visible_head) {
     pnet_event *e = q->visible_head;
     q->visible_head = e->next;
     if (!q->visible_head) q->visible_tail = NULL;
     q->visible_count--;
-    if (!first) pnet_sb_putc(rt, &q->poll_buf, ',');
-    first = false;
-    pnet_sb_append(rt, &q->poll_buf, e->json, e->json_len);
+    q->rendered_count--;
     event_free(rt, e);
   }
-  pnet_sb_putc(rt, &q->poll_buf, ']');
-  if (q->poll_buf.failed) {
-    /* Out of memory while rendering: report an empty batch; the events are
-     * gone, but every handle keeps its own terminal accounting so the guest
-     * learns about it through the next terminal event or its own timeout. */
-    pnet_logf(rt, PNET_LOG_ERROR, "pnet: poll batch allocation failed");
-    if (len) *len = 0;
-    return NULL;
-  }
-  if (len) *len = q->poll_buf.len;
-  return pnet_sb_cstr(&q->poll_buf);
+  q->rendered = false;
+  q->rendered_count = 0;
+}
+
+const char *pnet_queue_poll(pnet_runtime *rt, pnet_queue *q, size_t *len) {
+  const char *batch = pnet_queue_render(rt, q, len);
+  if (batch) pnet_queue_consume(rt, q);
+  return batch; /* the rendered text stays valid until the next render */
 }
 
 void pnet_queue_drop_handle(pnet_runtime *rt, pnet_queue *q, int handle) {

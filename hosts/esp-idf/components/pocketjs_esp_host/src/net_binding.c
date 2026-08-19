@@ -98,8 +98,12 @@ static JSValue net_poll(JSContext *ctx, JSValueConst this_val, int argc, JSValue
   (void)argv;
   size_t len = 0;
   pocketjs_host_net_lock(host);
-  const char *batch = pnet_http_poll(host->net, &len);
+  /* Two-phase poll: the batch leaves the core only once the guest holds its
+   * copy. If QuickJS cannot allocate the string the events stay visible and
+   * are rendered again next tick instead of vanishing. */
+  const char *batch = pnet_http_poll_render(host->net, &len);
   JSValue out = batch ? JS_NewStringLen(ctx, batch, len) : JS_UNDEFINED;
+  if (batch && !JS_IsException(out)) pnet_http_poll_consume(host->net);
   pocketjs_host_net_unlock(host);
   return out;
 }
@@ -226,8 +230,12 @@ static JSValue ws_poll(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
   (void)argv;
   size_t len = 0;
   pocketjs_host_net_lock(host);
-  const char *batch = pnet_ws_poll(host->net, &len);
+  /* Two-phase poll: the batch leaves the core only once the guest holds its
+   * copy. If QuickJS cannot allocate the string the events stay visible and
+   * are rendered again next tick instead of vanishing. */
+  const char *batch = pnet_ws_poll_render(host->net, &len);
   JSValue out = batch ? JS_NewStringLen(ctx, batch, len) : JS_UNDEFINED;
+  if (batch && !JS_IsException(out)) pnet_ws_poll_consume(host->net);
   pocketjs_host_net_unlock(host);
   return out;
 }
@@ -340,8 +348,12 @@ static JSValue httpd_poll(JSContext *ctx, JSValueConst this_val, int argc, JSVal
   (void)argv;
   size_t len = 0;
   pocketjs_host_net_lock(host);
-  const char *batch = pnet_httpd_poll(host->net, &len);
+  /* Two-phase poll: the batch leaves the core only once the guest holds its
+   * copy. If QuickJS cannot allocate the string the events stay visible and
+   * are rendered again next tick instead of vanishing. */
+  const char *batch = pnet_httpd_poll_render(host->net, &len);
   JSValue out = batch ? JS_NewStringLen(ctx, batch, len) : JS_UNDEFINED;
+  if (batch && !JS_IsException(out)) pnet_httpd_poll_consume(host->net);
   pocketjs_host_net_unlock(host);
   return out;
 }

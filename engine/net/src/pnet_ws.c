@@ -1103,6 +1103,14 @@ const char *pnet_ws_poll(pnet_runtime *rt, size_t *len) {
   return pnet_queue_poll(rt, &rt->ws_queue, len);
 }
 
+const char *pnet_ws_poll_render(pnet_runtime *rt, size_t *len) {
+  return pnet_queue_render(rt, &rt->ws_queue, len);
+}
+
+void pnet_ws_poll_consume(pnet_runtime *rt) {
+  pnet_queue_consume(rt, &rt->ws_queue);
+}
+
 const char *pnet_ws_last_error(pnet_runtime *rt) {
   return pnet_sb_cstr(&rt->ws_last_error);
 }

@@ -364,6 +364,12 @@ typedef struct pnet_queue {
   pnet_event *visible_tail;
   size_t visible_count;
   pnet_sb poll_buf;
+  /** A batch is rendered in poll_buf and not yet consumed (two-phase poll);
+   * rendered_count = the visible events it covers. */
+  bool rendered;
+  size_t rendered_count;
+  /** Logged once per out-of-memory episode. */
+  bool starved;
   uint32_t max_events;
   size_t max_bytes;
 } pnet_queue;
@@ -379,7 +385,16 @@ bool pnet_queue_push_readable(pnet_runtime *rt, pnet_queue *q, int handle, const
                               size_t avail);
 /** Move pending events into the visible set under the budget. */
 void pnet_queue_freeze(pnet_runtime *rt, pnet_queue *q);
-/** Render and consume the visible set; NULL when empty. */
+/** Render the visible set into the queue's buffer WITHOUT consuming it (NULL
+ * when empty or when the batch cannot be allocated right now — the events
+ * stay visible and the next render retries). Calling it again before
+ * consume returns the same batch. */
+const char *pnet_queue_render(pnet_runtime *rt, pnet_queue *q, size_t *len);
+/** Consume the rendered batch: dequeue and free exactly the events it
+ * carries. No-op without a rendered batch. */
+void pnet_queue_consume(pnet_runtime *rt, pnet_queue *q);
+/** render + consume: the single-call poll. The text stays valid until the
+ * next render. Transactional: an allocation failure consumes nothing. */
 const char *pnet_queue_poll(pnet_runtime *rt, pnet_queue *q, size_t *len);
 /** Drop every event of a handle (guest cancel of a terminal-less handle). */
 void pnet_queue_drop_handle(pnet_runtime *rt, pnet_queue *q, int handle);
