@@ -15,13 +15,28 @@
 //! service pump then calls `poll` exactly once; completions that arrive
 //! after `begin_tick` wait for the next tick.
 //!
-//! The portable C implementation of the same boundary (engine/net) is what
-//! the ESP-IDF host links; both speak the spec verbatim.
+//! Security authority: the core owns the policy decisions. It checks the
+//! endpoint rule and insecureTransport before the backend sees a request,
+//! classifies literal addresses, and hands the backend a [`PolicyGate`] that
+//! decides every wire-side question — each resolved address, each redirect
+//! hop (with the spec's rewrite table and hop budget), the TLS verification
+//! mode — and records what it authorized; the response URL a backend reports
+//! must be one the gate authorized for that handle or the exchange fails
+//! with `permission_denied`. The portable C implementation of the same
+//! boundary (engine/net) applies the same rules inside its own dialer;
+//! contracts/spec/vectors pin both.
+
+pub mod policy;
 
 use std::collections::{BTreeMap, VecDeque};
 
 use pocketjs_core::spec::net as spec;
 use serde::Deserialize;
+
+pub use policy::{
+    address_is_multicast, address_is_public, hostname_valid, parse_address, resolve_url, ConnectRule, HostRule,
+    ListenRule, NetPolicy, PolicyGate, PortRule, Protocol, RedirectPlan, TlsVerification,
+};
 
 /// A request handed to the backend after the core validated it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,9 +110,17 @@ pub enum BackendEvent {
 /// The host-specific wire layer. The core calls it only from the owner
 /// thread's `start`/`cancel`/`begin_tick`; a backend that runs I/O elsewhere
 /// hands results over through `drain` at the tick boundary.
+///
+/// The `gate` is the policy authority for everything that happens on the
+/// wire side: the backend must call `gate.authorize_address` for every
+/// candidate address before connecting, `gate.authorize_redirect` for every
+/// redirect response before following it (and follow exactly its plan), and
+/// apply `gate.tls_verification` to every TLS connection. It never decides
+/// those itself; the core rejects a response whose URL the gate did not
+/// authorize.
 pub trait HttpClientBackend {
     /// Begin the exchange; refusal is synchronous (`resource_limit` etc.).
-    fn start(&mut self, request: HttpRequest) -> Result<(), NetFailure>;
+    fn start(&mut self, request: HttpRequest, gate: PolicyGate) -> Result<(), NetFailure>;
     /// Best-effort cancellation; a later completion for the handle is dropped.
     fn cancel(&mut self, handle: i32);
     /// Move every completed event into `out` (tick boundary).
@@ -109,99 +132,6 @@ pub trait HttpClientBackend {
     /// The backend stops reading a handle whose queue is at capacity and
     /// resumes when told; the default ignores backpressure hints.
     fn set_paused(&mut self, _handle: i32, _paused: bool) {}
-}
-
-// ---------------------------------------------------------------------------
-// Policy — immutable host build inputs, never passed through an op
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetPolicy {
-    #[serde(default)]
-    pub connect: Vec<ConnectRule>,
-    #[serde(default)]
-    pub insecure_transport: bool,
-    #[serde(default)]
-    pub local_network: bool,
-    #[serde(default)]
-    pub allow_invalid_tls_for_development: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ConnectRule {
-    pub protocol: String,
-    pub host: String,
-    pub port: PortRule,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub enum PortRule {
-    Single(u16),
-    Range { min: u16, max: u16 },
-}
-
-impl NetPolicy {
-    pub fn parse(json: &str) -> Result<Self, String> {
-        let policy: NetPolicy = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        for rule in &policy.connect {
-            if !matches!(rule.protocol.as_str(), "http" | "https" | "ws" | "wss") {
-                return Err(format!("unknown protocol {}", rule.protocol));
-            }
-            if rule.host.is_empty() {
-                return Err("empty host".into());
-            }
-            if let PortRule::Range { min, max } = rule.port {
-                if min == 0 || min > max {
-                    return Err("invalid port range".into());
-                }
-            }
-        }
-        Ok(policy)
-    }
-
-    /// Everything allowed on plaintext HTTP to loopback (tests, dev hosts).
-    pub fn permissive() -> Self {
-        Self {
-            connect: vec![ConnectRule {
-                protocol: "http".into(),
-                host: "*".into(),
-                port: PortRule::Range { min: 1, max: 65535 },
-            }],
-            insecure_transport: true,
-            local_network: true,
-            allow_invalid_tls_for_development: false,
-        }
-    }
-
-    pub fn allows(&self, protocol: &str, host: &str, port: u16) -> bool {
-        if matches!(protocol, "http" | "ws") && !self.insecure_transport {
-            return false;
-        }
-        self.connect.iter().any(|rule| {
-            rule.protocol == protocol
-                && match rule.port {
-                    PortRule::Single(p) => p == port,
-                    PortRule::Range { min, max } => (min..=max).contains(&port),
-                }
-                && host_matches(&rule.host, host)
-        })
-    }
-}
-
-fn host_matches(rule: &str, host: &str) -> bool {
-    if rule == "*" {
-        return true;
-    }
-    if let Some(suffix) = rule.strip_prefix('*') {
-        // "*.example.com" matches exactly one non-empty label.
-        return host.len() > suffix.len()
-            && host.ends_with(suffix)
-            && !host[..host.len() - suffix.len()].is_empty()
-            && !host[..host.len() - suffix.len()].contains('.');
-    }
-    rule.eq_ignore_ascii_case(host)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +260,7 @@ struct Handle {
 pub struct NetCore<B: HttpClientBackend> {
     backend: B,
     policy: NetPolicy,
+    gate: PolicyGate,
     limits: NetLimits,
     development_build: bool,
     handles: BTreeMap<i32, Handle>,
@@ -347,9 +278,11 @@ impl<B: HttpClientBackend> NetCore<B> {
 
     pub fn with_limits(backend: B, policy: NetPolicy, limits: NetLimits) -> Self {
         let limits = limits.clamp();
+        let gate = PolicyGate::new(policy.clone(), backend.supports_tls());
         let mut core = Self {
             backend,
             policy,
+            gate,
             limits,
             development_build: false,
             handles: BTreeMap::new(),
@@ -367,6 +300,12 @@ impl<B: HttpClientBackend> NetCore<B> {
     /// also allows it (never in production builds).
     pub fn set_development_build(&mut self, enabled: bool) {
         self.development_build = enabled;
+        self.gate.set_development_build(enabled);
+    }
+
+    /// The policy gate (a clone is cheap): what the backend consults.
+    pub fn gate(&self) -> PolicyGate {
+        self.gate.clone()
     }
 
     pub fn backend_mut(&mut self) -> &mut B {
@@ -444,9 +383,13 @@ impl<B: HttpClientBackend> NetCore<B> {
         if scheme == "https" && !self.backend.supports_tls() {
             return self.refuse(spec::ERROR_UNSUPPORTED, "this host does not provide network.http.client.tls");
         }
-        if !self.policy.allows(scheme, &host, port) {
+        if !self.policy.allows_connect(scheme, &host, port) {
             return self.refuse(spec::ERROR_PERMISSION_DENIED, "endpoint is not an allowed connect rule");
         }
+        // A literal address skips DNS: classify it now; the refusal arrives as
+        // the asynchronous error event the dialer would raise (the C core
+        // filters candidates the same way after its own resolve).
+        let literal_refused = policy::parse_address(&host).is_some_and(|addr| !self.policy.allows_address(addr));
         if !is_token(&meta.method) {
             return self.refuse(spec::ERROR_INVALID_REQUEST, "invalid method");
         }
@@ -545,8 +488,14 @@ impl<B: HttpClientBackend> NetCore<B> {
                 paused: false,
             },
         );
-        if let Err(failure) = self.backend.start(request) {
+        self.gate.begin(handle, &request.url);
+        if literal_refused {
+            self.fail(handle, NetFailure::new(spec::ERROR_PERMISSION_DENIED, "resolved address is not permitted by the policy"));
+            return handle;
+        }
+        if let Err(failure) = self.backend.start(request, self.gate.clone()) {
             self.handles.remove(&handle);
+            self.gate.forget(handle);
             return self.refuse(&failure.code, failure.message);
         }
         handle
@@ -568,6 +517,7 @@ impl<B: HttpClientBackend> NetCore<B> {
         let Some(h) = self.handles.get(&handle) else { return };
         if h.terminal {
             self.handles.remove(&handle);
+            self.gate.forget(handle);
             return;
         }
         self.backend.cancel(handle);
@@ -598,6 +548,7 @@ impl<B: HttpClientBackend> NetCore<B> {
         // The handle stays until the terminal event was polled? No: errors
         // carry no bytes, so nothing remains to read; drop it now.
         self.handles.remove(&handle);
+        self.gate.forget(handle);
     }
 
     /// Tick boundary: drain the backend, apply completions, freeze the
@@ -651,6 +602,19 @@ impl<B: HttpClientBackend> NetCore<B> {
                 if !(100..=599).contains(&status) || !is_http_url(&url) {
                     self.backend.cancel(handle);
                     self.fail(handle, NetFailure::new(spec::ERROR_PROTOCOL, "malformed response head"));
+                    return;
+                }
+                // The response must come from the URL the gate last authorized
+                // for this handle (the start URL, or the latest redirect hop the
+                // backend asked the gate about), and `redirected` must say so.
+                let authorized = self.gate.authorized_urls(handle);
+                let expected = authorized.last().cloned().unwrap_or_default();
+                if url != expected || redirected != (authorized.len() > 1) {
+                    self.backend.cancel(handle);
+                    self.fail(
+                        handle,
+                        NetFailure::new(spec::ERROR_PERMISSION_DENIED, "response from a URL the policy gate did not authorize"),
+                    );
                     return;
                 }
                 let header_bytes: usize = headers.iter().map(|(k, v)| k.len() + v.len() + 4).sum();
@@ -723,6 +687,7 @@ impl<B: HttpClientBackend> NetCore<B> {
                 self.pending.push_back(QueuedEvent { handle, barrier: true, weight: 0, json });
                 if h.queue.is_empty() && !h.dirty {
                     self.handles.remove(&handle);
+                    self.gate.forget(handle);
                 }
             }
             BackendEvent::Error { handle, failure } => self.fail(handle, failure),
@@ -766,6 +731,7 @@ impl<B: HttpClientBackend> NetCore<B> {
         }
         if h.terminal && h.queue.is_empty() && !h.dirty {
             self.handles.remove(&handle);
+            self.gate.forget(handle);
         }
         want as i32
     }
@@ -979,6 +945,7 @@ mod tests {
     #[derive(Default)]
     struct Fixture {
         started: Vec<HttpRequest>,
+        gates: Vec<PolicyGate>,
         cancelled: Vec<i32>,
         queue: VecDeque<BackendEvent>,
         paused: Vec<(i32, bool)>,
@@ -986,11 +953,12 @@ mod tests {
     }
 
     impl HttpClientBackend for Fixture {
-        fn start(&mut self, request: HttpRequest) -> Result<(), NetFailure> {
+        fn start(&mut self, request: HttpRequest, gate: PolicyGate) -> Result<(), NetFailure> {
             if self.refuse {
                 return Err(NetFailure::new(spec::ERROR_RESOURCE_LIMIT, "no sockets"));
             }
             self.started.push(request);
+            self.gates.push(gate);
             Ok(())
         }
         fn cancel(&mut self, handle: i32) {
@@ -1125,6 +1093,251 @@ mod tests {
         let core = core();
         assert!(core.limits().contains("\"specMajor\":2"));
         assert!(core.limits().contains("\"features\":[]"));
+    }
+
+    #[test]
+    fn literal_addresses_are_classified_without_dns() {
+        let strict = NetPolicy::parse(
+            r#"{"version":1,"connect":[{"protocol":"http","host":"10.0.0.5","port":80},{"protocol":"http","host":"93.184.216.34","port":80}],"insecureTransport":true,"localNetwork":false}"#,
+        )
+        .unwrap();
+        let mut core = NetCore::new(Fixture::default(), strict);
+        // Private literal under localNetwork:false: admitted synchronously,
+        // refused with the asynchronous permission_denied the dialer raises.
+        let h = core.start(r#"{"url":"http://10.0.0.5/","method":"GET"}"#, &[]);
+        assert!(h > 0);
+        assert!(core.backend_mut().started.is_empty(), "the backend never sees it");
+        core.begin_tick();
+        let batch = core.poll().unwrap();
+        assert!(batch.contains("\"code\":\"permission_denied\""), "{batch}");
+        // A public literal starts.
+        assert!(core.start(r#"{"url":"http://93.184.216.34/","method":"GET"}"#, &[]) > 0);
+        assert_eq!(core.backend_mut().started.len(), 1);
+    }
+
+    #[test]
+    fn the_gate_decides_addresses_redirects_and_tls_and_the_core_checks_the_response_url() {
+        let policy = NetPolicy::parse(
+            r#"{"version":1,"connect":[{"protocol":"http","host":"example.test","port":80},{"protocol":"http","host":"next.test","port":80},{"protocol":"https","host":"secure.test","port":443}],"insecureTransport":true,"localNetwork":false}"#,
+        )
+        .unwrap();
+        let mut core = NetCore::new(Fixture::default(), policy);
+        let h = core.start(r#"{"url":"http://example.test/start","method":"POST","headers":{}}"#, b"body");
+        assert!(h > 0);
+        let gate = core.backend_mut().gates[0].clone();
+        // Addresses: public yes, private no, multicast never.
+        assert!(gate.authorize_address("93.184.216.34".parse().unwrap()).is_ok());
+        assert_eq!(gate.authorize_address("10.1.2.3".parse().unwrap()).unwrap_err().code, spec::ERROR_PERMISSION_DENIED);
+        assert_eq!(gate.authorize_address("224.0.0.1".parse().unwrap()).unwrap_err().code, spec::ERROR_PERMISSION_DENIED);
+        // Redirects: the spec table (302 POST → GET without body), the
+        // endpoint policy on the target, the budget, the scheme, TLS.
+        assert_eq!(
+            gate.authorize_redirect(h, "http://example.test/start", "POST", 302, Some("http://next.test/landed"), 3, RedirectMode::Follow),
+            Ok(RedirectPlan::Follow { url: "http://next.test/landed".into(), method: "GET".into(), drop_body: true })
+        );
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/landed", "GET", 307, Some("/again?x=1"), 2, RedirectMode::Follow),
+            Ok(RedirectPlan::Follow { url: "http://next.test/again?x=1".into(), method: "GET".into(), drop_body: false })
+        );
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/a", "GET", 301, Some("http://evil.test/"), 1, RedirectMode::Follow).unwrap_err().code,
+            spec::ERROR_PERMISSION_DENIED
+        );
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/a", "GET", 301, Some("http://next.test/b"), 0, RedirectMode::Follow).unwrap_err().code,
+            spec::ERROR_REDIRECT
+        );
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/a", "GET", 301, Some("https://secure.test/"), 1, RedirectMode::Follow).unwrap_err().code,
+            spec::ERROR_UNSUPPORTED,
+            "https without a TLS-capable backend"
+        );
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/a", "GET", 301, Some("ftp://next.test/"), 1, RedirectMode::Follow).unwrap_err().code,
+            spec::ERROR_REDIRECT
+        );
+        assert_eq!(gate.authorize_redirect(h, "http://next.test/a", "GET", 200, None, 1, RedirectMode::Follow), Ok(RedirectPlan::Deliver));
+        assert_eq!(gate.authorize_redirect(h, "http://next.test/a", "GET", 302, Some("/x"), 1, RedirectMode::Manual), Ok(RedirectPlan::Deliver));
+        assert_eq!(
+            gate.authorize_redirect(h, "http://next.test/a", "GET", 302, Some("/x"), 1, RedirectMode::Error).unwrap_err().code,
+            spec::ERROR_REDIRECT
+        );
+        // TLS: verify unless policy + build + request all ask otherwise.
+        assert!(gate.tls_verification("secure.test", true).verify_peer);
+        assert_eq!(gate.tls_verification("secure.test", false).min_version, spec::TLS_MIN_VERSION);
+        // The core accepts the response only from the last authorized hop,
+        // and only with `redirected` set.
+        let mut h2 = BTreeMap::new();
+        h2.insert("content-type".to_string(), "text/plain".to_string());
+        core.backend_mut().queue.push_back(BackendEvent::Headers {
+            handle: h,
+            status: 200,
+            url: "http://elsewhere.test/".into(),
+            headers: h2.clone(),
+            redirected: true,
+            length: Some(0),
+        });
+        core.begin_tick();
+        let batch = core.poll().unwrap();
+        assert!(batch.contains("\"code\":\"permission_denied\""), "{batch}");
+        // A fresh request answered from an authorized hop passes.
+        let h = core.start(r#"{"url":"http://example.test/start","method":"GET","headers":{}}"#, &[]);
+        let gate = core.backend_mut().gates.last().unwrap().clone();
+        gate.authorize_redirect(h, "http://example.test/start", "GET", 301, Some("http://next.test/landed"), 5, RedirectMode::Follow).unwrap();
+        core.backend_mut().queue.push_back(BackendEvent::Headers {
+            handle: h,
+            status: 200,
+            url: "http://next.test/landed".into(),
+            headers: h2,
+            redirected: true,
+            length: Some(0),
+        });
+        core.backend_mut().queue.push_back(BackendEvent::End { handle: h });
+        core.begin_tick();
+        let batch = core.poll().unwrap();
+        assert!(batch.contains("\"t\":\"headers\"") && batch.contains("\"redirected\":true"), "{batch}");
+    }
+
+    #[derive(Deserialize)]
+    struct PolicyVectors {
+        policies: BTreeMap<String, serde_json::Value>,
+        invalid: Vec<InvalidVector>,
+        connect: Vec<ConnectVector>,
+        address: Vec<AddressVector>,
+        listen: Vec<ListenVector>,
+    }
+    #[derive(Deserialize)]
+    struct InvalidVector {
+        name: String,
+        policy: serde_json::Value,
+    }
+    #[derive(Deserialize)]
+    struct ConnectVector {
+        policy: String,
+        protocol: String,
+        host: String,
+        port: u16,
+        allowed: bool,
+    }
+    #[derive(Deserialize)]
+    struct AddressVector {
+        address: String,
+        public: bool,
+        multicast: bool,
+    }
+    #[derive(Deserialize)]
+    struct ListenVector {
+        policy: String,
+        protocol: String,
+        address: String,
+        port: u16,
+        allowed: bool,
+    }
+
+    #[test]
+    fn shared_policy_vectors() {
+        let vectors: PolicyVectors =
+            serde_json::from_str(include_str!("../../../../contracts/spec/vectors/network-policy.json")).unwrap();
+        let mut policies = BTreeMap::new();
+        for (name, doc) in &vectors.policies {
+            policies.insert(name.clone(), NetPolicy::parse(&doc.to_string()).unwrap_or_else(|e| panic!("{name}: {e}")));
+        }
+        for v in &vectors.invalid {
+            assert!(NetPolicy::parse(&v.policy.to_string()).is_err(), "invalid vector accepted: {}", v.name);
+        }
+        for v in &vectors.connect {
+            let policy = &policies[&v.policy];
+            assert_eq!(policy.allows_connect(&v.protocol, &v.host, v.port), v.allowed, "connect {:?}", (&v.policy, &v.protocol, &v.host, v.port));
+        }
+        let open = &policies["standard"];
+        let closed = &policies["secure-only"];
+        for v in &vectors.address {
+            let addr = policy::parse_address(&v.address).unwrap_or_else(|| panic!("{}", v.address));
+            assert_eq!(policy::address_is_public(addr), v.public, "{}", v.address);
+            assert_eq!(policy::address_is_multicast(addr), v.multicast, "{}", v.address);
+            assert_eq!(closed.allows_address(addr), v.public, "{}", v.address);
+            assert_eq!(open.allows_address(addr), !v.multicast, "{}", v.address);
+        }
+        for v in &vectors.listen {
+            let policy = &policies[&v.policy];
+            assert_eq!(policy.allows_listen(&v.protocol, &v.address, v.port), v.allowed, "listen {:?}", (&v.policy, &v.protocol, &v.address, v.port));
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct SemanticsVectors {
+        methods: Vec<MethodVector>,
+        #[serde(rename = "requestHeaders")]
+        request_headers: Vec<HeaderVector>,
+        status: Vec<StatusVector>,
+        redirect: Vec<RedirectVector>,
+    }
+    #[derive(Deserialize)]
+    struct MethodVector {
+        method: String,
+        accepted: bool,
+    }
+    #[derive(Deserialize)]
+    struct HeaderVector {
+        name: String,
+        #[serde(rename = "coreOwned")]
+        core_owned: bool,
+    }
+    #[derive(Deserialize)]
+    struct StatusVector {
+        status: u16,
+        #[serde(rename = "bodylessFraming")]
+        bodyless_framing: bool,
+        #[serde(rename = "nullBody")]
+        null_body: bool,
+    }
+    #[derive(Deserialize)]
+    struct RedirectVector {
+        status: u16,
+        method: String,
+        followed: bool,
+        #[serde(rename = "nextMethod")]
+        next_method: Option<String>,
+        #[serde(rename = "keepBody")]
+        keep_body: Option<bool>,
+    }
+
+    #[test]
+    fn shared_http_semantics_vectors() {
+        let vectors: SemanticsVectors =
+            serde_json::from_str(include_str!("../../../../contracts/spec/vectors/http-semantics.json")).unwrap();
+        for v in &vectors.methods {
+            let mut core = core();
+            let meta = serde_json::json!({"url": "http://example.test/", "method": v.method, "headers": {}}).to_string();
+            let h = core.start(&meta, &[]);
+            assert_eq!(h > 0, v.accepted, "method {:?}", v.method);
+        }
+        for v in &vectors.request_headers {
+            let mut core = core();
+            let meta = serde_json::json!({"url": "http://example.test/", "method": "GET", "headers": {v.name.clone(): "v"}}).to_string();
+            assert!(core.start(&meta, &[]) > 0);
+            let sent = &core.backend_mut().started[0].headers;
+            assert_eq!(!sent.contains_key(&v.name.to_ascii_lowercase()), v.core_owned, "header {}", v.name);
+        }
+        for v in &vectors.status {
+            let framing = (100..200).contains(&v.status) || spec::HTTP_BODYLESS_STATUS.contains(&v.status);
+            assert_eq!(framing, v.bodyless_framing, "framing {}", v.status);
+            assert_eq!(spec::HTTP_NULL_BODY_STATUS.contains(&v.status), v.null_body, "null body {}", v.status);
+        }
+        let gate = PolicyGate::new(NetPolicy::permissive(), false);
+        for v in &vectors.redirect {
+            gate.begin(1, "http://example.test/a");
+            let plan = gate.authorize_redirect(1, "http://example.test/a", &v.method, v.status, Some("http://example.test/b"), 5, RedirectMode::Follow);
+            match plan {
+                Ok(RedirectPlan::Follow { method, drop_body, .. }) => {
+                    assert!(v.followed, "{} {} followed", v.status, v.method);
+                    assert_eq!(&method, v.next_method.as_ref().unwrap(), "{} {}", v.status, v.method);
+                    assert_eq!(!drop_body, v.keep_body.unwrap(), "{} {} body", v.status, v.method);
+                }
+                Ok(RedirectPlan::Deliver) => assert!(!v.followed, "{} {} delivered", v.status, v.method),
+                Err(e) => panic!("{} {}: {:?}", v.status, v.method, e.code),
+            }
+        }
     }
 
     #[cfg(feature = "mount")]
