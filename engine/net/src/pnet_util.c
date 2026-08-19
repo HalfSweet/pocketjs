@@ -596,6 +596,39 @@ void pnet_format_addr(const pnet_addr *addr, char *out, size_t cap) {
   else out[cap - 1] = 0;
 }
 
+bool pnet_status_in(int status, const int *list, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    if (list[i] == status) return true;
+  return false;
+}
+
+bool pnet_status_is_bodyless(int status) {
+  /* RFC 9112 §6.3 rule 1: 1xx, 204 and 304 carry no body whatever the
+   * framing headers say (PNET_HTTP_BODYLESS_STATUS + the 1xx range). */
+  if (status >= 100 && status < 200) return true;
+  return pnet_status_in(status, (const int[])PNET_HTTP_BODYLESS_STATUS, PNET_HTTP_BODYLESS_STATUS_COUNT);
+}
+
+bool pnet_http_redirect_plan(int status, const char *method, size_t method_len, bool *to_get) {
+  /* The shared redirect table (spec.h): which statuses a client follows and
+   * how the method is rewritten — 303 turns every method but HEAD into a
+   * GET without a body, 301/302 turn POST into GET, 307/308 keep both. */
+  *to_get = false;
+  if (!pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_STATUS, PNET_HTTP_REDIRECT_STATUS_COUNT)) return false;
+  if (pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS, PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS_COUNT) &&
+      !pnet_ieq_n(method, method_len, "HEAD"))
+    *to_get = true;
+  if (pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_POST_TO_GET_STATUS, PNET_HTTP_REDIRECT_POST_TO_GET_STATUS_COUNT) &&
+      pnet_ieq_n(method, method_len, "POST"))
+    *to_get = true;
+  return true;
+}
+
+bool pnet_status_is_null_body(int status) {
+  /* Fetch null-body statuses: a response that may not carry content. */
+  return pnet_status_in(status, (const int[])PNET_HTTP_NULL_BODY_STATUS, PNET_HTTP_NULL_BODY_STATUS_COUNT);
+}
+
 bool pnet_hostname_valid(const char *s, size_t len) {
   /* Lowercase ASCII DNS name: labels of [a-z0-9-], 1..63 bytes, not starting
    * or ending with '-', whole name <= 253 bytes. Mirrors

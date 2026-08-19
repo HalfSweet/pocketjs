@@ -40,6 +40,12 @@ import {
   HTTPD_SPEC_MINOR,
 } from "./httpd.ts";
 import {
+  HTTP_BODYLESS_STATUS,
+  HTTP_CORE_OWNED_REQUEST_HEADERS,
+  HTTP_NULL_BODY_STATUS,
+  HTTP_REDIRECT_ANY_TO_GET_STATUS,
+  HTTP_REDIRECT_POST_TO_GET_STATUS,
+  HTTP_REDIRECT_STATUS,
   NET_DEFAULT_AGGREGATE_BYTES,
   NET_DEFAULT_QUEUE_BYTES,
   NET_DEFAULT_TIMEOUT_MS,
@@ -138,6 +144,19 @@ export function generateC(): string {
   put(
     `#define PNET_METHODS_FORBIDDEN { ${NET_METHODS_FORBIDDEN.map(cstr).join(", ")} }`,
   );
+  put("/* HTTP semantics shared by client, server and SDK (see net.ts). */");
+  put(`#define PNET_HTTP_CORE_OWNED_REQUEST_HEADERS_COUNT ${HTTP_CORE_OWNED_REQUEST_HEADERS.length}`);
+  put(`#define PNET_HTTP_CORE_OWNED_REQUEST_HEADERS { ${HTTP_CORE_OWNED_REQUEST_HEADERS.map(cstr).join(", ")} }`);
+  put(`#define PNET_HTTP_BODYLESS_STATUS_COUNT ${HTTP_BODYLESS_STATUS.length}`);
+  put(`#define PNET_HTTP_BODYLESS_STATUS { ${HTTP_BODYLESS_STATUS.join(", ")} }`);
+  put(`#define PNET_HTTP_NULL_BODY_STATUS_COUNT ${HTTP_NULL_BODY_STATUS.length}`);
+  put(`#define PNET_HTTP_NULL_BODY_STATUS { ${HTTP_NULL_BODY_STATUS.join(", ")} }`);
+  put(`#define PNET_HTTP_REDIRECT_STATUS_COUNT ${HTTP_REDIRECT_STATUS.length}`);
+  put(`#define PNET_HTTP_REDIRECT_STATUS { ${HTTP_REDIRECT_STATUS.join(", ")} }`);
+  put(`#define PNET_HTTP_REDIRECT_POST_TO_GET_STATUS_COUNT ${HTTP_REDIRECT_POST_TO_GET_STATUS.length}`);
+  put(`#define PNET_HTTP_REDIRECT_POST_TO_GET_STATUS { ${HTTP_REDIRECT_POST_TO_GET_STATUS.join(", ")} }`);
+  put(`#define PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS_COUNT ${HTTP_REDIRECT_ANY_TO_GET_STATUS.length}`);
+  put(`#define PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS { ${HTTP_REDIRECT_ANY_TO_GET_STATUS.join(", ")} }`);
   for (const [name, v] of Object.entries(NET_EVENT)) {
     put(`#define PNET_EVENT_${screaming(name)} ${cstr(v)}`);
   }

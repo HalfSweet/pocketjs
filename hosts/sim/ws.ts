@@ -33,8 +33,10 @@ import {
   type WsConnectMeta,
   type WsLimits,
 } from "../../contracts/spec/ws.ts";
+import { networkPolicyAllowsConnect } from "../../contracts/spec/network-policy.ts";
 import { bytesToBase64, stringToUtf8, utf8ToString } from "../../framework/src/bytes.ts";
 import type { WsOps } from "../../framework/src/net/websocket.ts";
+import { simEndpoint, simPolicy, type SimHostOptions } from "./net.ts";
 
 export interface SimWsPeer {
   /** Subprotocol the peer selects (default: first requested or ""). */
@@ -111,7 +113,8 @@ export const SIM_WS_LIMITS: WsLimits = Object.freeze({
   features: [],
 });
 
-export function createSimWsHost(peers: Readonly<Record<string, SimWsPeer>>): SimWsHost {
+export function createSimWsHost(peers: Readonly<Record<string, SimWsPeer>>, options: SimHostOptions = {}): SimWsHost {
+  const policy = simPolicy(options);
   const sockets = new Map<number, Socket>();
   const events: object[] = [];
   const log: string[] = [];
@@ -145,6 +148,12 @@ export function createSimWsHost(peers: Readonly<Record<string, SimWsPeer>>): Sim
       }
       if (meta.url.startsWith("wss://")) return refuse(NET_ERROR.unsupported, "tls not provided");
       if (sockets.size >= WS_MAX_SOCKETS) return refuse(NET_ERROR.resourceLimit, "too many sockets");
+      if (policy) {
+        const endpoint = simEndpoint(meta.url);
+        if (!endpoint || !networkPolicyAllowsConnect(policy, endpoint.protocol, endpoint.host, endpoint.port)) {
+          return refuse(NET_ERROR.permissionDenied, "endpoint is not an allowed connect rule");
+        }
+      }
       const peer = peers[meta.url];
       if (!peer) return refuse(NET_ERROR.permissionDenied, `no peer for ${meta.url}`);
       const handle = nextHandle++;

@@ -81,6 +81,12 @@ import {
   NET_MAX_REQUEST_BYTES,
   NET_MAX_TICK_BYTES,
   NET_MAX_TIMEOUT_MS,
+  HTTP_BODYLESS_STATUS,
+  HTTP_CORE_OWNED_REQUEST_HEADERS,
+  HTTP_NULL_BODY_STATUS,
+  HTTP_REDIRECT_ANY_TO_GET_STATUS,
+  HTTP_REDIRECT_POST_TO_GET_STATUS,
+  HTTP_REDIRECT_STATUS,
   NET_METHODS_FORBIDDEN,
   NET_OP,
   NET_SPEC_MAJOR,
@@ -642,6 +648,13 @@ export function generateRust(): string {
   put(`    pub const MAX_REDIRECTS: usize = ${NET_MAX_REDIRECTS};`);
   put(`    pub const TLS_MIN_VERSION: &str = ${JSON.stringify(NET_TLS_MIN_VERSION)};`);
   put(`    pub const METHODS_FORBIDDEN: [&str; ${NET_METHODS_FORBIDDEN.length}] = [${NET_METHODS_FORBIDDEN.map((method) => JSON.stringify(method)).join(", ")}];`);
+  put("    /// HTTP semantics shared by client, server and SDK (see net.ts).");
+  put(`    pub const HTTP_CORE_OWNED_REQUEST_HEADERS: [&str; ${HTTP_CORE_OWNED_REQUEST_HEADERS.length}] = [${HTTP_CORE_OWNED_REQUEST_HEADERS.map((name) => JSON.stringify(name)).join(", ")}];`);
+  put(`    pub const HTTP_BODYLESS_STATUS: [u16; ${HTTP_BODYLESS_STATUS.length}] = [${HTTP_BODYLESS_STATUS.join(", ")}];`);
+  put(`    pub const HTTP_NULL_BODY_STATUS: [u16; ${HTTP_NULL_BODY_STATUS.length}] = [${HTTP_NULL_BODY_STATUS.join(", ")}];`);
+  put(`    pub const HTTP_REDIRECT_STATUS: [u16; ${HTTP_REDIRECT_STATUS.length}] = [${HTTP_REDIRECT_STATUS.join(", ")}];`);
+  put(`    pub const HTTP_REDIRECT_POST_TO_GET_STATUS: [u16; ${HTTP_REDIRECT_POST_TO_GET_STATUS.length}] = [${HTTP_REDIRECT_POST_TO_GET_STATUS.join(", ")}];`);
+  put(`    pub const HTTP_REDIRECT_ANY_TO_GET_STATUS: [u16; ${HTTP_REDIRECT_ANY_TO_GET_STATUS.length}] = [${HTTP_REDIRECT_ANY_TO_GET_STATUS.join(", ")}];`);
   for (const [name, v] of Object.entries(NET_EVENT)) {
     put(`    pub const EVENT_${screaming(name)}: &str = ${JSON.stringify(v)};`);
   }

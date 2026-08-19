@@ -11,6 +11,9 @@
 // service pump and writes the handler's Response through `respond`/`write`.
 
 import {
+  HTTP_CORE_OWNED_REQUEST_HEADERS,
+  HTTP_NULL_BODY_STATUS,
+  HTTP_REDIRECT_STATUS,
   NET_DEFAULT_AGGREGATE_BYTES,
   NET_DEFAULT_QUEUE_BYTES,
   NET_DEFAULT_TIMEOUT_MS,
@@ -74,18 +77,7 @@ const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /** Request headers the core owns (framing, connection control, upgrade). An
  * app cannot set them; the Fetch request guard is otherwise not applied so
  * explicit `Cookie`, `Origin`, `User-Agent` etc. work on every host. */
-const CORE_OWNED_REQUEST_HEADERS = new Set([
-  "host",
-  "connection",
-  "content-length",
-  "transfer-encoding",
-  "trailer",
-  "te",
-  "upgrade",
-  "keep-alive",
-  "expect",
-  "proxy-connection",
-]);
+const CORE_OWNED_REQUEST_HEADERS = new Set<string>(HTTP_CORE_OWNED_REQUEST_HEADERS);
 
 function normalizeHeaderValue(value: string): string {
   // HTTP whitespace: tab, LF, CR, space.
@@ -310,7 +302,7 @@ function normalizeMethod(raw: unknown): string {
     });
   }
   const upper = method.toUpperCase();
-  if ((NET_METHODS_FORBIDDEN as readonly string[]).includes(upper) || upper === "TRACK") {
+  if ((NET_METHODS_FORBIDDEN as readonly string[]).includes(upper)) {
     throw new NetworkError(NET_ERROR.invalidRequest, `method ${upper} is not allowed`, {
       operation: "fetch",
       protocol: PROTOCOL,
@@ -566,7 +558,7 @@ const REASON_PHRASES: Record<number, string> = {
   504: "Gateway Timeout",
 };
 
-const NULL_BODY_STATUS = new Set([101, 103, 204, 205, 304]);
+const NULL_BODY_STATUS = new Set<number>(HTTP_NULL_BODY_STATUS);
 
 interface ResponseInternal {
   url: string;
@@ -704,8 +696,8 @@ export class Response {
   }
 
   static redirect(url: string | URL, status = 302): Response {
-    if (![301, 302, 303, 307, 308].includes(status)) {
-      throw new NetworkError(NET_ERROR.invalidRequest, "redirect status must be 301, 302, 303, 307 or 308", {
+    if (!(HTTP_REDIRECT_STATUS as readonly number[]).includes(status)) {
+      throw new NetworkError(NET_ERROR.invalidRequest, `redirect status must be one of ${HTTP_REDIRECT_STATUS.join(", ")}`, {
         operation: "Response.redirect",
         protocol: PROTOCOL,
       });

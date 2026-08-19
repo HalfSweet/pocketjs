@@ -185,9 +185,53 @@ export const NET_MAX_TIMEOUT_MS = 120_000;
 export const NET_MAX_REDIRECTS = 5;
 export const NET_TLS_MIN_VERSION = "1.2";
 
-/** Methods that are never client-app operations; any other RFC 9110 token
- * is accepted. */
-export const NET_METHODS_FORBIDDEN = ["CONNECT", "TRACE"] as const;
+// ---------------------------------------------------------------------------
+// HTTP semantics shared by every implementation (SDK, sim, browser host, C
+// core, Rust core). These are the wire-visible rules that used to live as
+// folklore in each layer; contracts/spec/vectors/http-semantics.json pins
+// them and every implementation runs the same vectors.
+// ---------------------------------------------------------------------------
+
+/** Methods that are never client-app operations: RFC 9110 CONNECT and TRACE,
+ * plus TRACK (the legacy Microsoft TRACE alias, refused for the same
+ * cross-site-tracing reason). Matching is case-insensitive; any other RFC
+ * 9110 token is accepted verbatim. */
+export const NET_METHODS_FORBIDDEN = ["CONNECT", "TRACE", "TRACK"] as const;
+
+/** Request headers the core owns (framing, connection control, upgrade).
+ * The SDK refuses them on a Request; a core strips them if they arrive. */
+export const HTTP_CORE_OWNED_REQUEST_HEADERS = [
+  "host",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+  "trailer",
+  "te",
+  "upgrade",
+  "keep-alive",
+  "expect",
+  "proxy-connection",
+] as const;
+
+/** Response statuses whose message never has a body regardless of the
+ * framing headers (RFC 9112 §6.3 rule 1); every 1xx status and the response
+ * to a HEAD request are bodyless the same way. A client parses these as
+ * head-only and reports `length` from Content-Length when present. */
+export const HTTP_BODYLESS_STATUS = [204, 304] as const;
+
+/** Statuses a Response may not carry content for: the Fetch "null body
+ * status" set (101, 103, 204, 205, 304). The SDK Response refuses a body
+ * init, a server refuses to emit content, a client surfaces a null body. */
+export const HTTP_NULL_BODY_STATUS = [101, 103, 204, 205, 304] as const;
+
+/** Redirect statuses a client follows under `redirect: "follow"`; any other
+ * 3xx is an ordinary response. */
+export const HTTP_REDIRECT_STATUS = [301, 302, 303, 307, 308] as const;
+/** On these statuses a POST becomes a GET and the body is dropped (RFC 9110
+ * §15.4.2-3 common practice); other methods are kept. */
+export const HTTP_REDIRECT_POST_TO_GET_STATUS = [301, 302] as const;
+/** On these statuses any method except HEAD becomes a GET without a body. */
+export const HTTP_REDIRECT_ANY_TO_GET_STATUS = [303] as const;
 
 // ---------------------------------------------------------------------------
 // Errors — the vocabulary shared by net, ws and httpd. A core

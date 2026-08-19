@@ -254,7 +254,8 @@ static bool push_headers_event(pnet_runtime *rt, pnet_http_req *r, const pnet_h1
  * request failed). false = treat as a normal response. */
 static bool maybe_redirect(pnet_runtime *rt, pnet_http_req *r, const pnet_h1_head *head) {
   int st = head->status;
-  if (st != 301 && st != 302 && st != 303 && st != 307 && st != 308) return false;
+  bool to_get = false;
+  if (!pnet_http_redirect_plan(st, r->method, r->method_len, &to_get)) return false;
   const pnet_h1_field *loc = pnet_h1_find(head, "location");
   if (!loc) return false;
   if (r->redirect_mode == 1) return false; /* manual: deliver as-is */
@@ -287,11 +288,7 @@ static bool maybe_redirect(pnet_runtime *rt, pnet_http_req *r, const pnet_h1_hea
     req_fail(rt, r, PNET_ERROR_PERMISSION_DENIED, "redirect target is not an allowed endpoint", 0);
     return true;
   }
-  /* Method / body rewriting on redirect: 303 (non-HEAD) and 301/302 POST
-   * become GET, dropping the request body. */
-  bool to_get = false;
-  if (st == 303 && !pnet_ieq_n(r->method, r->method_len, "HEAD")) to_get = true;
-  if ((st == 301 || st == 302) && pnet_ieq_n(r->method, r->method_len, "POST")) to_get = true;
+  /* Method / body rewriting on redirect (pnet_http_redirect_plan). */
   if (to_get) {
     pnet_free(rt, r->method, r->method_len + 1);
     r->method = pnet_strdup_n(rt, "GET", 3);
@@ -377,7 +374,7 @@ static bool on_head(pnet_runtime *rt, pnet_http_req *r, pnet_h1_head *head) {
   }
   if (maybe_redirect(rt, r, head)) return false;
   /* Body framing (RFC 9112 §6.3). */
-  bool head_only = pnet_ieq_n(r->method, r->method_len, "HEAD") || head->status == 204 || head->status == 304;
+  bool head_only = pnet_ieq_n(r->method, r->method_len, "HEAD") || pnet_status_is_bodyless(head->status);
   int64_t length = -1;
   pnet_h1_body_mode mode;
   if (head_only) mode = PNET_H1_BODY_NONE;
@@ -724,7 +721,6 @@ int pnet_http_start(pnet_runtime *rt, const char *meta_json, const uint8_t *body
     for (size_t i = 0; i < PNET_METHODS_FORBIDDEN_COUNT; i++) {
       if (pnet_ieq_n(buf, blen, forbidden[i])) { refuse(rt, PNET_ERROR_INVALID_REQUEST, "method not allowed"); goto out; }
     }
-    if (pnet_ieq_n(buf, blen, "TRACK")) { refuse(rt, PNET_ERROR_INVALID_REQUEST, "method not allowed"); goto out; }
     r->method = pnet_strdup_n(rt, buf, blen);
     r->method_len = blen;
     if (!r->method) { refuse(rt, PNET_ERROR_RESOURCE_LIMIT, "out of memory"); goto out; }
@@ -748,10 +744,9 @@ int pnet_http_start(pnet_runtime *rt, const char *meta_json, const uint8_t *body
           goto out;
         }
         pnet_lower(name, nlen);
-        static const char *const owned[] = {"host", "connection", "content-length", "transfer-encoding", "trailer",
-                                            "te", "upgrade", "keep-alive", "expect", "proxy-connection"};
+        static const char *const owned[] = PNET_HTTP_CORE_OWNED_REQUEST_HEADERS;
         bool skip = false;
-        for (size_t i = 0; i < sizeof owned / sizeof owned[0]; i++)
+        for (size_t i = 0; i < PNET_HTTP_CORE_OWNED_REQUEST_HEADERS_COUNT; i++)
           if (strcmp(name, owned[i]) == 0) skip = true;
         int vnode = doc.nodes[k].first_child;
         size_t vlen;

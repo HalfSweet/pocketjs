@@ -578,7 +578,14 @@ pub mod net {
     pub const MAX_TIMEOUT_MS: u32 = 120000;
     pub const MAX_REDIRECTS: usize = 5;
     pub const TLS_MIN_VERSION: &str = "1.2";
-    pub const METHODS_FORBIDDEN: [&str; 2] = ["CONNECT", "TRACE"];
+    pub const METHODS_FORBIDDEN: [&str; 3] = ["CONNECT", "TRACE", "TRACK"];
+    /// HTTP semantics shared by client, server and SDK (see net.ts).
+    pub const HTTP_CORE_OWNED_REQUEST_HEADERS: [&str; 10] = ["host", "connection", "content-length", "transfer-encoding", "trailer", "te", "upgrade", "keep-alive", "expect", "proxy-connection"];
+    pub const HTTP_BODYLESS_STATUS: [u16; 2] = [204, 304];
+    pub const HTTP_NULL_BODY_STATUS: [u16; 5] = [101, 103, 204, 205, 304];
+    pub const HTTP_REDIRECT_STATUS: [u16; 5] = [301, 302, 303, 307, 308];
+    pub const HTTP_REDIRECT_POST_TO_GET_STATUS: [u16; 2] = [301, 302];
+    pub const HTTP_REDIRECT_ANY_TO_GET_STATUS: [u16; 1] = [303];
     pub const EVENT_HEADERS: &str = "headers";
     pub const EVENT_READABLE: &str = "readable";
     pub const EVENT_END: &str = "end";

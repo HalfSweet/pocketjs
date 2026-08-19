@@ -14,23 +14,46 @@
 // redirect "manual" — a redirect the browser hides ends the request with
 // `unsupported`; TLS is the browser's, so "tls" is advertised.
 
-const SPEC_MAJOR = 2;
-const SPEC_MINOR = 0;
-const MAX_INFLIGHT = 8;
-const MAX_REQUEST_BYTES = 256 * 1024;
-const DEFAULT_QUEUE_BYTES = 32 * 1024;
-const MAX_QUEUE_BYTES = 256 * 1024;
-const DEFAULT_AGGREGATE_BYTES = 1024 * 1024;
-const MAX_AGGREGATE_BYTES = 8 * 1024 * 1024;
-const MAX_EVENTS_PER_TICK = 128;
-const MAX_TICK_BYTES = 256 * 1024;
-const MAX_HEADERS = 64;
-const MAX_HEADER_BYTES = 16 * 1024;
-const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_TIMEOUT_MS = 120_000;
-const MAX_REDIRECTS = 5;
-const FORBIDDEN_METHODS = new Set(["CONNECT", "TRACE", "TRACK"]);
-const NULL_BODY_STATUS = new Set([101, 103, 204, 205, 304]);
+import {
+  HTTP_NULL_BODY_STATUS,
+  NET_DEFAULT_AGGREGATE_BYTES,
+  NET_DEFAULT_QUEUE_BYTES,
+  NET_DEFAULT_TIMEOUT_MS,
+  NET_MAX_AGGREGATE_BYTES,
+  NET_MAX_EVENTS_PER_TICK,
+  NET_MAX_HEADER_BYTES,
+  NET_MAX_HEADERS,
+  NET_MAX_INFLIGHT,
+  NET_MAX_QUEUE_BYTES,
+  NET_MAX_REDIRECTS,
+  NET_MAX_REQUEST_BYTES,
+  NET_MAX_TICK_BYTES,
+  NET_MAX_TIMEOUT_MS,
+  NET_METHODS_FORBIDDEN,
+  NET_SPEC_MAJOR,
+  NET_SPEC_MINOR,
+  NET_TLS_MIN_VERSION,
+} from "./net-spec.js";
+
+// The spec ceilings, as this host's effective limits (it tightens none of
+// them; the generated net-spec.js is the single source, never literals here).
+const SPEC_MAJOR = NET_SPEC_MAJOR;
+const SPEC_MINOR = NET_SPEC_MINOR;
+const MAX_INFLIGHT = NET_MAX_INFLIGHT;
+const MAX_REQUEST_BYTES = NET_MAX_REQUEST_BYTES;
+const DEFAULT_QUEUE_BYTES = NET_DEFAULT_QUEUE_BYTES;
+const MAX_QUEUE_BYTES = NET_MAX_QUEUE_BYTES;
+const DEFAULT_AGGREGATE_BYTES = NET_DEFAULT_AGGREGATE_BYTES;
+const MAX_AGGREGATE_BYTES = NET_MAX_AGGREGATE_BYTES;
+const MAX_EVENTS_PER_TICK = NET_MAX_EVENTS_PER_TICK;
+const MAX_TICK_BYTES = NET_MAX_TICK_BYTES;
+const MAX_HEADERS = NET_MAX_HEADERS;
+const MAX_HEADER_BYTES = NET_MAX_HEADER_BYTES;
+const DEFAULT_TIMEOUT_MS = NET_DEFAULT_TIMEOUT_MS;
+const MAX_TIMEOUT_MS = NET_MAX_TIMEOUT_MS;
+const MAX_REDIRECTS = NET_MAX_REDIRECTS;
+const FORBIDDEN_METHODS = new Set(NET_METHODS_FORBIDDEN);
+const NULL_BODY_STATUS = new Set(HTTP_NULL_BODY_STATUS);
 
 const LIMITS = Object.freeze({
   specMajor: SPEC_MAJOR,
@@ -49,7 +72,7 @@ const LIMITS = Object.freeze({
   defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
   maxTimeoutMs: MAX_TIMEOUT_MS,
   maxRedirects: MAX_REDIRECTS,
-  tlsMinVersion: "1.2",
+  tlsMinVersion: NET_TLS_MIN_VERSION,
   features: ["tls"],
 });
 

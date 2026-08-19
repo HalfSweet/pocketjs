@@ -596,6 +596,96 @@ static void test_http_refusals(pnet_runtime *rt) {
   CHECK(strstr(pnet_http_limits(rt), "\"specMajor\":2") != NULL);
 }
 
+/* --- shared HTTP semantics vectors ------------------------------------------ */
+
+static void test_http_semantics_vectors(void) {
+  size_t len = 0;
+  char *text = read_file(PNET_VECTORS_DIR "/http-semantics.json", &len);
+  CHECK(text != NULL);
+  if (!text) return;
+  enum { CAP = 2048 };
+  pnet_jnode *nodes = malloc(sizeof(pnet_jnode) * CAP);
+  pnet_jdoc doc;
+  int root = pnet_json_parse(&doc, nodes, CAP, text, len);
+  CHECK(root >= 0);
+  if (root < 0) { free(nodes); free(text); return; }
+  pnet_runtime *rt = make_runtime("{\"connect\":[{\"protocol\":\"http\",\"host\":\"192.168.1.20\",\"port\":8080}],\"insecureTransport\":true,\"localNetwork\":true}");
+  CHECK(rt != NULL);
+  if (!rt) { free(nodes); free(text); return; }
+
+  /* Methods: start() accepts or refuses the token. */
+  int methods = pnet_json_get(&doc, root, "methods");
+  for (int e = pnet_json_first(&doc, methods); e >= 0; e = pnet_json_next(&doc, e)) {
+    char method[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "method"), method, sizeof method, NULL);
+    bool accepted = doc.nodes[pnet_json_get(&doc, e, "accepted")].truthy;
+    char meta[256];
+    /* Escape is unnecessary: the vectors' method tokens contain no quotes. */
+    snprintf(meta, sizeof meta, "{\"url\":\"http://192.168.1.20:8080/\",\"method\":\"%s\",\"headers\":{}}", method);
+    int h = pnet_http_start(rt, meta, NULL, 0);
+    if ((h > 0) != accepted) fprintf(stderr, "method vector mismatch: %s -> %d\n", method, h);
+    CHECK((h > 0) == accepted);
+    if (h > 0) pnet_http_cancel(rt, h);
+    pnet_runtime_service(rt);
+    pnet_runtime_begin_tick(rt);
+    pnet_http_poll(rt, &len);
+  }
+
+  /* Status classification. */
+  int status = pnet_json_get(&doc, root, "status");
+  for (int e = pnet_json_first(&doc, status); e >= 0; e = pnet_json_next(&doc, e)) {
+    int64_t st;
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "status"), &st);
+    bool framing = doc.nodes[pnet_json_get(&doc, e, "bodylessFraming")].truthy;
+    bool null_body = doc.nodes[pnet_json_get(&doc, e, "nullBody")].truthy;
+    CHECK(pnet_status_is_bodyless((int)st) == framing);
+    CHECK(pnet_status_is_null_body((int)st) == null_body);
+  }
+
+  /* Redirect plan. */
+  int redirect = pnet_json_get(&doc, root, "redirect");
+  for (int e = pnet_json_first(&doc, redirect); e >= 0; e = pnet_json_next(&doc, e)) {
+    int64_t st;
+    char method[16], next[16] = {0};
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "status"), &st);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "method"), method, sizeof method, NULL);
+    bool followed = doc.nodes[pnet_json_get(&doc, e, "followed")].truthy;
+    bool to_get = false;
+    bool got = pnet_http_redirect_plan((int)st, method, strlen(method), &to_get);
+    CHECK(got == followed);
+    if (followed) {
+      pnet_json_string(&doc, pnet_json_get(&doc, e, "nextMethod"), next, sizeof next, NULL);
+      bool keep_body = doc.nodes[pnet_json_get(&doc, e, "keepBody")].truthy;
+      const char *expect_method = to_get ? "GET" : method;
+      if (strcmp(expect_method, next) != 0 || keep_body == to_get)
+        fprintf(stderr, "redirect vector mismatch: %lld %s -> %s keepBody=%d\n", (long long)st, method, next, keep_body);
+      CHECK(strcmp(expect_method, next) == 0);
+      CHECK(keep_body == !to_get);
+    }
+  }
+
+  /* Core-owned request headers are stripped, others pass. The request is
+   * serialized into the connection tx queue on start; the stub driver never
+   * connects, so the head sits in the queue where we can read it back. */
+  int headers = pnet_json_get(&doc, root, "requestHeaders");
+  for (int e = pnet_json_first(&doc, headers); e >= 0; e = pnet_json_next(&doc, e)) {
+    char name[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "name"), name, sizeof name, NULL);
+    bool owned = doc.nodes[pnet_json_get(&doc, e, "coreOwned")].truthy;
+    char lower[64];
+    strcpy(lower, name);
+    pnet_lower(lower, strlen(lower));
+    static const char *const list[] = PNET_HTTP_CORE_OWNED_REQUEST_HEADERS;
+    bool in_list = false;
+    for (size_t i = 0; i < PNET_HTTP_CORE_OWNED_REQUEST_HEADERS_COUNT; i++)
+      if (strcmp(lower, list[i]) == 0) in_list = true;
+    CHECK(in_list == owned);
+  }
+  pnet_runtime_destroy(rt);
+  free(nodes);
+  free(text);
+}
+
 int main(void) {
   pnet_runtime *rt = make_runtime(POLICY);
   CHECK(rt != NULL);
@@ -605,6 +695,7 @@ int main(void) {
   test_url(rt);
   test_policy(rt);
   test_policy_vectors();
+  test_http_semantics_vectors();
   test_json(rt);
   test_codecs();
   test_queue(rt);

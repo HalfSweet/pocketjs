@@ -243,7 +243,7 @@
     "devtools:psp": "bun tools/devtools-psp.ts",
     "test:tailwind": "bun test tests/tailwind.test.ts",
     "contract": "bun tests/contract.ts",
-    "gen": "bun contracts/spec/gen-rust.ts && bun contracts/spec/gen-c.ts && bun tools/gen-exports.ts",
+    "gen": "bun contracts/spec/gen-rust.ts && bun contracts/spec/gen-c.ts && bun contracts/spec/gen-web.ts && bun tools/gen-exports.ts",
     "vapor:gb": "bun vapor/compiler/cli.ts vapor/examples/todo/todo.tsx --target gb",
     "vapor:nes": "bun vapor/compiler/cli.ts vapor/examples/todo/todo.tsx --target nes",
     "vapor:esp32": "bun vapor/compiler/cli.ts vapor/examples/todo/todo.tsx --target esp32",

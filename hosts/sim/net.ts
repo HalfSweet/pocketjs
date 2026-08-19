@@ -27,8 +27,43 @@ import {
   type NetLimits,
   type NetStartMeta,
 } from "../../contracts/spec/net.ts";
+import {
+  networkPolicyAllowsConnect,
+  parseNetworkPolicyJson,
+  type ResolvedNetworkPolicy,
+} from "../../contracts/spec/network-policy.ts";
 import { stringToUtf8 } from "../../framework/src/bytes.ts";
 import type { NetOps } from "../../framework/src/net/http.ts";
+import { URL } from "../../framework/src/net/url.ts";
+
+/** Host options shared by the sim network modules. */
+export interface SimHostOptions {
+  /** The Build Plan's ResolvedNetworkPolicy (object or canonical JSON). When
+   * set, the sim enforces it exactly like a native core — connect rule and
+   * insecureTransport before any route lookup, listen rule before bind,
+   * the redirect target again — so the policy conformance vectors run on
+   * this host too. Without it the fixture routes act as the allowlist. */
+  readonly policy?: ResolvedNetworkPolicy | string;
+}
+
+export function simPolicy(options: SimHostOptions | undefined): ResolvedNetworkPolicy | null {
+  const policy = options?.policy;
+  if (policy === undefined) return null;
+  return typeof policy === "string" ? parseNetworkPolicyJson(policy) : policy;
+}
+
+/** Endpoint tuple of an absolute http(s)/ws(s) URL for the policy matcher. */
+export function simEndpoint(url: string): { protocol: string; host: string; port: number } | null {
+  try {
+    const parsed = new URL(url);
+    const protocol = parsed.protocol.slice(0, -1);
+    const host = parsed.hostname.replace(/^\[|\]$/g, "");
+    const port = parsed.port ? Number(parsed.port) : protocol === "http" || protocol === "ws" ? 80 : 443;
+    return { protocol, host, port };
+  } catch {
+    return null;
+  }
+}
 
 export interface SimNetRequest {
   readonly url: string;
@@ -113,7 +148,8 @@ export const SIM_NET_LIMITS: NetLimits = Object.freeze({
   features: [],
 });
 
-export function createSimNetHost(routes: Readonly<Record<string, SimNetRoute>>): SimNetHost {
+export function createSimNetHost(routes: Readonly<Record<string, SimNetRoute>>, options: SimHostOptions = {}): SimNetHost {
+  const policy = simPolicy(options);
   const pending = new Map<number, Pending>();
   /** Handles that sent `end` but still hold visible unread bytes. */
   const drained = new Map<number, Pending>();
@@ -141,12 +177,22 @@ export function createSimNetHost(routes: Readonly<Record<string, SimNetRoute>>):
         return refuse(NET_ERROR.invalidRequest, "url must be absolute http:// or https://");
       }
       if (meta.url.startsWith("https://")) return refuse(NET_ERROR.unsupported, "tls not provided");
-      if (typeof meta.method !== "string" || (NET_METHODS_FORBIDDEN as readonly string[]).includes(meta.method)) {
+      if (
+        typeof meta.method !== "string" ||
+        !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(meta.method) ||
+        (NET_METHODS_FORBIDDEN as readonly string[]).includes(meta.method.toUpperCase())
+      ) {
         return refuse(NET_ERROR.invalidRequest, "method not allowed");
       }
       if (pending.size >= NET_MAX_INFLIGHT) return refuse(NET_ERROR.resourceLimit, "too many requests in flight");
       const body = bodyBuffer ? new Uint8Array(bodyBuffer.slice(0)) : new Uint8Array(0);
       if (body.length > NET_MAX_REQUEST_BYTES) return refuse(NET_ERROR.resourceLimit, "request body too large");
+      if (policy) {
+        const endpoint = simEndpoint(meta.url);
+        if (!endpoint || !networkPolicyAllowsConnect(policy, endpoint.protocol, endpoint.host, endpoint.port)) {
+          return refuse(NET_ERROR.permissionDenied, "endpoint is not an allowed connect rule");
+        }
+      }
       const route = routes[meta.url];
       if (!route) return refuse(NET_ERROR.permissionDenied, `no route for ${meta.url}`);
       const request: SimNetRequest = { url: meta.url, method: meta.method, headers: meta.headers ?? {}, body, meta };
@@ -236,6 +282,17 @@ export function createSimNetHost(routes: Readonly<Record<string, SimNetRoute>>):
           pending.delete(p.handle);
           events.push({ t: "error", h: p.handle, code: p.response.error.code, message: p.response.error.message });
           continue;
+        }
+        // A fixture that answers from another URL stands in for a redirect:
+        // the target is re-authorized like a native core re-checks each hop.
+        if (policy && p.response.url !== undefined && p.response.url !== p.request.url) {
+          const endpoint = simEndpoint(p.response.url);
+          if (!endpoint || !networkPolicyAllowsConnect(policy, endpoint.protocol, endpoint.host, endpoint.port)) {
+            p.terminal = true;
+            pending.delete(p.handle);
+            events.push({ t: "error", h: p.handle, code: NET_ERROR.permissionDenied, message: "redirect target is not an allowed endpoint" });
+            continue;
+          }
         }
         p.headSent = true;
         const total = p.chunks.reduce((n, c) => n + c.length, 0);

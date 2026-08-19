@@ -36,8 +36,10 @@ import {
   type HttpdRespondMeta,
 } from "../../contracts/spec/httpd.ts";
 import { NET_ERROR, NET_TLS_MIN_VERSION } from "../../contracts/spec/net.ts";
+import { networkPolicyAllowsListen } from "../../contracts/spec/network-policy.ts";
 import { stringToUtf8 } from "../../framework/src/bytes.ts";
 import type { HttpdOps } from "../../framework/src/net/http.ts";
+import { simPolicy, type SimHostOptions } from "./net.ts";
 
 export interface SimInjectOptions {
   method?: string;
@@ -126,7 +128,8 @@ function toBytes(value: string | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value.slice() : stringToUtf8(value);
 }
 
-export function createSimHttpdHost(): SimHttpdHost {
+export function createSimHttpdHost(options: SimHostOptions = {}): SimHttpdHost {
+  const policy = simPolicy(options);
   const servers = new Map<number, Server>();
   const requests = new Map<number, Pending>();
   const events: object[] = [];
@@ -156,6 +159,9 @@ export function createSimHttpdHost(): SimHttpdHost {
           return refuse(NET_ERROR.invalidRequest, "address/port required");
         }
         if (meta.tls) return refuse(NET_ERROR.unsupported, "tls not provided");
+        if (policy && !networkPolicyAllowsListen(policy, meta.tls ? "https" : "http", meta.address, meta.port)) {
+          return refuse(NET_ERROR.permissionDenied, "address/port is not an allowed listen rule");
+        }
         if (servers.size >= HTTPD_MAX_SERVERS) return refuse(NET_ERROR.resourceLimit, "too many servers");
         for (const s of servers.values()) {
           if (s.meta.port === meta.port && meta.port !== 0 && !s.terminal) {

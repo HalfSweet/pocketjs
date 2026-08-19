@@ -451,7 +451,7 @@ impl<B: HttpClientBackend> NetCore<B> {
             return self.refuse(spec::ERROR_INVALID_REQUEST, "invalid method");
         }
         let upper = meta.method.to_ascii_uppercase();
-        if spec::METHODS_FORBIDDEN.contains(&upper.as_str()) || upper == "TRACK" {
+        if spec::METHODS_FORBIDDEN.contains(&upper.as_str()) {
             return self.refuse(spec::ERROR_INVALID_REQUEST, "method not allowed");
         }
         if (upper == "GET" || upper == "HEAD") && !body.is_empty() {
@@ -464,7 +464,7 @@ impl<B: HttpClientBackend> NetCore<B> {
             if !is_token(&lower) || value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
                 return self.refuse(spec::ERROR_INVALID_REQUEST, format!("invalid header {name}"));
             }
-            if CORE_OWNED_HEADERS.contains(&lower.as_str()) {
+            if spec::HTTP_CORE_OWNED_REQUEST_HEADERS.contains(&lower.as_str()) {
                 continue;
             }
             header_bytes += lower.len() + value.len() + 4;
@@ -775,10 +775,6 @@ impl<B: HttpClientBackend> NetCore<B> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CORE_OWNED_HEADERS: [&str; 10] = [
-    "host", "connection", "content-length", "transfer-encoding", "trailer", "te", "upgrade", "keep-alive", "expect",
-    "proxy-connection",
-];
 
 fn is_token(s: &str) -> bool {
     !s.is_empty()

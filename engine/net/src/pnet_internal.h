@@ -115,6 +115,14 @@ bool pnet_parse_ip_literal(const char *s, size_t len, pnet_addr *out);
 void pnet_format_addr(const pnet_addr *addr, char *out, size_t cap);
 /** Loopback / link-local / private / multicast / unspecified classification. */
 bool pnet_hostname_valid(const char *s, size_t len);
+/** Shared HTTP status semantics (spec.h): membership, RFC 9112 bodyless
+ * framing (1xx/204/304), Fetch null-body statuses. */
+bool pnet_status_in(int status, const int *list, size_t count);
+bool pnet_status_is_bodyless(int status);
+bool pnet_status_is_null_body(int status);
+/** Redirect plan for `status`: false = not a followed redirect; true with
+ * *to_get = the method becomes GET (body dropped) per the spec table. */
+bool pnet_http_redirect_plan(int status, const char *method, size_t method_len, bool *to_get);
 bool pnet_addr_is_public(const pnet_addr *addr);
 bool pnet_addr_is_multicast(const pnet_addr *addr);
 
