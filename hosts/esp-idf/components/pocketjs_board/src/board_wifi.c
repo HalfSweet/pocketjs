@@ -85,22 +85,46 @@ esp_err_t pocketjs_board_wifi_connect(const pocketjs_board_wifi_config *cfg, esp
   return ESP_OK;
 }
 
+/* Wall-clock trust: latched by a completed SNTP sync (first sync and every
+ * later re-sync, through the notification callback) or by the product. */
+static volatile bool s_clock_trusted;
+
+static void on_time_synced(struct timeval *tv) {
+  (void)tv;
+  s_clock_trusted = true;
+}
+
+bool pocketjs_board_clock_trusted(void) {
+  return s_clock_trusted;
+}
+
+void pocketjs_board_set_clock_trusted(bool trusted) {
+  s_clock_trusted = trusted;
+}
+
+bool pocketjs_board_clock_trusted_cb(void *user) {
+  (void)user;
+  return s_clock_trusted;
+}
+
 esp_err_t pocketjs_board_sync_time(uint32_t timeout_ms) {
   static bool started;
   if (!started) {
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    cfg.sync_cb = on_time_synced;
     ESP_ERROR_CHECK(esp_netif_sntp_init(&cfg));
     started = true;
   }
   if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(timeout_ms ? timeout_ms : 15000)) != ESP_OK) {
-    ESP_LOGW(TAG, "SNTP did not sync in time");
+    ESP_LOGW(TAG, "SNTP did not sync in time; the wall clock stays untrusted (TLS fails closed)");
     return ESP_ERR_TIMEOUT;
   }
+  s_clock_trusted = true;
   time_t now = time(NULL);
   struct tm tm;
   localtime_r(&now, &tm);
-  ESP_LOGI(TAG, "time synced: %04d-%02d-%02d %02d:%02d:%02d UTC", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-           tm.tm_hour, tm.tm_min, tm.tm_sec);
+  ESP_LOGI(TAG, "time synced: %04d-%02d-%02d %02d:%02d:%02d UTC (wall clock trusted)", tm.tm_year + 1900, tm.tm_mon + 1,
+           tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
   return ESP_OK;
 }
 

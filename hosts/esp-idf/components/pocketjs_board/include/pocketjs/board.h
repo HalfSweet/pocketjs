@@ -14,6 +14,8 @@
 #ifndef POCKETJS_BOARD_H
 #define POCKETJS_BOARD_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -41,9 +43,20 @@ esp_err_t pocketjs_board_wifi_connect(const pocketjs_board_wifi_config *cfg, esp
 /** Current station IPv4 address as text ("0.0.0.0" when down). */
 void pocketjs_board_ip_text(char *out, size_t cap);
 
-/** Sync the wall clock over SNTP (needed before TLS certificate validation).
- * Returns ESP_OK once the time is set, ESP_ERR_TIMEOUT otherwise. */
+/** Sync the wall clock over SNTP. Returns ESP_OK once the time is set (the
+ * clock is then trusted, see below), ESP_ERR_TIMEOUT otherwise. */
 esp_err_t pocketjs_board_sync_time(uint32_t timeout_ms);
+
+/** Wall-clock trust state for TLS certificate validation — a state the board
+ * layer maintains, not a guess from the date: true after an SNTP sync
+ * completed (pocketjs_board_sync_time, or any later SNTP re-sync reported
+ * through the sync notification), or after the product asserted it with
+ * pocketjs_board_set_clock_trusted (a validated battery-backed RTC,
+ * provisioning). Wire it into pocketjs_esp_host_config.wall_clock_trusted. */
+bool pocketjs_board_clock_trusted(void);
+void pocketjs_board_set_clock_trusted(bool trusted);
+/** Adapter with the host's callback signature (ignores `user`). */
+bool pocketjs_board_clock_trusted_cb(void *user);
 
 #ifdef __cplusplus
 }

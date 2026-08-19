@@ -2,13 +2,13 @@
 #include "host_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
-#include <time.h>
 
 static const char *TAG = "pocketjs";
 
@@ -28,7 +28,11 @@ void pocketjs_esp_host_config_defaults(pocketjs_esp_host_config *cfg) {
   cfg->net_task_stack = 12 * 1024;
   cfg->net_task_priority = 8;
   cfg->net_task_core = tskNO_AFFINITY;
+  cfg->stop_turn_budget_ms = 50;
   cfg->network_policy_json = NULL;
+  cfg->plan_hash = NULL;
+  cfg->network_tls = false;
+  cfg->wall_clock_trusted = NULL;
   cfg->mount_websocket_client = true;
   cfg->mount_http_server = true;
   cfg->network_config = NULL;
@@ -131,10 +135,11 @@ static void plat_random(void *ctx, uint8_t *out, size_t len) {
 }
 
 static bool plat_clock_trusted(void *ctx) {
-  (void)ctx;
-  /* time() reads the system clock, set by SNTP or a persisted RTC. Before it
-   * is synced it sits near the epoch; require a plausible recent year. */
-  return time(NULL) > 1704067200; /* 2024-01-01 */
+  /* Trust is a platform state the board/product layer maintains (SNTP sync
+   * completed, validated RTC, provisioning) — never "the date looks
+   * plausible". No callback = never trusted = TLS fails closed. */
+  pocketjs_esp_host_t *host = ctx;
+  return host->cfg.wall_clock_trusted ? host->cfg.wall_clock_trusted(host->cfg.user) : false;
 }
 
 static void plat_log(void *ctx, pnet_log_level level, const char *msg) {
@@ -199,6 +204,32 @@ static void log_exception(JSContext *ctx, const char *phase) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Task exit protocol                                                        */
+/* ------------------------------------------------------------------------ */
+
+/* The last thing a task does with `host`: publish its done flag, then wake
+ * whoever waits in stop()/unwind. The waiter handle is read BEFORE the flag
+ * is published (after the flag the owner may free `host`). */
+static void task_exit(pocketjs_esp_host_t *host, volatile bool *done_flag) {
+  TaskHandle_t waiter = __atomic_load_n(&host->stop_waiter, __ATOMIC_SEQ_CST);
+  __atomic_store_n(done_flag, true, __ATOMIC_SEQ_CST);
+  if (waiter) xTaskNotifyGive(waiter);
+  vTaskDelete(NULL);
+}
+
+/* Block until `flag` is set: notification-driven with a short poll fallback
+ * (a task that finished before the waiter registered itself never notifies).
+ * Returns false if the deadline passed. */
+static bool wait_flag(volatile bool *flag, uint32_t deadline_ms) {
+  int64_t end = esp_timer_get_time() + (int64_t)deadline_ms * 1000;
+  while (!__atomic_load_n(flag, __ATOMIC_SEQ_CST)) {
+    if (esp_timer_get_time() >= end) return false;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+  }
+  return true;
+}
+
+/* ------------------------------------------------------------------------ */
 /* Network task                                                              */
 /* ------------------------------------------------------------------------ */
 
@@ -218,15 +249,26 @@ static void net_task(void *arg) {
       if (timeout > 250) timeout = 250;
     }
     if (more) timeout = 0;
+    if (host->stopping) break;
     pnet_posix_driver_wait(host->driver, timeout);
   }
-  host->net_done = true;
-  vTaskDelete(NULL);
+  task_exit(host, &host->net_done);
 }
 
 /* ------------------------------------------------------------------------ */
 /* Guest task                                                                */
 /* ------------------------------------------------------------------------ */
+
+/* QuickJS interrupt handler: while stopping, a turn that outlives the budget
+ * is aborted (QuickJS raises an uncatchable InternalError at the next
+ * check), so shutdown is bounded whatever the bundle does. */
+static int guest_interrupt(JSRuntime *rt, void *opaque) {
+  (void)rt;
+  pocketjs_esp_host_t *host = opaque;
+  if (!host->stopping) return 0;
+  uint32_t budget = host->cfg.stop_turn_budget_ms ? host->cfg.stop_turn_budget_ms : 50;
+  return (esp_timer_get_time() - host->turn_started_us) > (int64_t)budget * 1000;
+}
 
 static void drain_jobs(pocketjs_esp_host_t *host) {
   JSContext *ctx;
@@ -248,6 +290,7 @@ static bool guest_boot(pocketjs_esp_host_t *host) {
   size_t stack_limit = host->cfg.guest_stack_limit ? host->cfg.guest_stack_limit : (host->cfg.guest_task_stack / 4) * 3;
   JS_SetMaxStackSize(host->rt, stack_limit);
   JS_UpdateStackTop(host->rt);
+  JS_SetInterruptHandler(host->rt, guest_interrupt, host);
   host->ctx = JS_NewContext(host->rt);
   if (!host->ctx) {
     ESP_LOGE(TAG, "JS_NewContext failed");
@@ -261,6 +304,7 @@ static bool guest_boot(pocketjs_esp_host_t *host) {
   if (host->net) pocketjs_host_mount_network(host);
   if (host->cfg.before_eval) host->cfg.before_eval(host->ctx, host->cfg.user);
   int64_t t0 = esp_timer_get_time();
+  host->turn_started_us = t0;
   JSValue result = JS_Eval(host->ctx, host->bundle, host->bundle_len, "app.js", JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(result)) {
     log_exception(host->ctx, "eval");
@@ -269,8 +313,8 @@ static bool guest_boot(pocketjs_esp_host_t *host) {
   }
   JS_FreeValue(host->ctx, result);
   drain_jobs(host);
-  ESP_LOGI(TAG, "bundle evaluated in %lld us, guest heap %u bytes", (long long)(esp_timer_get_time() - t0),
-           (unsigned)host->guest_heap);
+  ESP_LOGI(TAG, "bundle evaluated in %lld us, guest heap %u bytes%s%s", (long long)(esp_timer_get_time() - t0),
+           (unsigned)host->guest_heap, host->cfg.plan_hash ? ", plan " : "", host->cfg.plan_hash ? host->cfg.plan_hash : "");
   global = JS_GetGlobalObject(host->ctx);
   host->frame_fn = JS_GetPropertyStr(host->ctx, global, "frame");
   JS_FreeValue(host->ctx, global);
@@ -287,6 +331,7 @@ static void guest_frame(pocketjs_esp_host_t *host, uint32_t frame) {
     pocketjs_host_net_unlock(host);
   }
   int64_t t0 = esp_timer_get_time();
+  host->turn_started_us = t0;
   if (JS_IsFunction(host->ctx, host->frame_fn)) {
     JSValue args[2] = {JS_NewInt32(host->ctx, 0), JS_NewInt32(host->ctx, 0x8080)};
     JSValue global = JS_GetGlobalObject(host->ctx);
@@ -309,43 +354,119 @@ static void guest_frame(pocketjs_esp_host_t *host, uint32_t frame) {
   if (host->cfg.after_frame) host->cfg.after_frame(frame, host->cfg.user);
 }
 
+/* Sleep until the absolute deadline (µs on the esp_timer clock). The tick
+ * granularity rounds UP, so a frame starts within one RTOS tick after its
+ * deadline and never before it; because deadlines are absolute (t0 + k/hz)
+ * the error does not accumulate and the cadence is exactly tick_hz. */
+static void sleep_until(int64_t deadline_us) {
+  int64_t wait = deadline_us - esp_timer_get_time();
+  if (wait <= 0) return;
+  const int64_t tick_us = (int64_t)portTICK_PERIOD_MS * 1000;
+  TickType_t ticks = (TickType_t)((wait + tick_us - 1) / tick_us);
+  if (ticks == 0) ticks = 1;
+  vTaskDelay(ticks);
+}
+
 static void guest_task(void *arg) {
   pocketjs_esp_host_t *host = arg;
   if (!guest_boot(host)) {
+    host->boot_failed = true;
+    host->stats.guest_boot_failed = true;
     host->stopping = true;
   }
-  TickType_t period = pdMS_TO_TICKS(1000 / (host->cfg.tick_hz ? host->cfg.tick_hz : 60));
-  if (period == 0) period = 1;
-  TickType_t last = xTaskGetTickCount();
-  uint32_t frame = 0;
+  const uint32_t hz = host->cfg.tick_hz ? host->cfg.tick_hz : 60;
+  /* Law 3: one guest turn per tick. A frame that overruns its period makes
+   * the following ticks late; they still get their turn (run back to back,
+   * no sleep) until the schedule is caught up. Only a host that falls more
+   * than max_backlog ticks (0.5 s) behind drops the excess and resyncs —
+   * the overload guard against a spiral, counted in stats.frames_skipped. */
+  const uint64_t max_backlog = hz / 2 ? hz / 2 : 1;
+  const int64_t t0 = esp_timer_get_time();
+  uint64_t k = 0;        /* tick index on the absolute schedule */
+  uint32_t frame = 0;    /* guest turns run */
   while (!host->stopping) {
+    int64_t deadline = t0 + (int64_t)((k * 1000000ULL) / hz);
+    int64_t now = esp_timer_get_time();
+    if (now > deadline) {
+      uint64_t behind = (uint64_t)(now - deadline) * hz / 1000000ULL; /* whole ticks late */
+      if (behind > max_backlog) {
+        k += behind;
+        host->stats.frames_skipped += (uint32_t)behind;
+        deadline = t0 + (int64_t)((k * 1000000ULL) / hz);
+      }
+    }
+    sleep_until(deadline); /* returns at once when late: the catch-up turn */
+    if (host->stopping) break;
     guest_frame(host, ++frame);
-    vTaskDelayUntil(&last, period);
+    k++;
   }
-  /* Wind-down: bounded frames so cancellations reach the guest. */
-  if (host->rt) {
+  /* Wind-down: bounded frames so cancellations reach the guest. Each turn is
+   * bounded by the interrupt handler (stopping is set). */
+  if (host->rt && host->ctx) {
     if (host->net) {
       pocketjs_host_net_lock(host);
       pnet_runtime_quiesce(host->net);
       pocketjs_host_net_unlock(host);
     }
-    for (int i = 0; i < 4 && host->ctx; i++) {
+    for (int i = 0; i < 4; i++) {
       guest_frame(host, ++frame);
-      vTaskDelay(period);
+      vTaskDelay(pdMS_TO_TICKS(1000 / hz ? 1000 / hz : 1));
     }
+  }
+  if (host->ctx) {
     JS_FreeValue(host->ctx, host->frame_fn);
+    host->frame_fn = JS_UNDEFINED;
     JS_FreeContext(host->ctx);
-    JS_FreeRuntime(host->rt);
     host->ctx = NULL;
+  }
+  if (host->rt) {
+    JS_FreeRuntime(host->rt);
     host->rt = NULL;
   }
-  host->guest_done = true;
-  vTaskDelete(NULL);
+  task_exit(host, &host->guest_done);
 }
 
 /* ------------------------------------------------------------------------ */
 /* Lifecycle                                                                 */
 /* ------------------------------------------------------------------------ */
+
+/* Release everything the host owns. Tasks that were started must already
+ * have exited (their done flags set): this is the single teardown path for
+ * a failed start and for stop(). */
+static void host_release(pocketjs_esp_host_t *host) {
+  if (host->net) pnet_runtime_destroy(host->net);
+  if (host->tls_provider) pnet_esp_tls_destroy(host->tls_provider);
+  if (host->driver) pnet_posix_driver_destroy(host->driver);
+  if (host->net_lock) vSemaphoreDelete(host->net_lock);
+  free(host);
+}
+
+/* Ask running tasks to stop and wait for them; true when every started task
+ * has exited and the host may be released. */
+static bool host_join(pocketjs_esp_host_t *host, uint32_t deadline_ms) {
+  __atomic_store_n(&host->stop_waiter, xTaskGetCurrentTaskHandle(), __ATOMIC_SEQ_CST);
+  __atomic_store_n(&host->stopping, true, __ATOMIC_SEQ_CST);
+  if (host->driver) pnet_posix_driver_wake(host->driver);
+  bool ok = true;
+  if (host->guest_task && !wait_flag(&host->guest_done, deadline_ms)) ok = false;
+  if (host->net_task) {
+    /* Keep waking the network task: its select may have started before
+     * stopping was visible to it. */
+    int64_t end = esp_timer_get_time() + (int64_t)deadline_ms * 1000;
+    while (!__atomic_load_n(&host->net_done, __ATOMIC_SEQ_CST)) {
+      if (esp_timer_get_time() >= end) {
+        ok = false;
+        break;
+      }
+      pnet_posix_driver_wake(host->driver);
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+    }
+  }
+  /* Let the idle task reclaim the deleted tasks' stacks before we free
+   * memory they were allocated next to. */
+  if (ok) vTaskDelay(pdMS_TO_TICKS(2));
+  return ok;
+}
 
 esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const char *bundle, size_t bundle_len,
                                   pocketjs_esp_host_t **out_host) {
@@ -356,9 +477,17 @@ esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const cha
   host->bundle = bundle;
   host->bundle_len = bundle_len;
   host->frame_fn = JS_UNDEFINED;
+  host->stats.plan_hash = cfg->plan_hash ? cfg->plan_hash : "";
+  esp_err_t err = ESP_OK;
   if (cfg->network_policy_json) {
+    if (cfg->network_tls && !cfg->wall_clock_trusted) {
+      ESP_LOGW(TAG, "TLS enabled without a wall_clock_trusted callback: verifying connections fail closed "
+                    "(tls_clock_untrusted) until the board layer provides one");
+    }
     host->net_lock = xSemaphoreCreateMutex();
+    if (!host->net_lock) { err = ESP_ERR_NO_MEM; goto fail; }
     host->driver = pnet_posix_driver_create(cfg->network_max_sockets > 0 ? cfg->network_max_sockets : 12);
+    if (!host->driver) { err = ESP_ERR_NO_MEM; goto fail; }
     pnet_platform plat = {host, plat_now_ms, plat_alloc, plat_free, plat_random, plat_log, plat_clock_trusted};
     pnet_runtime_config ncfg;
     if (cfg->network_config) ncfg = *cfg->network_config;
@@ -392,62 +521,64 @@ esp_err_t pocketjs_esp_host_start(const pocketjs_esp_host_config *cfg, const cha
     }
     if (cfg->network_tls) {
       host->tls_provider = pnet_esp_tls_create(pnet_posix_driver_ops(), host->driver);
-    }
-    if (cfg->network_tls && host->tls_provider) {
+      if (!host->tls_provider) {
+        ESP_LOGE(TAG, "ESP-TLS provider creation failed");
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+      }
       host->net = pnet_runtime_create_tls(&plat, pnet_posix_driver_ops(), host->driver, pnet_esp_tls_ops(),
                                           pnet_esp_tls_ctx(host->tls_provider), &ncfg, cfg->network_policy_json);
     } else {
       host->net = pnet_runtime_create(&plat, pnet_posix_driver_ops(), host->driver, &ncfg, cfg->network_policy_json);
     }
-    if (!host->net || !host->driver || !host->net_lock || (cfg->network_tls && !host->tls_provider)) {
-      ESP_LOGE(TAG, "network runtime creation failed (policy?)");
-      if (host->net) pnet_runtime_destroy(host->net);
-      if (host->tls_provider) pnet_esp_tls_destroy(host->tls_provider);
-      if (host->driver) pnet_posix_driver_destroy(host->driver);
-      if (host->net_lock) vSemaphoreDelete(host->net_lock);
-      free(host);
-      return ESP_FAIL;
+    if (!host->net) {
+      ESP_LOGE(TAG, "network runtime creation failed (is network_policy_json the plan's canonical policy?)");
+      err = ESP_ERR_INVALID_ARG;
+      goto fail;
     }
-    if (xTaskCreatePinnedToCore(net_task, "pocketjs-net", cfg->net_task_stack, host,
-                                cfg->net_task_priority, &host->net_task, cfg->net_task_core) != pdPASS) {
+    if (xTaskCreatePinnedToCore(net_task, "pocketjs-net", cfg->net_task_stack, host, cfg->net_task_priority,
+                                &host->net_task, cfg->net_task_core) != pdPASS) {
       ESP_LOGE(TAG, "network task creation failed");
-      pnet_runtime_destroy(host->net);
-      pnet_posix_driver_destroy(host->driver);
-      vSemaphoreDelete(host->net_lock);
-      free(host);
-      return ESP_ERR_NO_MEM;
+      host->net_task = NULL;
+      err = ESP_ERR_NO_MEM;
+      goto fail;
     }
   }
-  if (xTaskCreatePinnedToCore(guest_task, "pocketjs-guest", cfg->guest_task_stack, host,
-                              cfg->guest_task_priority, &host->guest_task, cfg->guest_task_core) != pdPASS) {
+  if (xTaskCreatePinnedToCore(guest_task, "pocketjs-guest", cfg->guest_task_stack, host, cfg->guest_task_priority,
+                              &host->guest_task, cfg->guest_task_core) != pdPASS) {
     ESP_LOGE(TAG, "guest task creation failed");
-    host->stopping = true;
-    return ESP_ERR_NO_MEM;
+    host->guest_task = NULL;
+    err = ESP_ERR_NO_MEM;
+    goto fail;
   }
   *out_host = host;
   return ESP_OK;
+
+fail:
+  /* One unwind path: stop whatever task already runs, then release. */
+  if (host_join(host, 5000)) host_release(host);
+  else ESP_LOGE(TAG, "start unwind: a task did not exit; leaking the host rather than freeing under it");
+  return err;
 }
 
 void pocketjs_esp_host_stop(pocketjs_esp_host_t *host) {
   if (!host) return;
-  host->stopping = true;
-  if (host->driver) pnet_posix_driver_wake(host->driver);
-  for (int i = 0; i < 200 && !host->guest_done; i++) vTaskDelay(pdMS_TO_TICKS(10));
-  for (int i = 0; i < 200 && host->net && !host->net_done; i++) {
-    pnet_posix_driver_wake(host->driver);
-    vTaskDelay(pdMS_TO_TICKS(10));
+  /* Bound: wind-down is 4 frames + the turn in progress, each capped by the
+   * stop budget; the network task exits within one select timeout. 10 s is
+   * far beyond that and exists only so a wedged task is detected. */
+  if (host_join(host, 10000)) {
+    host_release(host);
+  } else {
+    ESP_LOGE(TAG, "stop: a task did not exit in time; leaking the host rather than freeing under a running task");
   }
-  if (host->net) pnet_runtime_destroy(host->net);
-  if (host->tls_provider) pnet_esp_tls_destroy(host->tls_provider);
-  if (host->driver) pnet_posix_driver_destroy(host->driver);
-  if (host->net_lock) vSemaphoreDelete(host->net_lock);
-  free(host);
 }
 
 void pocketjs_esp_host_stats(pocketjs_esp_host_t *host, pocketjs_esp_host_stats_t *out) {
   *out = host->stats;
   out->guest_heap_bytes = host->guest_heap;
   out->guest_heap_high_water = host->guest_heap_high_water;
+  out->guest_boot_failed = host->boot_failed;
+  out->plan_hash = host->cfg.plan_hash ? host->cfg.plan_hash : "";
   if (host->net) {
     pocketjs_host_net_lock(host);
     out->net_heap_bytes = pnet_runtime_heap_bytes(host->net);
