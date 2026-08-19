@@ -161,6 +161,47 @@ describe("net SDK + deterministic sim host", () => {
     expect(() => original.clone()).toThrow(NetworkError);
   });
 
+  test("clone's tee is a hard bound: the lagging branch never holds more than the aggregate limit", async () => {
+    // 3 KiB body in 1 KiB chunks, a 2 KiB aggregate limit: the branch that
+    // is not read may buffer at most 2 KiB; the reading branch then waits
+    // (backpressure on the source) until the other branch drains.
+    const chunk = "x".repeat(1024);
+    const host = createSimNetHost({ "http://example.test/tee": { body: [chunk, chunk, chunk], chunkTicks: 1 } });
+    mount(host.ns);
+    const promise = pocketFetch("http://example.test/tee", { limits: { aggregateBytes: 2048 } });
+    await ticks(host);
+    const original = await promise;
+    const copy = original.clone();
+    const reader = original.body!;
+    // TeeBranch (the runtime class behind the clone's BodyStream) exposes
+    // its backlog; the test reads it through the class, not the public type.
+    const lagging = copy.body as unknown as import("../framework/src/net/body.ts").TeeBranch;
+    let read = 0;
+    const sink = new Uint8Array(256);
+    // Drive the leading branch as fast as the sim delivers.
+    const pump = (async () => {
+      for (;;) {
+        const { bytes, done } = await reader.readInto(sink);
+        read += bytes;
+        if (done) break;
+      }
+    })();
+    await ticks(host, 6);
+    // The leading branch is throttled by the bound: it cannot run ahead of
+    // the lagging branch by more than 2 KiB, whatever the source offers.
+    expect(read).toBeLessThanOrEqual(2048);
+    expect(lagging.available()).toBeLessThanOrEqual(2048);
+    expect(lagging.available()).toBe(read);
+    // Draining the lagging branch releases the leading one.
+    const drained = lagging.readInto(new Uint8Array(4096));
+    await ticks(host, 6);
+    expect((await drained).bytes).toBeGreaterThan(0);
+    await pump;
+    expect(read).toBe(3072);
+    await lagging.cancel();
+    await ticks(host, 2);
+  });
+
   test("HEAD and 204 responses have a null body and retire on end", async () => {
     const host = createSimNetHost({
       "http://example.test/head": { status: 200, headers: { "content-length": "42" }, length: 42, body: "" },

@@ -204,7 +204,20 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
       end(state);
       return;
     }
-    const reader = response.body.getReader();
+    // A BYOB reader bounds every read to the queue's free space, so the
+    // receive queue is a hard cap (queueBytes) the way a native core's is.
+    // Bodies that are not byte streams (some runtimes' synthetic responses)
+    // fall back to the default reader, whose chunks are sized by the
+    // browser: the host then stops pulling at the cap but the chunk that
+    // crossed it is held whole (at most one chunk past queueBytes).
+    let reader;
+    let byob = false;
+    try {
+      reader = response.body.getReader({ mode: "byob" });
+      byob = true;
+    } catch {
+      reader = response.body.getReader();
+    }
     state.reader = reader;
     try {
       for (;;) {
@@ -216,7 +229,9 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
         }
         if (state.terminal) break;
         state.armIdle();
-        const { done, value } = await reader.read();
+        const { done, value } = byob
+          ? await reader.read(new Uint8Array(Math.min(state.queueBytes - state.queued, 64 * 1024)))
+          : await reader.read();
         if (state.terminal) break;
         if (done) {
           end(state);
@@ -227,6 +242,7 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
           fail(state, "response_too_large", `body exceeds ${state.maxBodyBytes} bytes`);
           break;
         }
+        if (value.byteLength === 0) continue; // a BYOB read may fill nothing yet
         state.chunks.push(value);
         state.queued += value.byteLength;
         state.dirty = true; // new bytes: announce `readable` at the next tick

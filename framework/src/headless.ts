@@ -12,10 +12,10 @@
 // This is what the network smoke firmware and headless daemons use; a UI
 // app keeps using `render()`/`mount()` from the framework entry.
 
-import { __advanceClock, resetClock } from "./clock.ts";
-import { __drainEffects, resetEffects } from "./effects.ts";
+import { resetClock } from "./clock.ts";
+import { resetEffects } from "./effects.ts";
+import { runFramePrelude } from "./frame-prelude.ts";
 import { installFrameHandler } from "./host.ts";
-import { runServicePumps } from "./services.ts";
 
 export interface HeadlessOptions {
   /** Called every frame after service pumps and effect delivery. */
@@ -28,9 +28,7 @@ export function mountHeadless(options: HeadlessOptions = {}): () => void {
   resetEffects();
   const hook = options.frame;
   installFrameHandler((buttons: number, analog?: number) => {
-    __advanceClock(); // virtual frame++, fire due after() timers
-    runServicePumps(); // only modules with pending async work register here
-    __drainEffects(); // frame-boundary deliveries enter the world first
+    runFramePrelude(); // clock → pumps → effects (frame-prelude.ts); no input surface to latch
     if (hook) hook(buttons, analog ?? 0);
   });
   return () => {

@@ -475,11 +475,26 @@ class TeeShared {
     }
   }
 
-  /** Pull one chunk from the source into both branch buffers. */
+  /** Bytes one more pull may add without pushing a live branch past the
+   * limit: the branch that pulls has drained its own queue, so the bound is
+   * the other branch's backlog. */
+  room(): number {
+    let backlog = 0;
+    for (const i of [0, 1] as const) {
+      if (!this.cancelled[i] && this.buffered[i] > backlog) backlog = this.buffered[i];
+    }
+    return Math.min(16 * 1024, this.limit - backlog);
+  }
+
+  /** Pull one chunk from the source into both branch buffers. The chunk is
+   * sized to the remaining room so a branch's backlog never exceeds
+   * `limit` (a hard bound, not "stop after crossing it"). */
   pull(): Promise<void> {
     if (this.pulling) return this.pulling;
+    const room = this.room();
+    if (room <= 0) return Promise.resolve(); // the caller is blocked; it waits
     this.pulling = (async () => {
-      const chunk = new Uint8Array(16 * 1024);
+      const chunk = new Uint8Array(room);
       try {
         const { bytes, done } = await this.source["readIntoLocked"](chunk);
         if (bytes > 0) {
