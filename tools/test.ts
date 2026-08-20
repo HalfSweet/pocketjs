@@ -44,6 +44,7 @@ const SUITE: readonly Stage[] = [
       "tests/widget-args.test.ts",
       "tests/ipod-nano.test.ts",
       "tests/note.test.ts",
+      "tests/desk98.test.ts",
       "tests/site-stage.test.ts",
       "tests/host-build-inputs.test.ts",
       "tests/iphone2g-profile.test.ts",
@@ -116,6 +117,12 @@ const SUITE: readonly Stage[] = [
     prep: [["bun", "tools/build.ts", "hero-main", "--framework=octane"]],
     browser: true,
     tests: ["tests/octane-smoke.test.ts"],
+  },
+  {
+    name: "desk98 sim",
+    prep: [["bun", "tools/build.ts", "desk98-main", "--framework=vue-vapor"]],
+    browser: true,
+    tests: ["tests/desk98-sim.test.ts"],
   },
   {
     name: "cafe sim (determinism)",
