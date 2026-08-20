@@ -34,7 +34,7 @@ pocketjs/
 │  └─ compiler/   the interpreted-path build pipeline (jsx-plugin, tailwind, pak)
 ├─ vapor/        Pocket Vapor: the AOT compiler family (Vue Vapor subset → GBA/GB/NES)
 ├─ contracts/    single sources of truth binding the layers
-│  ├─ spec/       op contract, platform contracts, manifest + package spec, gen-rust
+│  ├─ spec/       op contract, platform contracts, manifest + package spec, gen-rust + gen-c
 │  └─ schema/     published JSON schemas (pocket-2.json)
 ├─ apps/         demo apps (pocket.json manifests; built by tools/build.ts)
 ├─ tools/        every command: build/dev/device/release bun scripts (flat),

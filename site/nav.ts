@@ -57,6 +57,14 @@ export interface BlogPost {
 
 export const BLOG_POSTS: BlogPost[] = [
   {
+    slug: "blackberry-classic",
+    title: "One Square Screen, Two Native Stacks: PocketJS on the BlackBerry Classic",
+    date: "2026-08-19",
+    description:
+      "The same PocketJS guest, two native stacks on one phone: a BlackBerry 10 Core Native BAR over libscreen/EGL/GLES2 on a rooted Classic, and an Android 4.3 (API 18) APK through the BB10 Android runtime on a stock one — diverging only below the QuickJS bridge. Inside: QNX's microkernel and Screen compositor, the dead signing servers a community root project reopened, BlackBerry's two-protocol PC link (HTTPS+CGI+XML to manage, SMB/CIFS to mount files), why MSC only ever exposed the SD card, and the optical trackpad mapped as just another relative axis.",
+    author: { name: "HalfSweet", url: "https://github.com/HalfSweet" },
+  },
+  {
     slug: "pocketjs-on-windows-ce",
     title: "From Message Pump to Multitouch: Windows CE, PocketJS, and the Meizu M8",
     date: "2026-08-16",

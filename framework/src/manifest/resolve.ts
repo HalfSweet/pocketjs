@@ -362,6 +362,7 @@ export function resolveBuildPlan(
     app: {
       id: manifest.id,
       title: manifest.title,
+      version: manifest.version,
       entry: manifest.app.entry,
       output,
       framework: manifest.app.framework,
