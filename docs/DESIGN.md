@@ -72,10 +72,12 @@ artifacts: `$JOB_TMP/map-*.json`).
   preserves ordering with the core RGB565 rasterizer for unsupported ops.
   It never allocates a full-frame RGB888/ARGB8888 intermediate.
 - **SiFli stays 16-bit and HAL-only**: `engine/backends/sifli-epic/` uses the
-  same hybrid contract for RGB565 fills, opaque gradients, and A8 coverage.
-  The board adapter calls blocking `HAL_EPIC_*` operations directly and owns
-  D-cache synchronization; clipped/translucent gradients, triangles, and
-  incompatible textures retain ordered RGB565 software fallback.
+  same hybrid contract for RGB565 fills, opaque gradients, A8 coverage,
+  texture format conversion, and affine/projective image transforms. The
+  board adapter calls blocking `HAL_EPIC_*` operations directly and owns
+  D-cache synchronization; Gouraud triangles, clipped/translucent gradients,
+  unsupported sampling modes, and incompatible textures retain ordered RGB565
+  software fallback.
 - **Native animation**: tweens/springs tick in Rust per vblank with **fixed
   dt = 1/60 s** (frame content is a pure function of frame index — this is
   what makes byte-exact goldens possible **[R]**). JS only declares motion.

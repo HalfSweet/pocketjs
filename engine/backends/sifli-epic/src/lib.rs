@@ -3,8 +3,9 @@
 //! The render target is always opaque RGB565. Hardware-friendly operations
 //! are submitted through [`EpicOps`]; unsupported operations are executed in
 //! order by the core's RGB565 software rasterizer. A single aligned A8 scratch
-//! plane batches glyphs and alpha-only quads, so antialiasing never requires
-//! a 32-bit color framebuffer.
+//! plane batches glyphs and alpha-only quads, while compatible color textures
+//! and paired triangle quads use EPIC format conversion and 3×3 transforms.
+//! Antialiasing never requires a 32-bit color framebuffer.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -36,6 +37,23 @@ pub struct Rect {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+}
+
+/// One physical framebuffer edge coordinate used by EPIC texture transforms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// PocketJS texture layouts that can be mapped directly to SiFli EPIC input
+/// layers. PSM4444 remains on the software path because EPIC has no matching
+/// packed ARGB4444 input mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureFormat {
+    Psm5650,
+    Psm8888,
+    PsmT8,
 }
 
 impl Rect {
@@ -96,6 +114,28 @@ pub trait EpicOps {
         color: u16,
     ) -> bool;
 
+    /// Fill or alpha-blend one packed ABGR color into `rect`. The default
+    /// preserves existing implementations by routing opaque colors through
+    /// [`EpicOps::fill_rgb565`] and rejecting translucent colors.
+    fn fill_color_rgb565(
+        &mut self,
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        rect: Rect,
+        color: [u8; 3],
+        alpha: u8,
+    ) -> bool {
+        alpha == 255
+            && self.fill_rgb565(
+                destination,
+                width,
+                height,
+                rect,
+                pack_rgb565(color[0] as u32, color[1] as u32, color[2] as u32),
+            )
+    }
+
     /// Fill `rect` with one opaque two-stop linear gradient. The packed
     /// colors use the DrawList's little-endian RGBA/ABGR-u32 convention.
     /// Returning false leaves the operation to ordered software fallback.
@@ -126,6 +166,33 @@ pub trait EpicOps {
         color: [u8; 3],
         global_alpha: u8,
     ) -> bool;
+
+    /// Blend and transform a PocketJS texture over the RGB565 destination.
+    ///
+    /// `destination_quad` is ordered TL, BL, BR, TR and corresponds to the
+    /// four edges of `source_rect`. `destination_clip` bounds every write and
+    /// permits damage/scissor clipping without changing transform phase.
+    /// `modulate` is the DrawList ABGR color multiplier. Returning `false`
+    /// must leave the destination untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn blend_texture_rgb565(
+        &mut self,
+        _destination: &mut [u16],
+        _width: u32,
+        _height: u32,
+        _source: &[u8],
+        _palette: Option<&[u8]>,
+        _source_width: u32,
+        _source_height: u32,
+        _format: TextureFormat,
+        _source_rect: Rect,
+        _destination_quad: [Point; 4],
+        _destination_clip: Rect,
+        _modulate: u32,
+        _linear: bool,
+    ) -> bool {
+        false
+    }
 
     /// Copy an opaque PSP PSM 5650 texture into the RGB565 destination with
     /// an optional hardware copy/transform engine. PSM 5650 stores R and B
@@ -641,6 +708,38 @@ impl Renderer {
                 spec::draw_op::TRI if i + 7 <= words.len() => {
                     if !triangle_bounds([words[i + 1], words[i + 2], words[i + 3]], clip).is_empty()
                     {
+                        if let Some((next, rendered)) = self.try_tri_pair(
+                            words,
+                            i,
+                            destination,
+                            width,
+                            height,
+                            surface,
+                            clip,
+                            epic,
+                            stats,
+                        ) {
+                            if !rendered {
+                                self.software_op(
+                                    ui,
+                                    destination,
+                                    surface,
+                                    clip,
+                                    &words[i..i + 7],
+                                    stats,
+                                );
+                                self.software_op(
+                                    ui,
+                                    destination,
+                                    surface,
+                                    clip,
+                                    &words[i + 7..next],
+                                    stats,
+                                );
+                            }
+                            i = next;
+                            continue;
+                        }
                         self.software_op(ui, destination, surface, clip, &words[i..i + 7], stats);
                     }
                     i += 7;
@@ -648,6 +747,39 @@ impl Renderer {
                 spec::draw_op::TEX_TRI if i + 12 <= words.len() => {
                     if !triangle_bounds([words[i + 2], words[i + 5], words[i + 8]], clip).is_empty()
                     {
+                        if let Some((next, rendered)) = self.try_tex_tri_pair(
+                            ui,
+                            words,
+                            i,
+                            destination,
+                            width,
+                            height,
+                            surface,
+                            clip,
+                            epic,
+                            stats,
+                        ) {
+                            if !rendered {
+                                self.software_op(
+                                    ui,
+                                    destination,
+                                    surface,
+                                    clip,
+                                    &words[i..i + 12],
+                                    stats,
+                                );
+                                self.software_op(
+                                    ui,
+                                    destination,
+                                    surface,
+                                    clip,
+                                    &words[i + 12..next],
+                                    stats,
+                                );
+                            }
+                            i = next;
+                            continue;
+                        }
                         self.software_op(ui, destination, surface, clip, &words[i..i + 12], stats);
                     }
                     i += 12;
@@ -675,12 +807,25 @@ impl Renderer {
             return true;
         }
         let rect = local_physical_rect(logical, surface, self.config.scale);
-        if a == 255 && rect.area() >= self.config.min_fill_pixels {
-            if epic.fill_rgb565(destination, width, height, rect, pack_rgb565(r, g, b)) {
-                stats.epic_fills += 1;
-                return true;
-            }
-        } else if rect.area() >= self.config.min_blend_pixels {
+        let threshold = if a == 255 {
+            self.config.min_fill_pixels
+        } else {
+            self.config.min_blend_pixels
+        };
+        if rect.area() >= threshold
+            && epic.fill_color_rgb565(
+                destination,
+                width,
+                height,
+                rect,
+                [r as u8, g as u8, b as u8],
+                a as u8,
+            )
+        {
+            stats.epic_fills += 1;
+            return true;
+        }
+        if a < 255 && rect.area() >= self.config.min_blend_pixels {
             let mask = self.mask_mut();
             fill_mask_rect(mask, width, rect, a as u8);
             if epic.blend_a8_rgb565(
@@ -878,11 +1023,22 @@ impl Renderer {
                     }
                 }
             }
-            return None;
         }
 
         if !self.is_white_alpha_texture(handle, &view) {
-            return None;
+            return self
+                .try_texture_quad(
+                    &view,
+                    op,
+                    destination,
+                    width,
+                    height,
+                    surface,
+                    clip,
+                    epic,
+                    stats,
+                )
+                .then_some(start + 9);
         }
         let modulate = op[8];
         let mut end = start;
@@ -934,6 +1090,230 @@ impl Renderer {
         } else {
             None
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_texture_quad<O: EpicOps>(
+        &mut self,
+        view: &TexView<'_>,
+        op: &[u32],
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        surface: Clip,
+        clip: Clip,
+        epic: &mut O,
+        stats: &mut RenderStats,
+    ) -> bool {
+        let (_, _, _, alpha) = channels(op[8]);
+        if alpha == 0 {
+            return true;
+        }
+        let Some(format) = texture_format(view) else {
+            return false;
+        };
+        let logical = logical_rect(op[2], op[3]).intersect(clip);
+        let destination_rect = local_physical_rect(logical, surface, self.config.scale);
+        if destination_rect.area() < self.config.min_copy_pixels {
+            return false;
+        }
+        let Some((source_rect, mirror_x, mirror_y)) = texture_source_rect(view, op, logical) else {
+            return false;
+        };
+        let left = destination_rect.x as i32;
+        let top = destination_rect.y as i32;
+        let right = (destination_rect.x + destination_rect.w) as i32;
+        let bottom = (destination_rect.y + destination_rect.h) as i32;
+        let source_left = if mirror_x { right } else { left };
+        let source_right = if mirror_x { left } else { right };
+        let source_top = if mirror_y { bottom } else { top };
+        let source_bottom = if mirror_y { top } else { bottom };
+        let quad = [
+            Point {
+                x: source_left,
+                y: source_top,
+            },
+            Point {
+                x: source_left,
+                y: source_bottom,
+            },
+            Point {
+                x: source_right,
+                y: source_bottom,
+            },
+            Point {
+                x: source_right,
+                y: source_top,
+            },
+        ];
+        if epic.blend_texture_rgb565(
+            destination,
+            width,
+            height,
+            view.pixels,
+            view.palette,
+            view.w,
+            view.h,
+            format,
+            source_rect,
+            quad,
+            destination_rect,
+            op[8],
+            view.linear,
+        ) {
+            stats.epic_copies += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_tex_tri_pair<O: EpicOps>(
+        &mut self,
+        ui: &Ui,
+        words: &[u32],
+        start: usize,
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        surface: Clip,
+        clip: Clip,
+        epic: &mut O,
+        stats: &mut RenderStats,
+    ) -> Option<(usize, bool)> {
+        let next = start.checked_add(24)?;
+        if next > words.len() || words[start + 12] != spec::draw_op::TEX_TRI {
+            return None;
+        }
+        let first = &words[start..start + 12];
+        let second = &words[start + 12..next];
+        if first[1] != second[1] || first[11] != second[11] {
+            return None;
+        }
+        let unordered = collect_texture_quad(first, second)?;
+        let Some(view) = ui.texture(first[1] as i32) else {
+            return Some((next, false));
+        };
+        let Some((source_rect, quad)) = order_texture_quad(&view, unordered) else {
+            return Some((next, false));
+        };
+        let bounds = texture_quad_bounds(quad).intersect(clip);
+        if bounds.is_empty() {
+            return Some((next, true));
+        }
+        let destination_clip = local_physical_rect(bounds, surface, self.config.scale);
+        if destination_clip.area() < self.config.min_copy_pixels {
+            return Some((next, false));
+        }
+        let (_, _, _, alpha) = channels(first[11]);
+        if alpha == 0 {
+            return Some((next, true));
+        }
+        let Some(format) = texture_format(&view) else {
+            return Some((next, false));
+        };
+        let scale = self.config.scale as i32;
+        let physical_quad = quad.map(|vertex| Point {
+            x: (vertex.x - surface.x0) * scale,
+            y: (vertex.y - surface.y0) * scale,
+        });
+        let rendered = epic.blend_texture_rgb565(
+            destination,
+            width,
+            height,
+            view.pixels,
+            view.palette,
+            view.w,
+            view.h,
+            format,
+            source_rect,
+            physical_quad,
+            destination_clip,
+            first[11],
+            view.linear,
+        );
+        if rendered {
+            stats.epic_copies += 1;
+        }
+        Some((next, rendered))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_tri_pair<O: EpicOps>(
+        &mut self,
+        words: &[u32],
+        start: usize,
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        surface: Clip,
+        clip: Clip,
+        epic: &mut O,
+        stats: &mut RenderStats,
+    ) -> Option<(usize, bool)> {
+        let next = start.checked_add(14)?;
+        if next > words.len() || words[start + 7] != spec::draw_op::TRI {
+            return None;
+        }
+        let first = &words[start..start + 7];
+        let second = &words[start + 7..next];
+        let color = first[4];
+        if first[5] != color
+            || first[6] != color
+            || second[4] != color
+            || second[5] != color
+            || second[6] != color
+        {
+            return None;
+        }
+        let logical_quad = collect_solid_quad(first, second)?;
+        let bounds = point_quad_bounds(logical_quad).intersect(clip);
+        if bounds.is_empty() {
+            return Some((next, true));
+        }
+        let destination_clip = local_physical_rect(bounds, surface, self.config.scale);
+        if destination_clip.area() < self.config.min_fill_pixels {
+            return Some((next, false));
+        }
+        let (r, g, b, a) = channels(color);
+        if a == 0 {
+            return Some((next, true));
+        }
+        let pixel = [r as u8, g as u8, b as u8, a as u8];
+        let source = AlignedRgba([
+            pixel[0], pixel[1], pixel[2], pixel[3], pixel[0], pixel[1], pixel[2], pixel[3],
+            pixel[0], pixel[1], pixel[2], pixel[3], pixel[0], pixel[1], pixel[2], pixel[3],
+        ]);
+        let scale = self.config.scale as i32;
+        let physical_quad = logical_quad.map(|point| Point {
+            x: (point.x - surface.x0) * scale,
+            y: (point.y - surface.y0) * scale,
+        });
+        let rendered = epic.blend_texture_rgb565(
+            destination,
+            width,
+            height,
+            &source.0,
+            None,
+            2,
+            2,
+            TextureFormat::Psm8888,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            physical_quad,
+            destination_clip,
+            0xffff_ffff,
+            false,
+        );
+        if rendered {
+            stats.epic_fills += 1;
+        }
+        Some((next, rendered))
     }
 
     fn software_op(
@@ -1018,6 +1398,190 @@ impl Renderer {
         self.alpha_texture_cache.push((handle, result));
         result
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TextureVertex {
+    x: i32,
+    y: i32,
+    u: f32,
+    v: f32,
+}
+
+#[repr(align(4))]
+struct AlignedRgba([u8; 16]);
+
+impl TextureVertex {
+    fn from_words(xy_word: u32, u_word: u32, v_word: u32) -> Option<Self> {
+        let (x, y) = xy(xy_word);
+        let u = f32::from_bits(u_word);
+        let v = f32::from_bits(v_word);
+        (u.is_finite() && v.is_finite()).then_some(Self { x, y, u, v })
+    }
+
+    fn same(self, other: Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.u.to_bits() == other.u.to_bits()
+            && self.v.to_bits() == other.v.to_bits()
+    }
+}
+
+fn collect_texture_quad(first: &[u32], second: &[u32]) -> Option<[TextureVertex; 4]> {
+    let mut vertices = [TextureVertex::default(); 4];
+    let mut count = 0usize;
+    for op in [first, second] {
+        for offset in [2usize, 5, 8] {
+            let vertex = TextureVertex::from_words(op[offset], op[offset + 1], op[offset + 2])?;
+            if vertices[..count]
+                .iter()
+                .copied()
+                .any(|existing| existing.same(vertex))
+            {
+                continue;
+            }
+            if count == vertices.len() {
+                return None;
+            }
+            vertices[count] = vertex;
+            count += 1;
+        }
+    }
+    (count == vertices.len()).then_some(vertices)
+}
+
+fn order_texture_quad(
+    view: &TexView<'_>,
+    vertices: [TextureVertex; 4],
+) -> Option<(Rect, [TextureVertex; 4])> {
+    let mut min_u = vertices[0].u;
+    let mut max_u = vertices[0].u;
+    let mut min_v = vertices[0].v;
+    let mut max_v = vertices[0].v;
+    for vertex in &vertices[1..] {
+        min_u = min_u.min(vertex.u);
+        max_u = max_u.max(vertex.u);
+        min_v = min_v.min(vertex.v);
+        max_v = max_v.max(vertex.v);
+    }
+    if max_u - min_u <= 0.000_001 || max_v - min_v <= 0.000_001 {
+        return None;
+    }
+    let find = |u: f32, v: f32| {
+        vertices
+            .iter()
+            .copied()
+            .find(|vertex| (vertex.u - u).abs() <= 0.000_001 && (vertex.v - v).abs() <= 0.000_001)
+    };
+    let quad = [
+        find(min_u, min_v)?,
+        find(min_u, max_v)?,
+        find(max_u, max_v)?,
+        find(max_u, min_v)?,
+    ];
+    let x0 = exact_texel_edge(min_u, view.w)?;
+    let y0 = exact_texel_edge(min_v, view.h)?;
+    let x1 = exact_texel_edge(max_u, view.w)?;
+    let y1 = exact_texel_edge(max_v, view.h)?;
+    (x1 > x0 && y1 > y0).then_some((
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        },
+        quad,
+    ))
+}
+
+fn texture_quad_bounds(vertices: [TextureVertex; 4]) -> Clip {
+    let mut x0 = vertices[0].x;
+    let mut y0 = vertices[0].y;
+    let mut x1 = vertices[0].x;
+    let mut y1 = vertices[0].y;
+    for vertex in &vertices[1..] {
+        x0 = x0.min(vertex.x);
+        y0 = y0.min(vertex.y);
+        x1 = x1.max(vertex.x);
+        y1 = y1.max(vertex.y);
+    }
+    Clip { x0, y0, x1, y1 }
+}
+
+fn collect_solid_quad(first: &[u32], second: &[u32]) -> Option<[Point; 4]> {
+    let mut points = [Point::default(); 4];
+    let mut count = 0usize;
+    for op in [first, second] {
+        for &word in &op[1..4] {
+            let (x, y) = xy(word);
+            let point = Point { x, y };
+            if points[..count].contains(&point) {
+                continue;
+            }
+            if count == points.len() {
+                return None;
+            }
+            points[count] = point;
+            count += 1;
+        }
+    }
+    if count != points.len() {
+        return None;
+    }
+
+    let center_x2: i64 = points.iter().map(|point| point.x as i64).sum();
+    let center_y2: i64 = points.iter().map(|point| point.y as i64).sum();
+    let before = |left: Point, right: Point| {
+        let lx = left.x as i64 * 4 - center_x2;
+        let ly = left.y as i64 * 4 - center_y2;
+        let rx = right.x as i64 * 4 - center_x2;
+        let ry = right.y as i64 * 4 - center_y2;
+        let left_half = ly < 0 || (ly == 0 && lx >= 0);
+        let right_half = ry < 0 || (ry == 0 && rx >= 0);
+        if left_half != right_half {
+            return left_half;
+        }
+        let cross = lx * ry - ly * rx;
+        if cross != 0 {
+            cross > 0
+        } else {
+            lx * lx + ly * ly < rx * rx + ry * ry
+        }
+    };
+    for i in 1..points.len() {
+        let mut j = i;
+        while j > 0 && before(points[j], points[j - 1]) {
+            points.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+    let mut sign = 0i64;
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) & 3];
+        let c = points[(i + 2) & 3];
+        let cross =
+            (b.x - a.x) as i64 * (c.y - b.y) as i64 - (b.y - a.y) as i64 * (c.x - b.x) as i64;
+        if cross == 0 || (sign != 0 && cross.signum() != sign) {
+            return None;
+        }
+        sign = cross.signum();
+    }
+    Some(points)
+}
+
+fn point_quad_bounds(points: [Point; 4]) -> Clip {
+    let mut x0 = points[0].x;
+    let mut y0 = points[0].y;
+    let mut x1 = points[0].x;
+    let mut y1 = points[0].y;
+    for point in &points[1..] {
+        x0 = x0.min(point.x);
+        y0 = y0.min(point.y);
+        x1 = x1.max(point.x);
+        y1 = y1.max(point.y);
+    }
+    Clip { x0, y0, x1, y1 }
 }
 
 fn glyph_run_bounds(ui: &Ui, words: &[u32], clip: Clip) -> Clip {
@@ -1123,6 +1687,16 @@ fn channels(color: u32) -> (u32, u32, u32, u32) {
         (color >> 16) & 0xff,
         color >> 24,
     )
+}
+
+#[inline]
+fn texture_format(view: &TexView<'_>) -> Option<TextureFormat> {
+    match view.psm {
+        spec::psm::PSM_5650 => Some(TextureFormat::Psm5650),
+        spec::psm::PSM_8888 => Some(TextureFormat::Psm8888),
+        spec::psm::PSM_T8 if view.palette.is_some() => Some(TextureFormat::PsmT8),
+        _ => None,
+    }
 }
 
 #[inline]
@@ -1347,6 +1921,13 @@ mod tests {
         last_source_rect: Rect,
         last_destination_rect: Rect,
         last_transform: TextureTransform,
+        color_fills_enabled: bool,
+        texture_blends_enabled: bool,
+        texture_blends: u32,
+        last_texture_format: Option<TextureFormat>,
+        last_texture_quad: [Point; 4],
+        last_texture_clip: Rect,
+        last_modulate: u32,
     }
 
     impl EpicOps for MockEpic {
@@ -1401,6 +1982,43 @@ mod tests {
             true
         }
 
+        fn fill_color_rgb565(
+            &mut self,
+            destination: &mut [u16],
+            width: u32,
+            height: u32,
+            rect: Rect,
+            color: [u8; 3],
+            alpha: u8,
+        ) -> bool {
+            if alpha == 255 {
+                return self.fill_rgb565(
+                    destination,
+                    width,
+                    height,
+                    rect,
+                    pack_rgb565(color[0] as u32, color[1] as u32, color[2] as u32),
+                );
+            }
+            if !self.color_fills_enabled {
+                return false;
+            }
+            self.fills += 1;
+            self.last_surface_width = width;
+            self.last_surface_height = height;
+            self.last_fill_rect = rect;
+            for y in rect.y..rect.y + rect.h {
+                for x in rect.x..rect.x + rect.w {
+                    blend_rgb565(
+                        &mut destination[(y * width + x) as usize],
+                        color,
+                        alpha as u32,
+                    );
+                }
+            }
+            true
+        }
+
         fn blend_a8_rgb565(
             &mut self,
             destination: &mut [u16],
@@ -1427,6 +2045,35 @@ mod tests {
                     blend_rgb565(&mut destination[index], color, alpha);
                 }
             }
+            true
+        }
+
+        fn blend_texture_rgb565(
+            &mut self,
+            _destination: &mut [u16],
+            _width: u32,
+            _height: u32,
+            _source: &[u8],
+            _palette: Option<&[u8]>,
+            _source_width: u32,
+            _source_height: u32,
+            format: TextureFormat,
+            source_rect: Rect,
+            destination_quad: [Point; 4],
+            destination_clip: Rect,
+            modulate: u32,
+            _linear: bool,
+        ) -> bool {
+            if !self.texture_blends_enabled {
+                return false;
+            }
+            self.copies += 1;
+            self.texture_blends += 1;
+            self.last_texture_format = Some(format);
+            self.last_source_rect = source_rect;
+            self.last_texture_quad = destination_quad;
+            self.last_texture_clip = destination_clip;
+            self.last_modulate = modulate;
             true
         }
 
@@ -2088,6 +2735,266 @@ mod tests {
         assert_eq!(stats.software_ops, 1);
         assert_eq!(epic.gradients, 0);
         assert_eq!(output, full_reference(&ui, &words, 8, 8));
+    }
+
+    #[test]
+    fn routes_translucent_solid_rects_to_epic_fill() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let words = [
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(8, 8),
+            0xff20_1008,
+            spec::draw_op::RECT,
+            xy_word(2, 2),
+            wh_word(4, 4),
+            0x8000_00ff,
+        ];
+        let expected = full_reference(&ui, &words, 8, 8);
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            color_fills_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_fills, 3, "clear, background, alpha fill");
+        assert_eq!(stats.epic_blends, 0);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn routes_rgba_texture_scaling_and_modulate_to_epic() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let texture = [
+            255, 0, 0, 255, 0, 255, 0, 192, 0, 0, 255, 128, 255, 255, 0, 64,
+        ];
+        let handle = ui.upload_texture(&texture, 2, 2, spec::psm::PSM_8888);
+        let modulate = 0xc080_ffff;
+        let words = [
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(2, 1),
+            wh_word(4, 6),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            modulate,
+        ];
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_copies, 1);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.texture_blends, 1);
+        assert_eq!(epic.last_texture_format, Some(TextureFormat::Psm8888));
+        assert_eq!(
+            epic.last_source_rect,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2
+            }
+        );
+        assert_eq!(
+            epic.last_texture_quad,
+            [
+                Point { x: 2, y: 1 },
+                Point { x: 2, y: 7 },
+                Point { x: 6, y: 7 },
+                Point { x: 6, y: 1 },
+            ]
+        );
+        assert_eq!(
+            epic.last_texture_clip,
+            Rect {
+                x: 2,
+                y: 1,
+                w: 4,
+                h: 6
+            }
+        );
+
+        let expected = full_reference(&ui, &words, 8, 8);
+        let mut fallback = vec![0u16; 64];
+        let fallback_stats = renderer()
+            .render(&ui, &words, &mut fallback, 8, 8, &mut MockEpic::default())
+            .unwrap();
+        assert_eq!(fallback_stats.epic_copies, 0);
+        assert_eq!(fallback_stats.software_ops, 1);
+        assert_eq!(fallback, expected);
+        assert_eq!(epic.last_modulate, modulate);
+    }
+
+    #[test]
+    fn routes_indexed_texture_and_palette_conversion_to_epic() {
+        let mut ui = Ui::new();
+        ui.set_viewport(4.0, 4.0);
+        let mut texture = vec![0u8; 1024];
+        texture[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        texture[4..8].copy_from_slice(&[0, 0, 255, 128]);
+        texture.extend_from_slice(&[0, 1, 1, 0]);
+        let handle = ui.upload_texture(&texture, 2, 2, spec::psm::PSM_T8);
+        let words = [
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(0, 0),
+            wh_word(4, 4),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0xffff_ffff,
+        ];
+        let mut output = vec![0u16; 16];
+        let mut epic = MockEpic {
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 4, 4, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_copies, 1);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.last_texture_format, Some(TextureFormat::PsmT8));
+    }
+
+    #[test]
+    fn combines_textured_triangles_into_one_epic_projective_quad() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let texture = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        let handle = ui.upload_texture(&texture, 2, 2, spec::psm::PSM_8888);
+        let vertex = |x: i16, y: i16, u: f32, v: f32| [xy_word(x, y), u.to_bits(), v.to_bits()];
+        let tl = vertex(2, 0, 0.0, 0.0);
+        let bl = vertex(0, 4, 0.0, 1.0);
+        let br = vertex(4, 6, 1.0, 1.0);
+        let tr = vertex(6, 2, 1.0, 0.0);
+        let mut words = vec![spec::draw_op::TEX_TRI, handle as u32];
+        words.extend_from_slice(&tl);
+        words.extend_from_slice(&bl);
+        words.extend_from_slice(&br);
+        words.push(0xffff_ffff);
+        words.extend_from_slice(&[spec::draw_op::TEX_TRI, handle as u32]);
+        words.extend_from_slice(&tl);
+        words.extend_from_slice(&br);
+        words.extend_from_slice(&tr);
+        words.push(0xffff_ffff);
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_copies, 1);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.texture_blends, 1);
+        assert_eq!(
+            epic.last_texture_quad,
+            [
+                Point { x: 2, y: 0 },
+                Point { x: 0, y: 4 },
+                Point { x: 4, y: 6 },
+                Point { x: 6, y: 2 },
+            ]
+        );
+        assert_eq!(
+            epic.last_texture_clip,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 6,
+                h: 6
+            }
+        );
+
+        let expected = full_reference(&ui, &words, 8, 8);
+        let mut fallback = vec![0u16; 64];
+        let fallback_stats = renderer()
+            .render(&ui, &words, &mut fallback, 8, 8, &mut MockEpic::default())
+            .unwrap();
+        assert_eq!(fallback_stats.software_ops, 2);
+        assert_eq!(fallback, expected);
+    }
+
+    #[test]
+    fn combines_flat_triangles_into_one_epic_transformed_fill() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let color = 0x8000_80ff;
+        let words = [
+            spec::draw_op::TRI,
+            xy_word(2, 0),
+            xy_word(0, 4),
+            xy_word(4, 6),
+            color,
+            color,
+            color,
+            spec::draw_op::TRI,
+            xy_word(2, 0),
+            xy_word(4, 6),
+            xy_word(6, 2),
+            color,
+            color,
+            color,
+        ];
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_fills, 2, "clear plus transformed fill");
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.texture_blends, 1);
+        assert_eq!(
+            epic.last_source_rect,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2
+            }
+        );
+        assert_eq!(
+            epic.last_texture_clip,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 6,
+                h: 6
+            }
+        );
+
+        let expected = full_reference(&ui, &words, 8, 8);
+        let mut fallback = vec![0u16; 64];
+        let fallback_stats = renderer()
+            .render(&ui, &words, &mut fallback, 8, 8, &mut MockEpic::default())
+            .unwrap();
+        assert_eq!(fallback_stats.software_ops, 2);
+        assert_eq!(fallback, expected);
     }
 
     #[test]

@@ -7,18 +7,28 @@ board host can implement it directly with the SiFli HAL.
 
 Accelerated paths are:
 
-- opaque RGB565 rectangle fills;
+- opaque and translucent RGB565 rectangle fills;
 - opaque horizontal and vertical two-stop gradients when the operation is not
   clipped;
 - A8 coverage blended with a fixed color, used for translucent rectangles,
   glyph runs, and PocketJS rounded-corner masks;
-- optional opaque PSM 5650 texture copies when a host can swap the format's
-  red and blue channels without changing sampling semantics.
+- PSM 5650, PSM 8888, and CLUT8 texture blending with format conversion,
+  color/alpha modulation, scaling, mirroring, and destination clipping;
+- pairs of textured triangles reconstructed as affine or projective quads for
+  rotated, scaled, and 2.5D/3D image transforms;
+- pairs of flat-color triangles reconstructed as transformed solid quads.
 
-Triangles, clipped or translucent gradients, colored alpha textures, and
-unsupported copies are replayed in order through
+Gouraud triangles, clipped or translucent gradients, PSM 4444 textures,
+linear-filtered textures on hosts without matching sampling, unmatched or
+clipped triangle fans, and unsupported copies are replayed in order through
 `pocketjs_core::raster::render_scaled_rgb565_over`. Hardware and software
 operations therefore share one RGB565 target without a 32-bit intermediate.
+
+Texture transforms use four physical edge coordinates ordered TL, BL, BR,
+TR. A HAL adapter may map them to EPIC's 3×3 transform matrix. PocketJS stores
+PSM 8888 and CLUT entries as RGBA bytes and PSM 5650 with red in the low bits;
+the SF32LB58 adapter uses the EPIC color matrix to swap red/blue while applying
+DrawList modulation in the same transaction.
 
 ## Synchronous contract
 
