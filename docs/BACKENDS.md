@@ -189,7 +189,7 @@ X,Y[,d|u|r]@TICK` (drags, right clicks), `--key
 
 |                    | portable                                                         | gpui                                        |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------- |
-| hosts              | PSP, Vita, PocketBook, ESP32-P4, Symbian, web, sim, macOS widget | macOS and Linux (`hosts/desktop`)           |
+| hosts              | PSP, Vita, PocketBook, ESP32-P4, SiFli, Symbian, web, sim, macOS widget | macOS and Linux (`hosts/desktop`)           |
 | text measurement   | core, atlas advance tables                                       | gpui platform text system, per-app opt-in   |
 | codepoint coverage | baked charset (+ runtime extension)                              | OS fallback chain, color emoji              |
 | pixel determinism  | byte-exact across hosts                                          | per-host; transactions still deterministic  |

@@ -70,7 +70,8 @@ New things go where the axis says — never invent a top-level directory:
 - **npm surface is frozen**: `@pocketjs/framework/*` export *keys* never
   change; the `exports`/`files` maps in package.json absorb internal moves.
 - **Cargo stays non-workspace where toolchains demand it**: `engine/core`,
-  `engine/wasm`, `engine/symbian`, `engine/backends/esp32p4-ppa`, `hosts/psp`,
-  `hosts/vita`, `hosts/pocketbook`, and the gu/vita 3D crates each stand alone
-  with their own lockfiles. `engine/Cargo.toml` is the one desktop workspace.
+  `engine/wasm`, `engine/symbian`, `engine/backends/esp32p4-ppa`,
+  `engine/backends/sifli-epic`, `hosts/psp`, `hosts/vita`, `hosts/pocketbook`,
+  and the gu/vita 3D crates each stand alone with their own lockfiles.
+  `engine/Cargo.toml` is the one desktop workspace.
 - **Moves are `git mv`** — history stays traceable.
