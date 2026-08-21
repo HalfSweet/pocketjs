@@ -63,23 +63,34 @@ import {
   minesHit,
   NotepadView,
   PAD_LINE_H,
+  padSegs,
+  padWidth,
+  padWrapW,
   SHUTDOWN_GEO,
   ShutdownView,
   shutdownHit,
 } from "./programs.tsx";
 import {
-  applyMove,
+  applyMoveWrapped,
   backspace,
-  colFromX,
+  caretAtPoint,
+  caretXY,
   del,
   deleteSel,
+  docEquals,
+  emptyHistory,
   hasSel,
   insertText,
+  record,
+  redoStep,
   selectAll,
   selectedText,
+  undoStep,
   wordRangeAt,
+  type Caret,
   type CaretMove,
   type Doc,
+  type EditKind,
 } from "./notepad.ts";
 import { newMines, reveal, toggleFlag } from "./mines.ts";
 import { CAPTION_ACTIVE, CAPTION_INACTIVE, FRAME, TASK_H } from "./theme.ts";
@@ -88,10 +99,9 @@ import { CaptionButtons, DesktopIcons, PopupPanel, StartMenu, T98, Taskbar } fro
 const WELCOME = [
   "Welcome to PocketJS 98.",
   "",
-  "This desktop is one PocketJS guest: the windows,",
-  "the taskbar, the Start menu and this Notepad are",
-  "Vue Vapor JSX over the same DrawList contract",
-  "the consoles boot, painted by the gpui backend.",
+  "This desktop is one PocketJS guest: the windows, the taskbar, the Start menu and this Notepad are Vue Vapor JSX over the same DrawList contract the consoles boot, painted by the gpui backend.",
+  "",
+  "Word wrap is on (Edit > Word Wrap) - these paragraphs are single logical lines; resize the window and they reflow live.",
   "",
   "Things to try:",
   "  - drag windows by the title bar",
@@ -102,8 +112,7 @@ const WELCOME = [
   "  - Cmd+` cycles windows, Cmd+W closes them",
   "  - Cmd+Esc opens the Start menu",
   "",
-  "The font is W95FA, baked to the same atlas",
-  "format every other PocketJS target reads.",
+  "The font is W95FA, baked to the same atlas format every other PocketJS target reads.",
 ];
 
 type Drag =
@@ -170,7 +179,7 @@ function Window98(props: { win: WinCtl; active: boolean }) {
       ) : null}
       <View class="flex-1 flex-col overflow-hidden">
         {w.kind === "notepad" ? (
-          <NotepadView data={padOf(w)} active={props.active} />
+          <NotepadView data={padOf(w)} wrapW={padWrapW(w)} active={props.active} />
         ) : w.kind === "mines" ? (
           <MinesView data={minesOf(w)} />
         ) : w.kind === "folder" ? (
@@ -290,8 +299,7 @@ export default function App() {
     const p = focusedPad();
     if (!p || !hasSel(p.d.doc.value)) return;
     copySel();
-    p.d.doc.value = deleteSel(p.d.doc.value);
-    scrollCaretIntoView(p.w);
+    applyEdit(p.w, "other", deleteSel(p.d.doc.value));
   }
 
   function pasteReq(): void {
@@ -317,6 +325,8 @@ export default function App() {
       }),
       scroll: ref(0),
       preedit: ref<{ s: string; c: number } | null>(null),
+      wrap: ref(true),
+      hist: emptyHistory(),
     };
     const w = createWin({
       kind: "notepad",
@@ -333,7 +343,7 @@ export default function App() {
             {
               label: "New",
               act: () => {
-                data.doc.value = { lines: [""], caret: { row: 0, col: 0 } };
+                applyEdit(w, "other", { lines: [""], caret: { row: 0, col: 0 } });
               },
             },
             { sep: true, label: "" },
@@ -350,6 +360,23 @@ export default function App() {
           label: "Edit",
           width: measure("Edit") + 12,
           items: () => [
+            {
+              label: "Undo",
+              shortcut: "Cmd+Z",
+              disabled: data.hist.undo.length === 0,
+              act: () => {
+                undoIn(w);
+              },
+            },
+            {
+              label: "Redo",
+              shortcut: "Cmd+Shift+Z",
+              disabled: data.hist.redo.length === 0,
+              act: () => {
+                redoIn(w);
+              },
+            },
+            { sep: true, label: "" },
             { label: "Cut", shortcut: "Cmd+X", disabled: !hasSel(data.doc.value), act: cutSel },
             { label: "Copy", shortcut: "Cmd+C", disabled: !hasSel(data.doc.value), act: copySel },
             { label: "Paste", shortcut: "Cmd+V", act: pasteReq },
@@ -369,7 +396,14 @@ export default function App() {
               },
             },
             { sep: true, label: "" },
-            { label: "Word Wrap", disabled: true },
+            {
+              label: "Word Wrap",
+              checked: data.wrap.value,
+              act: () => {
+                data.wrap.value = !data.wrap.value;
+                scrollCaretIntoView(w);
+              },
+            },
           ],
         },
         {
@@ -563,7 +597,7 @@ export default function App() {
     const d = padOf(w);
     const t = new Date(epoch + (virtualNow() - epochAt) * 1000);
     const stamp = `${pad2(t.getHours())}:${pad2(t.getMinutes())} ${pad2(t.getMonth() + 1)}/${pad2(t.getDate())}/${t.getFullYear()}`;
-    d.doc.value = insertText(d.doc.value, stamp);
+    applyEdit(w, "other", insertText(d.doc.value, stamp));
   }
 
   // ---- desktop icons + start menu ----------------------------------------------
@@ -741,15 +775,12 @@ export default function App() {
     }
   }
 
-  /** Notepad caret position for a content-local point (row clamped). */
-  function padCaretAt(d: PadData, cx: number, cy: number): { row: number; col: number } {
-    const doc = d.doc.value;
-    const row = Math.max(
-      0,
-      Math.min(doc.lines.length - 1, Math.floor((cy - 3 + d.scroll.value) / PAD_LINE_H)),
-    );
-    const col = colFromX(doc.lines[row], cx - 3, (s) => measure(s));
-    return { row, col };
+  /** Notepad caret for a content-local point, over the wrapped layout
+   *  (visual row from y, column from x inside that segment). */
+  function padCaretAt(w: WinCtl, cx: number, cy: number): Caret {
+    const d = padOf(w);
+    const vrow = Math.floor((cy - 3 + d.scroll.value) / PAD_LINE_H);
+    return caretAtPoint(padSegs(w), d.doc.value.lines, vrow, cx - 3, padWidth);
   }
 
   // ---- input routing --------------------------------------------------------------
@@ -863,16 +894,20 @@ export default function App() {
     if (w.kind === "notepad") {
       const d = padOf(w);
       const doc = d.doc.value;
-      const { row, col } = padCaretAt(d, cx, cy);
+      const caret = padCaretAt(w, cx, cy);
       if (isDblClick(`pad:${w.id}`)) {
         // Double-click: select the word under the pointer.
-        const r = wordRangeAt(doc.lines[row], col);
-        d.doc.value = { lines: doc.lines, caret: { row, col: r.to }, anchor: { row, col: r.from } };
+        const r = wordRangeAt(doc.lines[caret.row], caret.col);
+        d.doc.value = {
+          lines: doc.lines,
+          caret: { row: caret.row, col: r.to },
+          anchor: { row: caret.row, col: r.from },
+        };
         return;
       }
       // Click places the caret; shift-click extends; dragging selects.
-      const anchor = shift ? (doc.anchor ?? doc.caret) : { row, col };
-      d.doc.value = { lines: doc.lines, caret: { row, col }, anchor };
+      const anchor = shift ? (doc.anchor ?? doc.caret) : { row: caret.row, col: caret.col };
+      d.doc.value = { lines: doc.lines, caret, anchor };
       drag = { type: "textsel", id: w.id };
       return;
     }
@@ -1083,13 +1118,13 @@ export default function App() {
         const cx = mx - g.x - FRAME;
         const cy = my - g.y - contentTop(chromeOpts(w));
         const doc = d.doc.value;
-        const { row, col } = padCaretAt(d, Math.max(0, cx), cy);
-        if (row !== doc.caret.row || col !== doc.caret.col) {
-          d.doc.value = {
-            lines: doc.lines,
-            caret: { row, col },
-            anchor: doc.anchor ?? doc.caret,
-          };
+        const caret = padCaretAt(w, Math.max(0, cx), cy);
+        if (
+          caret.row !== doc.caret.row ||
+          caret.col !== doc.caret.col ||
+          (caret.end ?? false) !== (doc.caret.end ?? false)
+        ) {
+          d.doc.value = { lines: doc.lines, caret, anchor: doc.anchor ?? doc.caret };
         }
       }
       sendCursor("text");
@@ -1201,8 +1236,16 @@ export default function App() {
   }
 
   /** macOS-style ⌘ chords (host forwards them cmd-flagged, raw lowercase k). */
-  function onCmd(k: string) {
+  function onCmd(k: string, shift: boolean) {
     switch (k) {
+      case "z": {
+        const p = focusedPad();
+        if (p) {
+          if (shift) redoIn(p.w);
+          else undoIn(p.w);
+        }
+        return;
+      }
       case "escape":
         toggleStart();
         return;
@@ -1239,7 +1282,7 @@ export default function App() {
   function onKey(ev: HostEvent) {
     const k = ev.k ?? "";
     if (ev.cmd) {
-      onCmd(k);
+      onCmd(k, ev.sh ?? false);
       return;
     }
     if (k === "Escape") {
@@ -1261,24 +1304,24 @@ export default function App() {
       const doc = d.doc.value;
       switch (k) {
         case "Enter":
-          d.doc.value = insertText(doc, "\n");
-          break;
+          applyEdit(w, "other", insertText(doc, "\n"));
+          return;
         case "Backspace":
-          d.doc.value = backspace(doc);
-          break;
+          applyEdit(w, "erase", backspace(doc));
+          return;
         case "Delete":
-          d.doc.value = del(doc);
-          break;
+          applyEdit(w, "erase", del(doc));
+          return;
         case "Tab":
-          d.doc.value = insertText(doc, "    ");
-          break;
+          applyEdit(w, "type", insertText(doc, "    "));
+          return;
         case "Left":
         case "Right":
         case "Up":
         case "Down":
         case "Home":
         case "End":
-          d.doc.value = applyMove(doc, k as CaretMove, ev.sh ?? false);
+          d.doc.value = applyMoveWrapped(doc, k as CaretMove, ev.sh ?? false, padSegs(w), padWidth);
           break;
         default:
           return;
@@ -1301,16 +1344,47 @@ export default function App() {
 
   function scrollCaretIntoView(w: WinCtl) {
     const d = padOf(w);
-    const y = d.doc.value.caret.row * PAD_LINE_H;
+    const vrow = caretXY(padSegs(w), d.doc.value.lines, d.doc.value.caret, padWidth).vrow;
+    const y = vrow * PAD_LINE_H;
     const viewH = padViewH(w);
     if (y - d.scroll.value < 0) d.scroll.value = Math.max(0, y);
     else if (y - d.scroll.value > viewH - PAD_LINE_H) d.scroll.value = y - viewH + PAD_LINE_H;
   }
 
-  function typeInto(w: WinCtl, s: string) {
+  /** Apply an EDIT (never a plain caret/selection move) with an undo
+   *  snapshot. Coalescing lives in notepad.ts record(); no-op edits record
+   *  nothing. */
+  function applyEdit(w: WinCtl, kind: EditKind, next: Doc) {
     const d = padOf(w);
-    d.doc.value = insertText(d.doc.value, s);
+    const prev = d.doc.value;
+    if (docEquals(prev, next)) return;
+    d.hist = record(d.hist, prev, next, kind);
+    d.doc.value = next;
     scrollCaretIntoView(w);
+  }
+
+  function undoIn(w: WinCtl) {
+    const d = padOf(w);
+    const r = undoStep(d.hist, d.doc.value);
+    if (!r) return;
+    d.hist = r.h;
+    d.doc.value = r.doc;
+    d.preedit.value = null;
+    scrollCaretIntoView(w);
+  }
+
+  function redoIn(w: WinCtl) {
+    const d = padOf(w);
+    const r = redoStep(d.hist, d.doc.value);
+    if (!r) return;
+    d.hist = r.h;
+    d.doc.value = r.doc;
+    d.preedit.value = null;
+    scrollCaretIntoView(w);
+  }
+
+  function typeInto(w: WinCtl, s: string, kind: EditKind = "type") {
+    applyEdit(w, kind, insertText(padOf(w).doc.value, s));
   }
 
   // ---- taskbar --------------------------------------------------------------------
@@ -1388,7 +1462,7 @@ export default function App() {
       }
       case "paste": {
         const w = focused();
-        if (w?.kind === "notepad" && ev.text) typeInto(w, ev.text);
+        if (w?.kind === "notepad" && ev.text) typeInto(w, ev.text, "other");
         break;
       }
       case "ime": {
@@ -1396,7 +1470,7 @@ export default function App() {
         if (w?.kind === "notepad") {
           const d = padOf(w);
           // Composition replaces the selection the moment it starts.
-          if (ev.s && hasSel(d.doc.value)) d.doc.value = deleteSel(d.doc.value);
+          if (ev.s && hasSel(d.doc.value)) applyEdit(w, "other", deleteSel(d.doc.value));
           d.preedit.value = ev.s ? { s: ev.s, c: ev.c ?? ev.s.length } : null;
         }
         break;
@@ -1405,7 +1479,7 @@ export default function App() {
         const hover = hitWindows(mx, my);
         if (hover?.win.kind === "notepad") {
           const d = padOf(hover.win);
-          const contentH = d.doc.value.lines.length * PAD_LINE_H + 6;
+          const contentH = padSegs(hover.win).length * PAD_LINE_H + 6;
           const maxY = Math.max(0, contentH - padViewH(hover.win));
           d.scroll.value = Math.max(0, Math.min(maxY, d.scroll.value + (ev.dy ?? 0)));
         }
@@ -1451,9 +1525,9 @@ export default function App() {
       const d = padOf(fw);
       const g = fw.geo.value;
       const doc = d.doc.value;
-      const line = doc.lines[doc.caret.row] ?? "";
-      const x = g.x + FRAME + 4 + measure(line.slice(0, doc.caret.col));
-      const y = g.y + contentTop(chromeOpts(fw)) + 3 + doc.caret.row * PAD_LINE_H - d.scroll.value;
+      const pos = caretXY(padSegs(fw), doc.lines, doc.caret, padWidth);
+      const x = g.x + FRAME + 4 + pos.x;
+      const y = g.y + contentTop(chromeOpts(fw)) + 3 + pos.vrow * PAD_LINE_H - d.scroll.value;
       if (x !== lastCaret.x || y !== lastCaret.y) {
         lastCaret = { x, y, h: PAD_LINE_H };
         svc.send({ t: "caret", x, y, h: PAD_LINE_H });

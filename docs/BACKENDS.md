@@ -65,6 +65,15 @@ text can come from the host text system.
   caret positions as prefix widths through `measureText`
   (`apps/note/layout.ts`, `apps/im/wrap.ts`) and prefix sums only equal
   shaped positions when advances are additive.
+- **Soft-wrap breaks are a host op.** `wrapText` (spec op 43) returns the
+  break columns for one line under a pixel width. The core computes greedy
+  word wrap over the slot's measure provider; a native-text app gets gpui's
+  own `LineWrapper` instead (`native_wrap`, installed next to the measurer
+  through the same `TextConfig` — Zed's editor WrapMap consumes the same
+  machinery). The wrapped COORDINATE SPACE — visual rows, caret/selection
+  mapping, hit testing — stays app-side (apps/desk98/notepad.ts is the
+  reference): the op is only the "where does this line break" half, exactly
+  the platform/editor split Zed uses.
 - **Two ops keep a pixel-exact escape hatch.** Gouraud `TRI` and `TEX_TRI`
   batches (rotated gradients and images, 3D subtrees) have no gpui vector
   equivalent, so consecutive batches raster through
@@ -125,12 +134,13 @@ IME input handler (`insertText:` → one `ch` line per keypress).
 
 `apps/desk98` — a Windows 98 desktop compositor written in Vue Vapor JSX
 — is the reference consumer: the guest owns every window (drag, resize,
-z-order, menus, text selection, Minesweeper) by hit-testing the raw
-pointer stream itself, window moves ride paint-only translate props, and
-raises ride zIndex, so a drag never relayouts and an idle desktop keeps
-the demand-render governor at a few frames per second. Its W95FA pixel
-font is baked per-app into slots 19–21 through `apps/desk98/pak.json`
-(`gen-assets.ts`) — the repo slot table (0–18) never moves.
+z-order, menus, text selection, word-wrap layout, Minesweeper) by
+hit-testing the raw pointer stream itself, window moves ride paint-only
+translate props, and raises ride zIndex, so a drag never relayouts and an
+idle desktop keeps the demand-render governor at a few frames per second.
+Its W95FA pixel font is baked per-app into slots 19–21 through
+`apps/desk98/pak.json` (`gen-assets.ts`) — the repo slot table (0–18)
+never moves.
 
 ```
 bun run macos desk98      # the full desktop; drag-select, Cmd+`, Cmd+W, Cmd+Esc

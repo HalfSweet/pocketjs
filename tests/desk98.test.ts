@@ -24,18 +24,30 @@ import {
 } from "../apps/desk98/mines.ts";
 import {
   applyMove,
+  applyMoveWrapped,
   backspace,
+  caretAtPoint,
+  caretXY,
   colFromX,
   del,
   deleteSel,
+  docEquals,
+  emptyHistory,
   hasSel,
   insertText,
   moveCaret,
+  record,
+  redoStep,
   rowSelSpan,
+  segSelSpan,
   selectAll,
   selectedText,
   selRange,
+  undoStep,
+  vrowOf,
   wordRangeAt,
+  wrapDoc,
+  wrapLine,
   type Doc,
 } from "../apps/desk98/notepad.ts";
 
@@ -272,6 +284,81 @@ describe("notepad editing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// notepad.ts — undo/redo history
+// ---------------------------------------------------------------------------
+
+describe("notepad history", () => {
+  const D = (s: string, col: number): Doc => ({ lines: [s], caret: { row: 0, col } });
+
+  test("a typing run coalesces into one undo unit; redo replays it whole", () => {
+    let h = emptyHistory();
+    let doc = D("", 0);
+    for (const ch of ["a", "b", "c"]) {
+      const next = insertText(doc, ch);
+      h = record(h, doc, next, "type");
+      doc = next;
+    }
+    expect(doc.lines).toEqual(["abc"]);
+    expect(h.undo.length).toBe(1);
+    const u = undoStep(h, doc)!;
+    expect(u.doc.lines).toEqual([""]);
+    const r = redoStep(u.h, u.doc)!;
+    expect(r.doc.lines).toEqual(["abc"]);
+    expect(undoStep(emptyHistory(), doc)).toBeNull();
+  });
+
+  test("a caret move between keystrokes breaks the group (tip mismatch)", () => {
+    let h = emptyHistory();
+    const d0 = D("xy", 2);
+    const d1 = insertText(d0, "a");
+    h = record(h, d0, d1, "type");
+    // A plain caret move produces a doc record() never saw as its tip.
+    const moved: Doc = { lines: d1.lines, caret: { row: 0, col: 0 } };
+    const d2 = insertText(moved, "b");
+    h = record(h, moved, d2, "type");
+    expect(h.undo.length).toBe(2);
+  });
+
+  test("erase runs coalesce separately; other edits never coalesce", () => {
+    let h = emptyHistory();
+    let doc = D("abc", 3);
+    for (let i = 0; i < 2; i++) {
+      const next = backspace(doc);
+      h = record(h, doc, next, "erase");
+      doc = next;
+    }
+    expect(h.undo.length).toBe(1);
+    for (let i = 0; i < 2; i++) {
+      const next = insertText(doc, "\n");
+      h = record(h, doc, next, "other");
+      doc = next;
+    }
+    expect(h.undo.length).toBe(3);
+  });
+
+  test("a new edit clears redo; undo restores the selection", () => {
+    let h = emptyHistory();
+    const sel: Doc = { lines: ["hello"], caret: { row: 0, col: 5 }, anchor: { row: 0, col: 0 } };
+    const cut = deleteSel(sel);
+    h = record(h, sel, cut, "other");
+    const u = undoStep(h, cut)!;
+    expect(u.doc.anchor).toEqual({ row: 0, col: 0 });
+    expect(u.h.redo.length).toBe(1);
+    const again = record(u.h, u.doc, insertText(u.doc, "!"), "type");
+    expect(again.redo.length).toBe(0);
+  });
+
+  test("docEquals sees text/caret/anchor, not object identity", () => {
+    expect(docEquals(D("a", 1), { lines: ["a"], caret: { row: 0, col: 1 } })).toBe(true);
+    expect(docEquals(D("a", 1), D("a", 0))).toBe(false);
+    expect(docEquals(D("a", 1), { lines: ["b"], caret: { row: 0, col: 1 } })).toBe(false);
+    expect(
+      docEquals(D("a", 1), { lines: ["a"], caret: { row: 0, col: 1 }, anchor: { row: 0, col: 0 } }),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // notepad.ts — selection model
 // ---------------------------------------------------------------------------
 
@@ -335,6 +422,83 @@ describe("notepad selection", () => {
     expect(wordRangeAt("foo bar", 3)).toEqual({ from: 3, to: 4 }); // the space run
     expect(wordRangeAt("a==b", 1)).toEqual({ from: 1, to: 3 }); // punct run
     expect(wordRangeAt("", 0)).toEqual({ from: 0, to: 0 });
+  });
+
+  test("word wrap: greedy word breaks, hanging spaces, char fallback", () => {
+    const w6 = (s: string) => s.length * 6;
+    // Row capacity 7.5 chars: "aaa bbb" fits (42px), the trailing space
+    // hangs, "ccc" opens the next visual row.
+    expect(wrapLine("aaa bbb ccc", 45, w6)).toEqual([
+      { from: 0, to: 8 },
+      { from: 8, to: 11 },
+    ]);
+    // Exact fit and no-wrap widths pass through as one segment.
+    expect(wrapLine("aaa", 18, w6)).toEqual([{ from: 0, to: 3 }]);
+    expect(wrapLine("aaa bbb ccc", Infinity, w6)).toEqual([{ from: 0, to: 11 }]);
+    expect(wrapLine("", 45, w6)).toEqual([{ from: 0, to: 0 }]);
+    // A word wider than a whole row breaks at character level.
+    expect(wrapLine("abcdefgh", 18, w6)).toEqual([
+      { from: 0, to: 3 },
+      { from: 3, to: 6 },
+      { from: 6, to: 8 },
+    ]);
+    // Segments tile the document in reading order.
+    expect(wrapDoc(["aaa bbb ccc", "", "dd"], 45, w6)).toEqual([
+      { row: 0, from: 0, to: 8 },
+      { row: 0, from: 8, to: 11 },
+      { row: 1, from: 0, to: 0 },
+      { row: 2, from: 0, to: 2 },
+    ]);
+  });
+
+  test("word wrap: caret ↔ visual row mapping with end affinity", () => {
+    const w6 = (s: string) => s.length * 6;
+    const lines = ["aaa bbb ccc"];
+    const segs = wrapDoc(lines, 45, w6);
+    // The wrap boundary column belongs to the next row's start by default,
+    // to the earlier row's end under end affinity.
+    expect(vrowOf(segs, { row: 0, col: 8 })).toBe(1);
+    expect(vrowOf(segs, { row: 0, col: 8, end: true })).toBe(0);
+    expect(vrowOf(segs, { row: 0, col: 3 })).toBe(0);
+    expect(vrowOf(segs, { row: 0, col: 11 })).toBe(1);
+    expect(caretXY(segs, lines, { row: 0, col: 9 }, w6)).toEqual({ vrow: 1, x: 6 });
+    expect(caretXY(segs, lines, { row: 0, col: 8, end: true }, w6)).toEqual({ vrow: 0, x: 48 });
+    // Clicking past a wrapped row's text keeps the caret on that row.
+    expect(caretAtPoint(segs, lines, 0, 100, w6)).toEqual({ row: 0, col: 8, end: true });
+    // At the last row of the line no affinity is needed.
+    expect(caretAtPoint(segs, lines, 1, 100, w6)).toEqual({ row: 0, col: 11 });
+  });
+
+  test("word wrap: Up/Down step visual rows, Home/End take the row bounds", () => {
+    const w6 = (s: string) => s.length * 6;
+    const lines = ["aaa bbb ccc"];
+    const segs = wrapDoc(lines, 45, w6);
+    const doc: Doc = { lines, caret: { row: 0, col: 1 } };
+    const down = applyMoveWrapped(doc, "Down", false, segs, w6);
+    expect(down.caret).toEqual({ row: 0, col: 9 }); // same x, next visual row
+    const up = applyMoveWrapped({ lines, caret: { row: 0, col: 9 } }, "Up", false, segs, w6);
+    expect(up.caret).toEqual({ row: 0, col: 1 });
+    const end = applyMoveWrapped(doc, "End", false, segs, w6);
+    expect(end.caret).toEqual({ row: 0, col: 8, end: true }); // visual row end
+    const home = applyMoveWrapped({ lines, caret: { row: 0, col: 9 } }, "Home", false, segs, w6);
+    expect(home.caret).toEqual({ row: 0, col: 8 }); // visual row start
+    const ext = applyMoveWrapped(doc, "Down", true, segs, w6);
+    expect(ext.anchor).toEqual({ row: 0, col: 1 });
+    expect(ext.caret).toEqual({ row: 0, col: 9 });
+    // With one segment per line (wrap off) the move is the logical one.
+    const flat = wrapDoc(["ab", "c"], Infinity, w6);
+    const d2 = applyMoveWrapped({ lines: ["ab", "c"], caret: { row: 0, col: 2 } }, "Down", false, flat, w6);
+    expect(d2.caret).toEqual({ row: 1, col: 1 });
+  });
+
+  test("word wrap: selection spans intersect visual segments", () => {
+    const w6 = (s: string) => s.length * 6;
+    const lines = ["aaa bbb ccc"];
+    const segs = wrapDoc(lines, 45, w6);
+    const doc: Doc = { lines, caret: { row: 0, col: 10 }, anchor: { row: 0, col: 2 } };
+    expect(segSelSpan(doc, segs[0])).toEqual({ from: 2, to: 8 });
+    expect(segSelSpan(doc, segs[1])).toEqual({ from: 8, to: 10 });
+    expect(segSelSpan({ lines, caret: { row: 0, col: 3 }, anchor: { row: 0, col: 1 } }, segs[1])).toBeNull();
   });
 
   test("rowSelSpan covers edge rows partially and middle rows fully", () => {
