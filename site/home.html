@@ -66,14 +66,14 @@
       <span class="vwrap"><span class="verb metal lit">Modern DX</span><span class="vrail"></span></span>
       <span class="fill"></span><span class="hud">solid · vue vapor · octane</span>
     </div>
-    <p class="slede">Write components the way you already do, in Solid, Vue Vapor or Octane. Every reactivity
-      model compiles down to the same native tree and hands it to the same Rust core, so <b>switching frameworks
-      changes the authoring layer and nothing underneath it</b>.</p>
+    <p class="slede">Write components as you already do, in Solid, Vue Vapor or Octane. Each one compiles to the
+      same native tree and runs on QuickJS, so <b>the framework you pick changes your code and nothing below
+      it</b>.</p>
     <div class="cols" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)">
       <div>
         <div class="code" data-subtabs>
           <div class="subtabs">
-            <button class="subtab on" data-sub="c1">Counter.tsx · Solid</button>
+            <button class="subtab on" data-sub="c1">Solid</button>
             <button class="subtab" data-sub="c2">Vue Vapor</button>
             <button class="subtab" data-sub="c3">Octane</button>
           </div>
@@ -146,42 +146,40 @@
           <span class="lb">from your component to a pixel</span>
           <div class="vs">
             <div class="vs-col vs-pocket">
-              <div class="vs-h"><span class="vs-t">pocketjs</span><span class="vs-n">6</span></div>
+              <div class="vs-h"><span class="vs-t">pocketjs</span><span class="vs-th">1 thread, 1 process</span></div>
               <ol class="lyr">
-                <span class="pulse"></span>
-                <li>your component</li>
-                <li>renderer adapter</li>
-                <li>native tree</li>
-                <li>rust core: flexbox + baked style table</li>
-                <li>drawlist</li>
-                <li>backend: ge / gxm / metal / gles2</li>
+                <li style="--i:0">your component<i>guest</i></li>
+                <li style="--i:1">renderer adapter<i>guest</i></li>
+                <li style="--i:2">native tree<i>core</i></li>
+                <li style="--i:3">flexbox layout, baked style table<i>core</i></li>
+                <li style="--i:4">drawlist<i>core</i></li>
+                <li style="--i:5">backend draw<i>core</i></li>
               </ol>
-              <div class="done">pixels</div>
+              <div class="done" style="--i:6">pixels</div>
             </div>
             <div class="vs-col vs-web">
-              <div class="vs-h"><span class="vs-t">browser or webview</span><span class="vs-n">11</span></div>
+              <div class="vs-h"><span class="vs-t">browser or webview</span><span class="vs-th">4 threads, 2 processes</span></div>
               <ol class="lyr">
-                <span class="pulse"></span>
-                <li>your component</li>
-                <li>framework runtime, virtual dom diff</li>
-                <li>dom mutation</li>
-                <li>cssom, cascade, specificity</li>
-                <li>style recalculation</li>
-                <li>layout / reflow</li>
-                <li>paint records</li>
-                <li>layer tree, compositing</li>
-                <li>rasterization</li>
-                <li>gpu process, across an ipc hop</li>
-                <li>present</li>
+                <li style="--i:0">your component<i>main</i></li>
+                <li style="--i:1">framework runtime, vdom diff<i>main</i></li>
+                <li style="--i:2">dom mutation<i>main</i></li>
+                <li style="--i:3">cssom, cascade, specificity<i>main</i></li>
+                <li style="--i:4">style recalculation<i>main</i></li>
+                <li style="--i:5">layout, reflow<i>main</i></li>
+                <li style="--i:6">paint records<i>main</i></li>
+                <li class="hop" style="--i:7">commit the layer tree across threads</li>
+                <li style="--i:8">layer tree, tiling<i>compositor</i></li>
+                <li class="hop" style="--i:9">queue raster tasks, track invalidations</li>
+                <li style="--i:10">rasterization<i>raster pool</i></li>
+                <li class="hop" style="--i:11">ipc to the gpu process, sync fences</li>
+                <li style="--i:12">draw quads<i>gpu</i></li>
+                <li style="--i:13">present<i>gpu</i></li>
               </ol>
-              <div class="done">pixels</div>
+              <div class="done" style="--i:14">pixels</div>
             </div>
           </div>
-          <p class="foot">Both columns are simplified, and the shape is the point. Tailwind classes resolve at
-            build time into a style table, so <b>there is no cascade to recompute and no CSS at runtime</b>. The
-            pocket column never crosses a process boundary: the desktop build is one process, not five.</p>
         </div>
-        <div class="receipts"><span>Receipts</span>
+        <div class="receipts"><span>Refs</span>
           <a href="/docs/overview/architecture/">docs/architecture</a>
           <a href="/docs/overview/frameworks/">docs/frameworks</a>
         </div>
@@ -199,6 +197,57 @@
     <p class="slede">Your app runs as a QuickJS guest on a Rust core that draws every pixel itself. With no
       browser engine in the middle, the cost of a screen is close to what the bare metal can do, whether the metal
       is a 333 MHz handheld or a Mac.</p>
+    <div class="scale" data-scale>
+      <div class="sc-head">
+        <span class="lb">how much machine this asks for</span>
+      </div>
+
+      <div class="sc-grp">
+        <div class="sc-cap">Memory, against a current phone</div>
+        <div class="sc-bar"><span class="sc-nm">iPhone 17 Pro Max</span>
+          <span class="sc-tr"><span class="sc-fi phone" style="--w:100%;--d:.1s"></span></span>
+          <span class="sc-v">12 GB</span></div>
+        <div class="sc-bar"><span class="sc-nm">Sony PSP, 2004</span>
+          <span class="sc-tr"><span class="sc-fi psp" style="--w:0.260%;--d:.7s"></span>
+            <span class="sc-hair" style="left:0.260%"></span></span>
+          <span class="sc-v">32 MB</span></div>
+        <div class="sc-bar sc-zoomrow"><span></span>
+          <svg class="sc-zoom" viewBox="0 0 100 14" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="sc-beam" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#4ef08a" stop-opacity=".30"/>
+              <stop offset="1" stop-color="#4ef08a" stop-opacity=".05"/>
+            </linearGradient></defs>
+            <polygon points="0,0 0.260,0 100,14 0,14" fill="url(#sc-beam)"/>
+            <line x1="0.260" y1="0" x2="100" y2="14"/>
+            <line x1="0" y1="0" x2="0" y2="14"/>
+          </svg><span></span></div>
+      </div>
+
+      <div class="sc-grp zoomed">
+        <div class="sc-cap">The same left edge, magnified 384 times</div>
+        <div class="sc-bar"><span class="sc-nm">Sony PSP RAM</span>
+          <span class="sc-tr"><span class="sc-fi psp" style="--w:100%;--d:1.5s"></span></span>
+          <span class="sc-v">32 MB</span></div>
+        <div class="sc-bar"><span class="sc-nm">A PocketJS app</span>
+          <span class="sc-tr"><span class="sc-fi app" style="--w:25%;--d:2s"></span></span>
+          <span class="sc-v">8 MB</span></div>
+      </div>
+
+      <div class="sc-grp">
+        <div class="sc-cap">Clock, one core</div>
+        <div class="sc-bar"><span class="sc-nm">A19 Pro, performance core</span>
+          <span class="sc-tr"><span class="sc-fi phone" style="--w:100%;--d:2.6s"></span></span>
+          <span class="sc-v">4.26 GHz</span></div>
+        <div class="sc-bar"><span class="sc-nm">Sony PSP, one MIPS core</span>
+          <span class="sc-tr"><span class="sc-fi psp" style="--w:7.82%;--d:3s"></span></span>
+          <span class="sc-v">333 MHz</span></div>
+      </div>
+
+      <p class="note">A whole app, drawing a smooth interface, lives in <strong>8 MB on a single 333 MHz
+        core</strong>. That is a quarter of what the handheld has, <strong>one part in 1536</strong> of the phone's
+        memory, and a core clocked <strong>13 times slower</strong> than the one in your pocket.</p>
+    </div>
+
     <div class="chartset">
 
       <div class="card">
@@ -223,7 +272,7 @@
         </div>
 
         <div class="chart">
-          <div class="ct">Why not just ship a virtual DOM · hero demo, renderer matrix, 2026-07-04 (ms)</div>
+          <div class="ct">Why not just ship a virtual DOM · hero demo (ms)</div>
           <div class="row hl"><span class="nm">solid</span><span class="track"><span class="fill f1" style="width:16.7%"></span></span><span class="val">15.15</span></div>
           <div class="row"><span class="nm">vue vapor</span><span class="track"><span class="fill f2" style="width:18.4%"></span></span><span class="val">16.74</span></div>
           <div class="row"><span class="nm">vue, vdom</span><span class="track"><span class="fill f3" style="width:100%"></span></span><span class="val">90.75</span></div>
@@ -233,13 +282,12 @@
         </div>
 
         <div class="chart">
-          <div class="ct">The three shipped frameworks · hero demo, 2026-07-30 (ms)</div>
+          <div class="ct">The three shipped frameworks · hero demo (ms)</div>
           <div class="row hl"><span class="nm">solid</span><span class="track"><span class="fill f1" style="width:21.9%"></span></span><span class="val">3.66</span></div>
           <div class="row"><span class="nm">vue vapor</span><span class="track"><span class="fill f2" style="width:21.7%"></span></span><span class="val">3.61</span></div>
           <div class="row"><span class="nm">octane</span><span class="track"><span class="fill f3" style="width:39.2%"></span></span><span class="val">6.53</span></div>
-          <p class="note sm">Seven samples per app, same 16.67 ms budget. The two runs are months apart and an
-            unoptimized QuickJS build was found and fixed in between, so read each chart on its own terms rather
-            than across them.</p>
+          <p class="note sm">Seven samples per app, same 16.67 ms budget. These two charts come from separate
+            runs and the toolchain got faster in between, so read each on its own terms rather than across them.</p>
         </div>
       </div>
 
@@ -261,14 +309,13 @@
           <div class="row"><span class="nm">electron</span><span class="track"><span class="fill f3" style="width:100%"></span></span><span class="val">382</span></div>
         </div>
 
-        <p class="note sm">On disk the same three are 10, 9 and 242 MB, and only the pocket build runs as a
-          single process. Idle behaviour is structural rather than tuned: the governor repaints only on the caret's
-          square wave, <strong>84 times across 2400 idle ticks</strong>. The published report also says where the
-          pocket build loses, and why.</p>
+        <p class="note sm">On disk the same three are 10, 9 and 242 MB, and only the pocket build runs in a
+          single process. Left alone with a document open, it redraws <strong>about twice a second</strong>: the
+          caret blinking, and nothing else. The published report also says where the pocket build loses, and why.</p>
       </div>
 
     </div>
-    <div class="receipts"><span>Receipts</span>
+    <div class="receipts"><span>Refs</span>
       <a href="/blog/shipping-openstrike/">shipping openstrike</a>
       <a href="/blog/pocket-character/">pocket character</a>
       <a href="/blog/pocketjs-on-ps-vita/">twice the pixels, zero forks</a>
@@ -390,7 +437,7 @@
           splice in a different press, re-run the fold, and a counterfactual world exists in <strong>22 ms</strong>.
           Chaos mode proves the floor holds, injecting real sleeps, allocation churn and forced GC between frames
           without moving the trace by one bit.</p>
-        <div class="receipts"><span>Receipts</span>
+        <div class="receipts"><span>Refs</span>
           <a href="/blog/ui-runtime-that-cant-flake/">the runtime that can't flake</a>
           <a href="/blog/time-travel-devtools/">time-travel devtools</a>
         </div>
@@ -467,10 +514,9 @@
     <div class="labband">
       <div>
         <span class="lb">the organization behind it</span>
-        <p>On top of PocketJS we built <strong>Pocket Lab</strong>, an open source organization with no venture
-          money behind it, along with the first-party flagship projects it ships: systemic open worlds, voxel
-          dioramas and digital humans. All of it exists for one reason, which is
-          that <strong>the joy of creating should belong to everyone</strong>.</p>
+        <p><strong>Pocket Lab</strong> grew on top of this runtime: an open source organization with no venture
+          money, shipping systemic open worlds, voxel dioramas and digital humans.
+          <strong>The joy of creating should belong to everyone.</strong></p>
       </div>
       <div class="labctas">
         <a class="btn btn--pri" href="https://pocketlab.build">Visit Pocket Lab</a>
@@ -482,20 +528,27 @@
 
 
 
+<section class="sect" id="sponsors">
+  <div class="wrap">
+    <div class="shead">
+      <span class="vwrap"><span class="verb metal lit">Sponsors</span><span class="vrail"></span></span>
+      <span class="fill"></span><span class="hud">thank you</span>
+    </div>
+    <div class="spon-gallery">{{SPONSOR_GALLERY}}</div>
+  </div>
+</section>
+
 <footer class="foot">
   <div class="wrap">
-    <div class="fbrand">
-      <span class="mark">
-        <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
-          <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="url(#pgn-edge)" stroke-width="2.6" stroke-linejoin="round"/>
-          <circle cx="10" cy="16" r="3.1" fill="url(#pgn-lens)"/>
-          <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="url(#pgn-bar)"/>
-          <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="url(#pgn-bar)"/>
-        </svg>
-        <span class="nm">PocketJS</span>
-      </span>
-      <p>{{SITE_FOOTER_DESC}}</p>
-    </div>
+    <span class="mark">
+      <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="url(#pgn-edge)" stroke-width="2.6" stroke-linejoin="round"/>
+        <circle cx="10" cy="16" r="3.1" fill="url(#pgn-lens)"/>
+        <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="url(#pgn-bar)"/>
+        <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="url(#pgn-bar)"/>
+      </svg>
+      <span class="nm">PocketJS</span>
+    </span>
     <nav class="cols2" aria-label="Footer">
       <a href="/docs/overview/">Docs</a>
       <a href="/playground/">Playground</a>

@@ -573,6 +573,12 @@ async function main() {
     for (const f of readdirSync(SITE + "assets/wall/")) copy(SITE + "assets/wall/" + f, "assets/wall/" + f);
   }
 
+  // Sponsor avatars, downloaded by tools/sponsors.ts so the page never calls
+  // out to GitHub at run time.
+  if (existsSync(SITE + "assets/sponsors/")) {
+    for (const f of readdirSync(SITE + "assets/sponsors/")) copy(SITE + "assets/sponsors/" + f, "assets/sponsors/" + f);
+  }
+
   // 5. playground page
   write("playground/index.html", renderPage({
     title: "Playground",
@@ -633,8 +639,30 @@ async function main() {
 // page readable when that request fails.
 const HOME_DESC =
   "PocketJS is a UI runtime that keeps JSX, Tailwind and reactive state, then removes every layer below them: no DOM, no CSS engine, no WebView. A QuickJS guest on a Rust core that lays out and draws every pixel itself.";
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// The sponsor gallery is generated data: `bun tools/sponsors.ts` refreshes
+// site/sponsors.json and the avatars beside it (public sponsorships only).
+const SPONSOR_SLOT = "{{SPONSOR_GALLERY}}";
+function renderSponsorGallery(): string {
+  const { sponsors } = JSON.parse(readFileSync(SITE + "sponsors.json", "utf8")) as {
+    sponsors: { login: string; name: string; url: string; avatar: string }[];
+  };
+  return sponsors
+    .map((s) => {
+      const label = escapeHtml(s.name === s.login ? s.login : `${s.name} (${s.login})`);
+      return `<a href="${s.url}" target="_blank" rel="noreferrer" title="${label}">` +
+        `<img src="${s.avatar}" alt="${label}" width="56" height="56" loading="lazy"></a>`;
+    })
+    .join("\n      ");
+}
+
 function renderHome(): string {
-  const body = injectSiteFooterDescription(readFileSync(SITE + "home.html", "utf8"));
+  const raw = readFileSync(SITE + "home.html", "utf8");
+  const slots = raw.split(SPONSOR_SLOT).length - 1;
+  if (slots !== 1) throw new Error(`Expected ${SPONSOR_SLOT} exactly once in the homepage; found ${slots}`);
+  const body = raw.replace(SPONSOR_SLOT, () => renderSponsorGallery());
   const jsonLd = JSON.stringify({
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",

@@ -117,6 +117,51 @@ img,video{max-width:100%;display:block}
 .slede code{font-family:var(--mono);font-size:.9em;color:var(--ink-2)}
 .cols{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:clamp(1.2rem,3vw,2.2rem);align-items:start}
 
+/* orders of magnitude, on a linear scale drawn from zero: at full scale the
+   handheld is a hairline next to the phone, so the left edge gets magnified.
+   Bars grow once, when the panel scrolls into view (landing.js). */
+.scale{border:1px solid var(--line);background:var(--panel);padding:1.2rem 1.3rem 1.3rem;margin-bottom:clamp(1.3rem,3vw,2.2rem)}
+.sc-head{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:1.4rem}
+.sc-head .lb{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ph)}
+.sc-grp{position:relative}
+.sc-grp+.sc-grp{margin-top:1.5rem}
+.sc-grp.zoomed{margin-top:.15rem}
+.sc-cap{font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+  margin-bottom:.6rem}
+.sc-bar{display:grid;grid-template-columns:12.5rem minmax(0,1fr) 4.6rem;gap:.8rem;align-items:center;padding:.2rem 0}
+.sc-nm{font-family:var(--mono);font-size:.68rem;color:var(--ink-2);text-align:right}
+.sc-tr{position:relative;height:.85rem;background:var(--track)}
+.sc-fi{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:0 2px 2px 0}
+.sc-fi.phone{background:var(--c2)}
+.sc-fi.psp{background:var(--steel-2)}
+.sc-fi.app{background:var(--c1);box-shadow:0 0 14px rgba(27,164,104,.55)}
+/* the 32 MB sliver is real at this scale: a hairline marker keeps it findable */
+.sc-hair{position:absolute;top:-.25rem;bottom:-.25rem;width:1px;background:var(--steel-1);opacity:0}
+.sc-v{font-family:var(--mono);font-size:.72rem;color:var(--ink);text-align:right}
+.sc-zoomrow{padding:0;align-items:stretch}
+/* the beam opens downward from the hairline onto the whole bar below, so the
+   shape reads as a magnification rather than another bar */
+.sc-zoom{display:block;width:100%;height:1.4rem;clip-path:inset(0 0 100% 0);opacity:0}
+.sc-zoom line{stroke:rgba(78,240,138,.55);stroke-width:1;vector-effect:non-scaling-stroke;stroke-dasharray:3 2}
+.scale.on .sc-zoom{animation:scbeam .7s cubic-bezier(.3,.7,.2,1) forwards;animation-delay:1.2s}
+@keyframes scbeam{from{clip-path:inset(0 0 100% 0);opacity:0}to{clip-path:inset(0 0 0 0);opacity:1}}
+.scale.on .sc-fi{animation:scgrow .9s cubic-bezier(.2,.7,.3,1) forwards;animation-delay:var(--d,0s)}
+.scale.on .sc-hair{animation:schair .5s ease-out forwards;animation-delay:1.1s}
+@keyframes scgrow{from{width:0}to{width:var(--w)}}
+@keyframes schair{to{opacity:.9}}
+@media (prefers-reduced-motion: reduce){
+  .sc-fi{width:var(--w)}
+  .sc-hair{opacity:.9}
+  .sc-zoom{clip-path:none;opacity:1}
+  .scale.on .sc-fi,.scale.on .sc-hair,.scale.on .sc-zoom{animation:none}
+}
+@media (max-width:620px){
+  .sc-bar{grid-template-columns:1fr;gap:.15rem;padding:.35rem 0}
+  .sc-nm,.sc-v{text-align:left}
+  .sc-zoomrow{display:block}
+  .sc-zoom{margin:.2rem 0 .4rem}
+}
+
 /* charts */
 .chartset{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:clamp(1.3rem,3vw,2.2rem)}
 .card{border:1px solid var(--line);background:var(--panel);padding:1.1rem 1.2rem 1.2rem}
@@ -149,43 +194,46 @@ img,video{max-width:100%;display:block}
 .note.sm{font-size:.85rem;color:var(--muted)}
 .note.sm strong{color:var(--ink-2)}
 
-/* two paths from a component to a pixel, animated at the same speed per stage */
+/* two paths from a component to a pixel: the stages light up in order, at the
+   same pace per stage, so the longer pipeline visibly takes longer to finish. */
 .arch{border:1px solid var(--line);background:var(--panel);padding:1.1rem 1.2rem 1.2rem;position:relative}
 .arch .lb{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ph);margin-bottom:1rem}
 .vs{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;align-items:start}
-.vs-h{display:flex;align-items:baseline;justify-content:space-between;gap:.4rem;margin-bottom:.55rem;
-  padding-bottom:.4rem;border-bottom:1px solid var(--line)}
-.vs-t{font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;color:var(--ink)}
-.vs-n{font-family:var(--px);font-size:1.15rem;line-height:1;color:var(--muted)}
+.vs-h{margin-bottom:.55rem;padding-bottom:.4rem;border-bottom:1px solid var(--line)}
+.vs-t{display:block;font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;color:var(--ink)}
+.vs-th{display:block;margin-top:.2rem;font-family:var(--mono);font-size:.58rem;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted)}
 .vs-pocket .vs-h{border-bottom-color:rgba(78,240,138,.45)}
-.vs-pocket .vs-n{color:var(--ph);text-shadow:0 0 10px rgba(78,240,138,.4)}
-.lyr{list-style:none;position:relative;padding-left:.95rem}
-.lyr::before{content:"";position:absolute;left:.28rem;top:.35rem;bottom:.35rem;width:1px;background:var(--line)}
-.vs-pocket .lyr::before{background:rgba(78,240,138,.3)}
-.lyr li{font-family:var(--mono);font-size:.62rem;line-height:1.25;color:var(--muted);
-  border:1px solid var(--line);background:var(--bg);padding:.3rem .45rem;margin-bottom:.22rem}
+.vs-pocket .vs-th{color:var(--ph-2)}
+.lyr{list-style:none;position:relative}
+.lyr li{display:flex;align-items:baseline;gap:.4rem;font-family:var(--mono);font-size:.62rem;line-height:1.25;
+  color:var(--muted);border:1px solid var(--line);background:var(--bg);padding:.3rem .45rem;margin-bottom:.22rem}
+.lyr li i{margin-left:auto;font-style:normal;font-size:.54rem;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--steel-3);flex-shrink:0}
 .vs-pocket .lyr li{color:var(--ink-2);border-color:rgba(78,240,138,.22)}
-.lyr .pulse{position:absolute;left:0;width:.58rem;height:.58rem;border-radius:50%;background:var(--ph);
-  box-shadow:0 0 9px rgba(78,240,138,.8)}
-.vs-pocket .lyr .pulse{animation:fallp 3.6s linear infinite}
-.vs-web .lyr .pulse{animation:fallw 3.6s linear infinite;background:var(--c3);box-shadow:0 0 9px rgba(176,125,28,.75)}
-@keyframes fallp{0%{top:0;opacity:0} 3%{opacity:1} 40%{top:calc(100% - .58rem);opacity:1}
-  48%{opacity:0} 100%{top:calc(100% - .58rem);opacity:0}}
-@keyframes fallw{0%{top:0;opacity:0} 3%{opacity:1} 86%{top:calc(100% - .58rem);opacity:1}
-  94%{opacity:0} 100%{top:calc(100% - .58rem);opacity:0}}
-.done{margin-top:.45rem;margin-left:.95rem;font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;
-  text-transform:uppercase;border:1px solid var(--line);color:var(--muted);padding:.32rem .45rem;text-align:center}
-.vs-pocket .done{animation:donep 3.6s linear infinite}
-.vs-web .done{animation:donew 3.6s linear infinite}
-@keyframes donep{0%,38%{border-color:var(--line);color:var(--muted);background:transparent}
-  42%,52%{border-color:rgba(78,240,138,.7);color:var(--ph);background:rgba(78,240,138,.08)}
-  58%,100%{border-color:var(--line);color:var(--muted);background:transparent}}
-@keyframes donew{0%,84%{border-color:var(--line);color:var(--muted);background:transparent}
-  88%,96%{border-color:rgba(176,125,28,.6);color:var(--c3);background:rgba(176,125,28,.08)}
-  100%{border-color:var(--line);color:var(--muted);background:transparent}}
-.arch .foot{margin-top:.9rem;padding-top:.7rem;border-top:1px dashed var(--line);
-  font-family:var(--mono);font-size:.66rem;color:var(--muted);line-height:1.65}
-.arch .foot b{color:var(--ink-2);font-weight:500}
+.lyr li.hop{border-style:dashed;border-color:rgba(176,125,28,.4);color:var(--c3);background:rgba(176,125,28,.05)}
+.lyr li.hop::before{content:"⇄";margin-right:.15rem}
+.done{margin-top:.45rem;font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;
+  border:1px solid var(--line);color:var(--muted);padding:.32rem .45rem;text-align:center}
+/* one cycle, one step per stage: pocket settles early and waits */
+.lyr li,.done{animation-duration:6s;animation-timing-function:linear;animation-iteration-count:infinite;
+  animation-delay:calc(var(--i) * .3s)}
+.vs-pocket .lyr li,.vs-pocket .done{animation-name:litp}
+.vs-web .lyr li{animation-name:litw}
+.vs-web .lyr li.hop{animation-name:lith}
+.vs-web .done{animation-name:litw}
+@keyframes litp{
+  0%{border-color:rgba(78,240,138,.85);color:var(--ph);background:rgba(78,240,138,.10)}
+  4%{border-color:rgba(78,240,138,.85);color:var(--ph);background:rgba(78,240,138,.10)}
+  12%,100%{border-color:rgba(78,240,138,.22);color:var(--ink-2);background:var(--bg)}}
+@keyframes litw{
+  0%{border-color:rgba(176,125,28,.8);color:#d9a53c;background:rgba(176,125,28,.10)}
+  4%{border-color:rgba(176,125,28,.8);color:#d9a53c;background:rgba(176,125,28,.10)}
+  12%,100%{border-color:var(--line);color:var(--muted);background:var(--bg)}}
+@keyframes lith{
+  0%{border-color:rgba(176,125,28,.9);color:#e8b752;background:rgba(176,125,28,.18)}
+  4%{border-color:rgba(176,125,28,.9);color:#e8b752;background:rgba(176,125,28,.18)}
+  12%,100%{border-color:rgba(176,125,28,.4);color:var(--c3);background:rgba(176,125,28,.05)}}
 
 /* frame + effect animation */
 .tl{border:1px solid var(--line);background:var(--panel);padding:1.1rem 1.2rem 1.2rem;overflow:hidden}
@@ -310,6 +358,14 @@ img,video{max-width:100%;display:block}
 .ecard .story{font-family:var(--mono);font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--sky)}
 .ecard .story:hover{color:var(--ph)}
 
+/* sponsor gallery: avatars only, generated from site/sponsors.json */
+.spon-gallery{display:flex;flex-wrap:wrap;gap:.8rem}
+.spon-gallery a{display:block;width:3.4rem;height:3.4rem;border-radius:50%;overflow:hidden;
+  border:1px solid var(--line-2);background:var(--panel);filter:grayscale(.35);
+  transition:filter .18s,border-color .18s,transform .18s}
+.spon-gallery a:hover{filter:none;border-color:rgba(78,240,138,.65);transform:translateY(-2px)}
+.spon-gallery img{width:100%;height:100%;object-fit:cover}
+
 .foot{border-top:1px solid var(--line);padding:2.2rem 0 3rem;background:var(--bg-2)}
 .foot .wrap{display:flex;flex-wrap:wrap;gap:1.4rem;justify-content:space-between;align-items:center}
 .foot .cols2{display:flex;gap:1.8rem;flex-wrap:wrap;font-family:var(--mono);font-size:.72rem;color:var(--ink-2)}
@@ -338,7 +394,4 @@ img,video{max-width:100%;display:block}
   .mark .nm{font-size:.95rem}
 .eco{grid-template-columns:1fr}.row{grid-template-columns:4.4rem minmax(0,1fr) 4rem}}
 
-/* footer brand block */
-.fbrand{display:flex;flex-direction:column;gap:.5rem;max-width:34ch}
-.fbrand p{font-size:.82rem;color:var(--muted);line-height:1.55}
 

@@ -99,6 +99,15 @@ test("homepage ships the four-chapter landing", () => {
   // The two hand-drawn diagrams and the redrawn flake histogram.
   expect(home).toContain('class="vs-col vs-pocket"');
   expect(home).toContain('class="vs-col vs-web"');
+  // the browser column shows the cross-thread bookkeeping, not just more layers
+  expect(home).toContain("1 thread, 1 process");
+  expect(home).toContain("4 threads, 2 processes");
+  expect(home.match(/class="hop"/g)?.length).toBe(3);
+  // the orders-of-magnitude panel, revealed on scroll
+  expect(home).toContain("data-scale");
+  expect(home).toContain("iPhone 17 Pro Max");
+  expect(home).toContain("one part in 1536");
+  expect(home).toContain("magnified 384 times");
   expect(home).toContain('class="hist"');
   // The histogram carries the published run: 22 outcomes, 9/60, frame 144.
   expect(home).toContain("22 outcomes");
@@ -106,7 +115,7 @@ test("homepage ships the four-chapter landing", () => {
   expect(home).toContain("frame 144, every run, forever");
 
   // Framework code tabs: Solid, Vue Vapor, Octane. No plain-Vue SFC tab.
-  for (const label of ["Counter.tsx · Solid", "Vue Vapor", "Octane"]) {
+  for (const label of ['data-sub="c1">Solid<', "Vue Vapor", "Octane"]) {
     expect(home).toContain(label);
   }
   expect(home).not.toContain("Counter.vue");
@@ -119,6 +128,28 @@ test("homepage ships the four-chapter landing", () => {
   expect(home).not.toContain("Rich interactive JavaScript where no browser fits.");
   // Ambitions are a manifesto topic, not landing copy.
   expect(home.toLowerCase()).not.toContain("ambition ");
+
+  // The sponsor gallery is generated from site/sponsors.json and thanks people
+  // without asking for anything: avatars and a heading, no pitch, no tiers.
+  expect(home).toContain('<div class="spon-gallery">{{SPONSOR_GALLERY}}</div>');
+  expect(home).toContain('<span class="verb metal lit">Sponsors</span>');
+  const sponsorSection = home.slice(home.indexOf('id="sponsors"'), home.indexOf("<footer"));
+  for (const pitch of ["$", "tier", "Tier", "become a sponsor", "Become a sponsor", "Sponsor on GitHub"]) {
+    expect(sponsorSection).not.toContain(pitch);
+  }
+  const roster = JSON.parse(readFileSync(ROOT + "site/sponsors.json", "utf8")) as {
+    count: number;
+    sponsors: { login: string; avatar: string }[];
+  };
+  expect(roster.sponsors).toHaveLength(roster.count);
+  // pinned first, then alphabetical
+  expect(roster.sponsors[0].login).toBe("ZephyrCloudIO");
+  for (const s of roster.sponsors) {
+    expect(existsSync(ROOT + "site" + s.avatar)).toBe(true);
+  }
+  // The generator only ever asks GitHub for public sponsorships.
+  const gen = readFileSync(ROOT + "tools/sponsors.ts", "utf8");
+  expect(gen).toContain("includePrivate: false");
 
   // Closing band: Pocket Lab, plus the two calls to action.
   expect(home).toContain("https://pocketlab.build");
@@ -249,16 +280,17 @@ test("site build binds Vue Vapor runtime and JSX helper to the Pocket document",
   expect(helperWriter).toContain("Vue Vapor JSX helper does not target the PocketJS document facade");
 });
 
-test("homepage and shared pages use one footer description", () => {
+test("the footer description belongs to the shared chrome, not the homepage", () => {
   const homeTemplate = readFileSync(ROOT + "site/home.html", "utf8");
-  const siteBuild = readFileSync(ROOT + "site/build.ts", "utf8");
-  expect(homeTemplate).toContain(SITE_FOOTER_DESC_SLOT);
+  const forShell = readFileSync(ROOT + "site/for/shell.html", "utf8");
+  // The homepage footer carries neither the slot nor the copy.
+  expect(homeTemplate).not.toContain(SITE_FOOTER_DESC_SLOT);
   expect(homeTemplate).not.toContain(SITE_FOOTER_DESC);
-  expect(siteBuild).toContain('injectSiteFooterDescription(readFileSync(SITE + "home.html", "utf8"))');
+  expect(forShell).toContain(SITE_FOOTER_DESC_SLOT);
 
-  const homepage = injectSiteFooterDescription(homeTemplate);
+  const forPage = injectSiteFooterDescription(forShell);
   const sharedPage = renderPage({ title: "Docs", active: "docs", body: "" });
-  for (const html of [homepage, sharedPage]) {
+  for (const html of [forPage, sharedPage]) {
     expect(html.split(SITE_FOOTER_DESC)).toHaveLength(2);
     expect(html).not.toContain(SITE_FOOTER_DESC_SLOT);
   }
