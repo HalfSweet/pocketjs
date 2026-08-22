@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { emitSingleLodStagePackage } from "../site/stage-package.ts";
 import { BTN, PocketHost } from "../site/playground/host.js";
 import {
+  ICON_LINKS,
   SITE_FOOTER_DESC,
   SITE_FOOTER_DESC_SLOT,
+  SITE_TITLE,
   injectSiteFooterDescription,
   renderPage,
 } from "../site/templates.ts";
@@ -99,6 +101,12 @@ test("homepage ships the four-chapter landing", () => {
     expect(home).toContain(`<span class="verb metal lit">${verb}</span>`);
   }
 
+  // The effect timeline keeps its own panel class. A short class name shared
+  // with a prose link rule once underlined the entire panel in link green.
+  expect(home).toContain('<div class="tl">');
+  expect(home).not.toContain('class="pl"');
+  expect(home).toContain('<a class="olink"');
+
   // The two hand-drawn diagrams and the redrawn flake histogram.
   expect(home).toContain('class="vs-col vs-pocket"');
   expect(home).toContain('class="vs-col vs-web"');
@@ -174,10 +182,51 @@ test("homepage ships the four-chapter landing", () => {
   expect(existsSync(ROOT + "site/assets/home.js")).toBe(false);
   const landingCss = readFileSync(ROOT + "site/assets/landing.css", "utf8");
   expect(landingCss).toContain(".hero-bg");
+  // no bare `.pl` rule: it collided with the timeline panel's own class
+  expect(landingCss).not.toMatch(/^\.pl[{:,]/m);
+  // the delivery marker is positioned over the frame grid, never placed in it:
+  // a grid item at column 5 pushes frame +4 and everything after it one cell right
+  expect(landingCss).toMatch(/^\.deliver\{position:absolute;/m);
+  expect(landingCss).not.toMatch(/^\.deliver\{grid-column/m);
   expect(landingCss).toContain("prefers-reduced-motion");
   expect(landingCss).not.toContain(".lp-dev");
   const homeCss = readFileSync(ROOT + "site/assets/home.css", "utf8");
   expect(homeCss).toContain(".lp-nav");
+});
+
+test("every compatibility entry cites a receipt that resolves", () => {
+  const home = readFileSync(ROOT + "site/home.html", "utf8");
+  const compat = home.slice(home.indexOf('id="compat"'), home.indexOf('id="ecosystem"'));
+
+  // Not a roadmap: no entry may sit there unsourced, so every chip is a link.
+  expect(compat).not.toContain('<span class="cchip"');
+  const chips = [...compat.matchAll(/<a class="cchip" href="([^"]+)"/g)].map((m) => m[1]);
+  expect(chips.length).toBeGreaterThanOrEqual(24);
+
+  for (const href of chips) {
+    if (href.startsWith("/blog/")) {
+      expect(existsSync(`${ROOT}site/content/blog/${href.slice(6, -1)}.md`)).toBe(true);
+    } else if (href.startsWith("/docs/")) {
+      expect(existsSync(`${ROOT}site/content/docs/${href.slice(6, -1)}.md`)).toBe(true);
+    } else if (href === "/playground/") {
+      // the browser's receipt is the live page itself
+      expect(existsSync(ROOT + "site/playground/page.html")).toBe(true);
+    } else if (href.includes("/tree/main/")) {
+      // a source link is only honest if that path is still there
+      expect(existsSync(ROOT + href.split("/tree/main/")[1])).toBe(true);
+    } else {
+      // otherwise it is a pull request on this repo
+      expect(href).toMatch(/^https:\/\/github\.com\/pocket-stack\/pocketjs\/pull\/\d+$/);
+    }
+  }
+
+  // Vapor cartridge targets are a separate story and stay out of this chapter.
+  for (const absent of ["Playdate", "MeowBit", "Game Boy", "GBA", "NES"]) {
+    expect(compat).not.toContain(absent);
+  }
+
+  // Receipts, so they open in their own tab like the rest of the references.
+  expect(readFileSync(ROOT + "site/assets/landing.js", "utf8")).toContain('[data-refs] a, .cgrid a');
 });
 
 test("the PSP stage looks straight at the screen", () => {
@@ -316,6 +365,75 @@ test("the footer description belongs to the shared chrome, not the homepage", ()
 
   expect(() => injectSiteFooterDescription("")).toThrow("found 0");
   expect(() => injectSiteFooterDescription(SITE_FOOTER_DESC_SLOT.repeat(2))).toThrow("found 2");
+});
+
+test("the icon family is rendered from one drawing and linked from every head", () => {
+  const svg = readFileSync(ROOT + "site/assets/favicon.svg", "utf8");
+  const ihdr = (file: string): [number, number] => {
+    const png = readFileSync(ROOT + "site/assets/" + file);
+    expect(png.subarray(0, 8).toString("latin1")).toBe("\x89PNG\r\n\x1a\n");
+    return [png.readUInt32BE(16), png.readUInt32BE(20)];
+  };
+  for (const [file, size] of [
+    ["favicon-96.png", 96],
+    ["apple-touch-icon.png", 180],
+    ["icon-192.png", 192],
+    ["icon-512.png", 512],
+    ["icon-512-maskable.png", 512],
+  ] as const) {
+    expect(ihdr(file)).toEqual([size, size]);
+  }
+
+  // favicon.ico carries 16, 32 and 48 as PNG payloads in one container
+  const ico = readFileSync(ROOT + "site/assets/favicon.ico");
+  expect(ico.readUInt16LE(0)).toBe(0);
+  expect(ico.readUInt16LE(2)).toBe(1);
+  const count = ico.readUInt16LE(4);
+  expect(count).toBe(3);
+  const sizes: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const entry = 6 + i * 16;
+    const size = ico.readUInt32LE(entry + 8);
+    const offset = ico.readUInt32LE(entry + 12);
+    const png = ico.subarray(offset, offset + size);
+    expect(png.subarray(0, 8).toString("latin1")).toBe("\x89PNG\r\n\x1a\n");
+    expect(png.readUInt32BE(16)).toBe(ico[entry]);
+    sizes.push(ico[entry]);
+  }
+  expect(sizes).toEqual([16, 32, 48]);
+
+  // Safari paints the pinned-tab mask itself: solid black, no gradients.
+  const mask = readFileSync(ROOT + "site/assets/safari-pinned-tab.svg", "utf8");
+  expect(mask).toContain('viewBox="0 0 16 16"');
+  expect(mask).not.toContain("Gradient");
+  expect(mask).not.toContain("#0a0a0c");
+
+  const manifest = JSON.parse(readFileSync(ROOT + "site/assets/site.webmanifest", "utf8")) as {
+    name: string;
+    icons: { src: string; sizes: string; purpose?: string }[];
+  };
+  expect(manifest.name).toBe(SITE_TITLE);
+  expect(manifest.icons.some((i) => i.purpose === "maskable")).toBe(true);
+  for (const icon of manifest.icons) {
+    expect(existsSync(ROOT + "site/assets/" + icon.src.slice(1))).toBe(true);
+  }
+
+  // One list, shared by all three heads on this site, and every file it names
+  // is copied to the site root by the build.
+  const build = readFileSync(ROOT + "site/build.ts", "utf8");
+  expect(build.match(/\$\{ICON_LINKS\}/g)?.length).toBe(2);
+  expect(readFileSync(ROOT + "site/templates.ts", "utf8")).toContain("${ICON_LINKS}");
+  for (const href of [...ICON_LINKS.matchAll(/href="\/([^"]+)"/g)].map((m) => m[1])) {
+    expect(existsSync(ROOT + "site/assets/" + href)).toBe(true);
+    expect(build).toContain(`"${href}"`);
+  }
+  // The tab title says what this is.
+  expect(SITE_TITLE).toBe("PocketJS JavaScript UI runtime");
+
+  // The generator reads the one drawing and nothing else.
+  const gen = readFileSync(ROOT + "tools/icons.ts", "utf8");
+  expect(gen).toContain("favicon.svg");
+  expect(svg).toContain("<svg");
 });
 
 test("public PocketJS icon surfaces keep the metal mark on a black backing", () => {
