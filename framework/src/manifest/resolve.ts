@@ -1,4 +1,4 @@
-import { DYNAMIC_FORMS, TARGET_FORMS } from "../../../contracts/spec/platforms.ts";
+import { DYNAMIC_FORMS, PACKAGE_ROLES, TARGET_FORMS } from "../../../contracts/spec/platforms.ts";
 import type { PocketManifestV2 } from "../../../contracts/spec/pocket-manifest.ts";
 import {
   POCKET_PLATFORM_CONTRACTS,
@@ -16,6 +16,9 @@ import { validatePocketManifest, type ContractDiagnostic } from "./validate.ts";
 
 export interface ResolveBuildRequest {
   readonly target: string;
+  /** Defaults to an ordinary application. System resolution assigns the
+   *  System UI role before capability admission. */
+  readonly role?: "application" | "systemUI";
 }
 
 export type ResolutionResult =
@@ -255,6 +258,35 @@ export function validatePlatformContractRegistry(
       }
       provided.add(capability);
     });
+    for (const [role, capabilities] of Object.entries(target.roleCapabilities ?? {})) {
+      const rolePath = `/targets/${targetId}/roleCapabilities/${role}`;
+      if (!PACKAGE_ROLES.includes(role as (typeof PACKAGE_ROLES)[number])) {
+        diagnostics.push({
+          code: "registry.unknownPackageRole",
+          path: rolePath,
+          message: `target declares unknown package role ${JSON.stringify(role)}`,
+        });
+      }
+      const roleProvided = new Set(provided);
+      capabilities?.forEach((capability, index) => {
+        const path = `${rolePath}/${index}`;
+        if (!known.has(capability)) {
+          diagnostics.push({
+            code: "registry.unknownCapability",
+            path,
+            message: `target provides unregistered capability ${JSON.stringify(capability)}`,
+          });
+        }
+        if (roleProvided.has(capability)) {
+          diagnostics.push({
+            code: "registry.duplicateCapability",
+            path,
+            message: `target provides capability ${JSON.stringify(capability)} more than once for ${role}`,
+          });
+        }
+        roleProvided.add(capability);
+      });
+    }
   }
   return diagnostics;
 }
@@ -290,7 +322,11 @@ export function resolveBuildPlan(
   const resolvedViewport = resolveViewport(manifest, profile, diagnostics);
 
   const known = new Set<string>(registry.capabilities);
-  const provided = new Set<string>(profile.capabilities);
+  const role = request.role ?? "application";
+  const provided = new Set<string>([
+    ...profile.capabilities,
+    ...(role === "systemUI" ? (profile.roleCapabilities?.systemUI ?? []) : []),
+  ]);
   const seen = new Map<string, string>();
   const featureAvailability = new Map<string, boolean>();
 
@@ -326,7 +362,7 @@ export function resolveBuildPlan(
         diagnostics.push({
           code: "capability.unavailable",
           path,
-          message: `target ${request.target} does not provide ${capability}`,
+          message: `target ${request.target} does not provide ${capability} to role ${role}`,
         });
         return;
       }

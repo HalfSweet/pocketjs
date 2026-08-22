@@ -123,6 +123,12 @@ pub struct GpuiRenderer {
     shaped_used: HashSet<u64>,
 }
 
+/// Native SURFACE_QUAD painter. `full` is the shell node's unclipped bounds,
+/// `clip` is its visible destination, and `focused` is the shell focus fact.
+/// This path is independent of image textures and preserves DrawList order.
+pub type CompositorPainter<'a> =
+    dyn FnMut(u32, Bounds<Pixels>, Bounds<Pixels>, bool, &mut Window, &mut App) + 'a;
+
 impl GpuiRenderer {
     pub fn new(cfg: TextConfig, raster_scale: u32) -> GpuiRenderer {
         GpuiRenderer {
@@ -150,6 +156,21 @@ impl GpuiRenderer {
     /// Replay the current DrawList at `origin` (the canvas element's origin,
     /// window coordinates, logical px — gpui applies the display scale).
     pub fn paint(&mut self, ui: &Ui, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let mut none =
+            |_: u32, _: Bounds<Pixels>, _: Bounds<Pixels>, _: bool, _: &mut Window, _: &mut App| {};
+        self.paint_with_compositor(ui, origin, window, cx, &mut none);
+    }
+
+    /// Replay a DrawList and delegate explicit SURFACE_QUAD instructions to
+    /// the native compositor at their exact place in painter order.
+    pub fn paint_with_compositor(
+        &mut self,
+        ui: &Ui,
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        compositor: &mut CompositorPainter<'_>,
+    ) {
         // Runtime atlas growth (loadFontAtlas reload) invalidates that
         // slot's glyph cells — same trigger the wgpu backend re-uploads on.
         for slot in 0..spec::MAX_FONT_SLOTS {
@@ -163,7 +184,7 @@ impl GpuiRenderer {
         self.shaped_used.clear();
         let words = &ui.current_draw_list().words;
         let mut i = 0usize;
-        self.walk(ui, words, &mut i, origin, window, cx);
+        self.walk(ui, words, &mut i, origin, window, cx, compositor);
         let used = std::mem::take(&mut self.rasters_used);
         self.rasters.retain(|h, _| used.contains(h));
         self.rasters_used = used;
@@ -173,6 +194,7 @@ impl GpuiRenderer {
     }
 
     /// Interpret ops until the list ends or a SCISSOR_POP closes this scope.
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         ui: &Ui,
@@ -181,6 +203,7 @@ impl GpuiRenderer {
         origin: Point<Pixels>,
         window: &mut Window,
         cx: &mut App,
+        compositor: &mut CompositorPainter<'_>,
     ) {
         while *i < words.len() {
             match words[*i] {
@@ -240,7 +263,34 @@ impl GpuiRenderer {
                     *i += 3 + 2 * n;
                 }
                 spec::draw_op::TEX_QUAD => {
-                    self.paint_tex_quad(ui, &words[*i + 1..*i + 9], origin, window, cx);
+                    self.paint_tex_quad(ui, &words[*i + 1..*i + 9], origin, window);
+                    *i += 9;
+                }
+                spec::draw_op::SURFACE_QUAD => {
+                    let full = Bounds::new(
+                        point(
+                            px(f32::from_bits(words[*i + 2])) + origin.x,
+                            px(f32::from_bits(words[*i + 3])) + origin.y,
+                        ),
+                        size(
+                            px(f32::from_bits(words[*i + 4])),
+                            px(f32::from_bits(words[*i + 5])),
+                        ),
+                    );
+                    let (x, y) = decode_xy(words[*i + 6]);
+                    let (w, h) = decode_wh(words[*i + 7]);
+                    let clip = Bounds::new(
+                        point(px(x) + origin.x, px(y) + origin.y),
+                        size(px(w), px(h)),
+                    );
+                    compositor(
+                        words[*i + 1],
+                        full,
+                        clip,
+                        words[*i + 8] & 1 != 0,
+                        window,
+                        cx,
+                    );
                     *i += 9;
                 }
                 spec::draw_op::SCISSOR => {
@@ -256,7 +306,7 @@ impl GpuiRenderer {
                     // with_content_mask intersects with the enclosing mask,
                     // matching the core's already-intersected scissor rects.
                     window.with_content_mask(Some(mask), |window| {
-                        self.walk(ui, words, i, origin, window, cx)
+                        self.walk(ui, words, i, origin, window, cx, compositor)
                     });
                 }
                 spec::draw_op::SCISSOR_POP => {
@@ -452,7 +502,6 @@ impl GpuiRenderer {
         words: &[u32],
         origin: Point<Pixels>,
         window: &mut Window,
-        _cx: &mut App,
     ) {
         let handle = words[0];
         let (x, y) = decode_xy(words[1]);
@@ -460,31 +509,35 @@ impl GpuiRenderer {
         let (u0, v0) = (f32::from_bits(words[3]), f32::from_bits(words[4]));
         let (u1, v1) = (f32::from_bits(words[5]), f32::from_bits(words[6]));
         let tint = words[7];
-        let Some((image, _)) = self.texture_image(ui, handle, tint) else {
-            return;
-        };
         let dst = Bounds::new(
             point(px(x) + origin.x, px(y) + origin.y),
             size(px(w), px(h)),
         );
         let (du, dv) = (u1 - u0, v1 - v0);
+        let full = if du > 0.0 && dv > 0.0 {
+            let full_w = w / du;
+            let full_h = h / dv;
+            Bounds::new(
+                point(
+                    px(x - u0 * full_w) + origin.x,
+                    px(y - v0 * full_h) + origin.y,
+                ),
+                size(px(full_w), px(full_h)),
+            )
+        } else {
+            dst
+        };
+        let Some((image, _)) = self.texture_image(ui, handle, tint) else {
+            return;
+        };
         if (u0, v0, u1, v1) == (0.0, 0.0, 1.0, 1.0) {
             let _ = window.paint_image(dst, Default::default(), image, 0, false);
         } else if du > 0.0 && dv > 0.0 {
             // Sub-rect sampling (sprite cells, tilesets): paint the full
             // image scaled so the UV window lands exactly on `dst`, masked
             // to `dst` (with_content_mask intersects the enclosing mask).
-            let full_w = w / du;
-            let full_h = h / dv;
-            let img_bounds = Bounds::new(
-                point(
-                    px(x - u0 * full_w) + origin.x,
-                    px(y - v0 * full_h) + origin.y,
-                ),
-                size(px(full_w), px(full_h)),
-            );
             window.with_content_mask(Some(ContentMask { bounds: dst }), |window| {
-                let _ = window.paint_image(img_bounds, Default::default(), image, 0, false);
+                let _ = window.paint_image(full, Default::default(), image, 0, false);
             });
         }
         // Mirrored UV windows (u1 < u0) never leave the core: flips become

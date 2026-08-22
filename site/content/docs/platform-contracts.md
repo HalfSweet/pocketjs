@@ -3,7 +3,9 @@
 PocketJS keeps application intent separate from host facts. An app writes
 `pocket.json`; PocketJS owns a profile for each stock target. The resolver
 combines them once, writes a small target-specific `ResolvedBuildPlan`, and all
-later build stages consume that answer.
+later build stages consume that answer. A product that runs several installed
+Pocket packages also writes `pocket.system.json`; its resolver retains one
+complete package plan per installed app in a `ResolvedSystemPlan`.
 
 ```text
   pocket.json           target profile
@@ -24,13 +26,16 @@ Cargo, packagers, and custom hosts.
 
 ## Ownership
 
-| Data | Owner | Meaning |
-|---|---|---|
-| `pocket.json` | App | Entry, framework, logical viewport, required and optional APIs |
-| Capability registry | PocketJS | Names of framework APIs that can be requested |
-| Target profile | Stock host | Host ABI, display facts, and APIs actually implemented and tested |
-| `ResolvedBuildPlan` | Resolver | One build's target-specific inputs |
-| Backend | PocketJS or custom host | How those inputs become an EBOOT, VPK, or another package |
+| Data                 | Owner                     | Meaning                                                                        |
+| -------------------- | ------------------------- | ------------------------------------------------------------------------------ |
+| `pocket.json`        | App                       | Entry, framework, logical viewport, required and optional APIs                 |
+| Capability registry  | PocketJS                  | Names of framework APIs that can be requested                                  |
+| Target profile       | Stock host                | Host ABI, display facts, and APIs actually implemented and tested              |
+| `ResolvedBuildPlan`  | Resolver                  | One build's target-specific inputs                                             |
+| `pocket.system.json` | Pocket System             | System manifest plus the current installation state                            |
+| `ResolvedSystemPlan` | System resolver           | Installation snapshot, System UI plan and complete installed application plans |
+| AppSupervisor        | Stock host implementation | AppInstance lifecycle and scheduling for resolved installed packages           |
+| Backend              | PocketJS or custom host   | How those inputs become an EBOOT, VPK, or another package                      |
 
 Apps never claim what a device provides. Profiles never advertise raw hardware
 specifications that the PocketJS host does not expose. Generic build stages do
@@ -149,6 +154,85 @@ meaningfully different API, it can receive a new identifier once that API is
 real. The registry remains data; specialized compatibility rules should live
 with the feature that needs them, not in a universal constraint language.
 
+## Pocket Systems and application instances
+
+**A Pocket System is a product-level application and installation model.**
+Its manifest declares identity, a managed app catalog, install policy, roles
+and lifecycle policy. Each catalog entry uses `required` only as install
+policy. The separate `installation.installedPackages` snapshot records what is
+actually installed; catalog packages absent from that snapshot are available
+but do not produce plans or AppInstances. `roles.systemUI` selects the package
+whose shell is shown to users as SystemUI.
+`applications.backgroundExecution` controls whether hidden application
+instances `suspend` or `continue`; it does not describe memory residency.
+
+**AppSupervisor is a native-host implementation detail.** It receives the
+resolved installation snapshot and creates, schedules, suspends and destroys
+AppInstances. The System manifest does not name this implementation. A host
+may later use actors, multiple threads or processes without changing the
+System contract.
+
+`ui.compositor-surfaces` describes the API the System UI uses. The System UI
+must require it. The target declares it under
+`roleCapabilities.systemUI`, not among APIs supplied to every application.
+Ordinary installed applications therefore fail a hard requirement and resolve
+an enhancement to `false`. Each AppInstance receives its complete
+`ResolvedBuildPlan`, including target identity, feature booleans, companion
+allowlist, viewport policy, raster density and package identity.
+
+```text
+   System manifest + state      pocket.json for each installed entry
+          └──────────── resolve for one target ────────────┘
+                                │
+                                ▼
+                      ResolvedSystemPlan
+                     ├─ installation snapshot
+                     ├─ System UI ResolvedBuildPlan
+                     └─ installed app ResolvedBuildPlan[]
+                                │
+                                ▼
+                       generic native host
+                     ├─ System UI AppInstance
+                     ├─ AppSupervisor
+                     └─ native compositor
+```
+
+The shell renders `<CompositorSurface package="…">`. The framework binds it
+through the compositor namespace, and the core emits `SURFACE_QUAD` with the
+full destination, clipped destination and focused state at the node's exact
+DrawList position. **Texture handles and `TEX_QUAD` remain image-only.** The
+native compositor reads live surface bindings for AppInstance lifecycle and
+reads visible surface instructions for focus, scheduling, clipping and painter
+order. Companion services remain package-specific cold/control protocols; they
+do not carry these per-frame facts. A child companion is rejected until the
+host provides a per-AppInstance adapter.
+
+The generic macOS host discovers no desktop product names or app catalog. It
+loads the resolved Pocket System, registers its installed package ids, and
+derives each AppInstance from the nested package plan. Pocket Desktop supplies
+the Windows-style shell and icon/window behavior through its System UI package.
+
+**Package state and AppInstance state are separate transitions:**
+
+```text
+package:      available ── install ──▶ installed ── remove ──▶ available
+AppInstance:  absent ── open ──▶ Running ⇄ Suspended ── close ──▶ absent
+                                      └──── error ────▶ Failed
+
+AppInstance
+├─ ResolvedBuildPlan
+├─ Guest
+│  ├─ QuickJS Runtime
+│  └─ QuickJS Context / Realm
+├─ UiSurface
+├─ Renderer
+└─ state
+```
+
+Removing a package changes installation state. Closing a window destroys an
+AppInstance but leaves the package installed. Suspending an AppInstance stops
+its guest ticks without claiming that its memory has been evicted.
+
 ## Resolution and PSP-to-Vita compatibility
 
 The resolver performs the same steps for every registered target:
@@ -182,12 +266,24 @@ The generated plan is cross-process build IR, not public app configuration:
 
 ```json
 {
-  "app": { "id": "dev.pocket-stack.telemetry", "title": "Pocket Telemetry",
-           "entry": "app/main.tsx", "output": "main", "framework": "solid" },
+  "app": {
+    "id": "dev.pocket-stack.telemetry",
+    "title": "Pocket Telemetry",
+    "version": "1.0.0",
+    "entry": "app/main.tsx",
+    "output": "main",
+    "framework": "solid"
+  },
   "target": { "id": "vita", "hostAbi": 2 },
-  "viewport": { "logical": [480, 272], "physical": [960, 544],
-                "presentation": "integer-fit", "rasterDensity": 2 },
+  "viewport": {
+    "logical": [480, 272],
+    "physical": [960, 544],
+    "presentation": "integer-fit",
+    "rasterDensity": 2,
+    "policy": "fixed"
+  },
   "features": { "input.analog.left": true },
+  "companions": [],
   "planHash": "sha256:…"
 }
 ```
@@ -233,8 +329,10 @@ The complete `ResolvedBuildPlan` is internal and may evolve. Custom hosts use
 the smaller stable boundary instead:
 
 ```ts
-import { extractHostBuildInputs, hostBuildEnvironment }
-  from "@pocketjs/framework/manifest";
+import {
+  extractHostBuildInputs,
+  hostBuildEnvironment,
+} from "@pocketjs/framework/manifest";
 
 const inputs = extractHostBuildInputs(planJson, { expectedTarget: "vita" });
 const env = hostBuildEnvironment(inputs, {

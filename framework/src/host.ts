@@ -37,7 +37,7 @@ export interface BuildHostContract {
  *  node id 0 means "none" (anchor 0 = append, setFocus 0 = clear). Texture
  *  handles have operation-specific 0-based or generation-tagged contracts. */
 export interface HostOps {
-  /** type: spec NODE_TYPE (0 view, 1 text, 2 image) → new node id. */
+  /** type: spec NODE_TYPE (0 view, 1 text, 2 image, 3 surface) → node id. */
   createNode(type: number): number;
   /** Destroys the whole subtree; frees anim tracks; clears focus if inside. */
   destroyNode(id: number): void;
@@ -64,6 +64,9 @@ export interface HostOps {
   uploadTexture(buf: Uint8Array, w: number, h: number, psm: number): number;
   /** texHandle < 0 clears the image (handles are 0-based: 0 is a real one). */
   setImage(id: number, texHandle: number): void;
+  /** Bind a native application surface to a surface node. Optional on
+   *  hosts without ui.compositor-surfaces; handle < 0 clears the binding. */
+  setCompositorSurface?(id: number, handle: number, focused: number): void;
   /**
    * Bind an animated sprite atlas to an image node: `atlas` is an uploaded
    * texture (a `cols`-wide grid of `frames` cells); the core auto-plays it,
@@ -126,8 +129,8 @@ export interface HostOps {
    *  computes greedy word wrap over the same provider that measures and
    *  paints the slot; native-text backends may install the host text
    *  system's wrapper (gpui LineWrapper) whose positions win. Optional:
-   *  hosts that predate it — apps fall back to the same greedy rules over
-   *  measureText (apps/desk98/notepad.ts wrapLine, parity-tested). */
+   *  hosts that predate it — apps fall back to matching greedy rules over
+   *  measureText. */
   wrapText?(str: string, fontSlot: number, maxW: number): number[];
 
   // -- streamed textures (spec ops 23..25) — deep-zoom tile canvases. Native
@@ -225,6 +228,9 @@ export interface HostOps {
    *  means the spec default 60 — hosts that predate per-realm rates only
    *  ever ran 60. Bundles bake their rate (`--hz`) and refuse another. */
   __tickHz?: number;
+  /** Pocket System package id -> compositor surface handle. Separate from the
+   *  texture namespace: compositor surfaces are not images. */
+  __surfaces?: Record<string, number>;
 }
 
 /** Desktop hosts publish their logical UI size as `ui.__viewport` (the core

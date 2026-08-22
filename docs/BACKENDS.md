@@ -71,9 +71,8 @@ text can come from the host text system.
   own `LineWrapper` instead (`native_wrap`, installed next to the measurer
   through the same `TextConfig` — Zed's editor WrapMap consumes the same
   machinery). The wrapped COORDINATE SPACE — visual rows, caret/selection
-  mapping, hit testing — stays app-side (apps/desk98/notepad.ts is the
-  reference): the op is only the "where does this line break" half, exactly
-  the platform/editor split Zed uses.
+  mapping and hit testing — stays app-side: the op is only the "where does
+  this line break" half, matching the platform/editor split Zed uses.
 - **Two ops keep a pixel-exact escape hatch.** Gouraud `TRI` and `TEX_TRI`
   batches (rotated gradients and images, 3D subtrees) have no gpui vector
   equivalent, so consecutive batches raster through
@@ -98,8 +97,8 @@ note does (pure-math unit tests over an injected measurer, sim traces,
 
 ## The `macos-app` target
 
-`contracts/spec/platforms.ts` registers the profile: hostAbi 3 (the desktop
-HostOps wire generation macos-widget already speaks), `form: "window"`,
+`contracts/spec/platforms.ts` registers the profile: hostAbi 4 (the
+compositor-surface wire generation), `form: "window"`,
 dynamic viewport with `acceptsFixed` — a general app frame, not a widget
 shell. Fixed-viewport console apps run size-locked and letterboxed with
 their baked glyph pipeline intact; the manifest decides everything else:
@@ -112,17 +111,21 @@ bun run macos note --proof
 
 `tools/macos.ts` resolves the manifest against `macos-app`, writes the
 plan, builds the bundle + pak, and derives the capability-shaped host flags
-(`--fixed`, `--native-text`, `--companions`) from the resolved plan.
+(`--fixed`, `--native-text`, `--companions`) from the resolved plan. If the
+selected app directory also contains `pocket.system.json`, the tool
+resolves every installed package and starts the host with one complete
+`ResolvedSystemPlan`; it does not project child plans into command-line
+viewport or title fields.
 `--editor` is NOT a capability: it enables the note's companion svc adapter
 (an app protocol — the profile deliberately registers no
 pointer/text/IME/clipboard ids, see contracts/spec/platforms.ts). On exit
 the host prints its governor receipt (`pocket-macos: N ticks, M frames
 rendered`); a settled app shows M ≪ N.
 
-## The desk companion
+## System UI companion input
 
-The host speaks a second svc dialect when the plan's companion list names
-`desk` (apps/desk98/svc.ts): the note dialect's input lines extended with
+The host speaks the `system-ui` svc dialect when the resolved System UI plan
+declares that companion. The protocol extends the note dialect's input lines with
 **right-button mouse lines (`b:2`), alt/ctl key modifiers, F1–F12,
 cmd-flagged ⌘ chords, a boot epoch in the hello**, a `{t:"cursor"}` guest
 intent that sets the window's pointer shape, and a `{t:"paste-req"}` guest
@@ -130,21 +133,38 @@ intent the host answers with a paste line (menu-driven Paste). ⌘Q quits
 and ⌘V pastes host-side; every other ⌘ chord reaches the guest, so the
 compositor owns its shortcuts (⌘W close, ⌘M minimize, ⌘` cycle windows,
 ⌘Esc Start menu, ⌘A/C/X editing). Plain typing arrives only through the
-IME input handler (`insertText:` → one `ch` line per keypress).
+IME input handler (`insertText:` → one `ch` line per keypress). **This
+companion carries shell UI input, clipboard requests and cursor intents. It
+does not carry package lifecycle, focus, per-frame visibility or button
+routing.**
 
-`apps/desk98` — a Windows 98 desktop compositor written in Vue Vapor JSX
-— is the reference consumer: the guest owns every window (drag, resize,
-z-order, menus, text selection, word-wrap layout, Minesweeper) by
-hit-testing the raw pointer stream itself, window moves ride paint-only
-translate props, and raises ride zIndex, so a drag never relayouts and an
-idle desktop keeps the demand-render governor at a few frames per second.
-Its W95FA pixel font is baked per-app into slots 19–21 through
-`apps/desk98/pak.json` (`gen-assets.ts`) — the repo slot table (0–18)
-never moves.
+The themeable [Pocket Desktop](https://github.com/pocket-stack/pocket-desktop)
+product is maintained separately and consumes these contracts as an external
+Pocket System. Its manifest owns the app catalog, installation snapshot,
+System UI role and background-execution policy. **Every installed entry
+reaches the native host as a complete `ResolvedBuildPlan`; ordinary
+applications resolve without the System UI-only compositor capability.**
 
-```
-bun run macos desk98      # the full desktop; drag-select, Cmd+`, Cmd+W, Cmd+Esc
-```
+- **`hosts/macos` implements a generic `AppSupervisor`; the System contract
+  does not expose that implementation.** The host contains no product catalog
+  or package-name rules. Live `<CompositorSurface package>` bindings create
+  one AppInstance with its own `Guest`, QuickJS `Runtime`, QuickJS `Context`,
+  `UiSurface` and `GpuiRenderer` inside the existing process. Their globals,
+  node trees, textures, clocks and button state are isolated.
+- **Compositor surfaces use `SURFACE_QUAD`, not `TEX_QUAD`.** The instruction
+  carries the package-surface handle, unclipped bounds, clipped visible bounds
+  and focused state. GPUI invokes the native compositor at that exact DrawList
+  position, so shell content before and after it keeps its painter order and
+  clipping never changes the child coordinate origin.
+- **AppInstance lifecycle and scheduling come from the shell core's live
+  surface bindings.** Destroying a binding removes its instance. Hidden
+  instances become `Suspended` under `backgroundExecution: "suspend"`;
+  `"continue"` keeps them `Running`. This policy does not govern memory
+  residency. Focused visible instances run first, and hardware-neutral buttons
+  go only to the top focused surface.
+- **A child exception marks only that AppInstance as `Failed`.** The shell and
+  sibling instances continue; the host records the package failure without a
+  companion hot path.
 
 Scripted acceptance drives the same dialect from flags: `--mouse
 X,Y[,d|u|r]@TICK` (drags, right clicks), `--key
@@ -152,14 +172,14 @@ X,Y[,d|u|r]@TICK` (drags, right clicks), `--key
 
 ## Choosing a backend
 
-| | portable | gpui |
-|---|---|---|
-| hosts | PSP, Vita, PocketBook, ESP32-P4, Symbian, web, sim, macOS widget | macOS (`hosts/macos`) |
-| text measurement | core, atlas advance tables | host text system (CoreText), per-app opt-in |
-| codepoint coverage | baked charset (+ runtime extension) | OS fallback chain, color emoji |
-| pixel determinism | byte-exact across hosts | per-host; transactions still deterministic |
-| pixel goldens | `tests/golden-specs.ts`, tape hashes | opted out (note-style verification) |
-| rotated/3D content | native | portable rasterizer as a local sub-backend |
+|                    | portable                                                         | gpui                                        |
+| ------------------ | ---------------------------------------------------------------- | ------------------------------------------- |
+| hosts              | PSP, Vita, PocketBook, ESP32-P4, Symbian, web, sim, macOS widget | macOS (`hosts/macos`)                       |
+| text measurement   | core, atlas advance tables                                       | host text system (CoreText), per-app opt-in |
+| codepoint coverage | baked charset (+ runtime extension)                              | OS fallback chain, color emoji              |
+| pixel determinism  | byte-exact across hosts                                          | per-host; transactions still deterministic  |
+| pixel goldens      | `tests/golden-specs.ts`, tape hashes                             | opted out (note-style verification)         |
+| rotated/3D content | native                                                           | portable rasterizer as a local sub-backend  |
 
 The desktop benchmark against Tauri and Electron (harness, comparison
 apps, results) lives in its own stacked PR — pocket-stack/pocketjs#294.

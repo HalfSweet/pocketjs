@@ -35,6 +35,8 @@ export const NODE_TYPE = {
   view: 0,
   text: 1,
   image: 2,
+  /** A native-compositor slot for an installed Pocket application. */
+  surface: 3,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -94,6 +96,8 @@ export const SIZE_FULL = -1;
 //   loadStyles(buf) / loadFontAtlas(buf)   [web/test hosts only; PSP feeds core
 //                                           natively from the pak]
 //   measureText(str, fontSlot) -> width:f32
+//   setCompositorSurface(id, handle, focusedInt) [surface nodes only; handle
+//                                                  < 0 clears]
 
 export const OP = {
   createNode: 1,
@@ -257,10 +261,15 @@ export const OP = {
   //                      and its break positions win. Wrapped-coordinate
   //                      bookkeeping (visual rows, caret/selection mapping)
   //                      stays app-side — this op is the "where may it
-  //                      break" half only. Hosts without it: the framework
-  //                      falls back to the same greedy rules over
-  //                      measureText (apps/desk98/notepad.ts wrapLine is the
-  //                      pinned reference; a parity test holds them equal).
+  //                      break" half only. Hosts without it: applications
+  //                      implement matching greedy rules over measureText.
+  setCompositorSurface: 44, // (id, surfaceHandle, focusedInt). Binds an
+  //                      Pocket System package surface to a NODE_TYPE.surface
+  //                      node. The core emits SURFACE_QUAD in ordinary paint
+  //                      order with BOTH full and clipped bounds; no image or
+  //                      texture semantics are involved. focusedInt is the
+  //                      shell's focus fact consumed by the native compositor
+  //                      for input and scheduling. handle < 0 clears.
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -1414,6 +1423,16 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           i16 clip guarantee: a run may start off-viewport,
 //                           and the core brackets any partially-clipped run
 //                           in SCISSOR/SCISSOR_POP.
+//   SURFACE_QUAD (9 words): op, surfaceHandle,
+//                           fullX, fullY, fullW, fullH (f32 bits; the shell
+//                           node's unclipped logical bounds), clipXY, clipWH
+//                           (the visible integer destination after every
+//                           enclosing clip), flags (bit 0 = focused).
+//                           This is a native compositor instruction. It owns
+//                           no pixels in software/fixed-function backends and
+//                           is emitted exactly where the surface node occurs
+//                           in shell painter order, so later shell ops remain
+//                           above the child surface.
 
 export const DRAW_OP = {
   rect: 1,
@@ -1425,6 +1444,7 @@ export const DRAW_OP = {
   tri: 7,
   texTri: 8,
   textRun: 9,
+  surfaceQuad: 10,
 } as const;
 
 // ---------------------------------------------------------------------------

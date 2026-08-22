@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  generatePocketSystemV1Schema,
+  POCKET_SYSTEM_SCHEMA_ID,
+} from "../contracts/spec/pocket-system.ts";
+import {
   generatePocketManifestV2Schema,
   POCKET_MANIFEST_SCHEMA_ID,
   type PocketManifestV2,
@@ -22,6 +26,7 @@ import {
   validatePlatformContractRegistry,
 } from "../framework/src/manifest/resolve.ts";
 import { validatePocketManifest } from "../framework/src/manifest/validate.ts";
+import { validatePocketSystem } from "../framework/src/manifest/system.ts";
 
 const fixtureUrl = (name: string) => new URL(`./fixtures/manifests/${name}.json`, import.meta.url);
 const portableInput: unknown = await Bun.file(fixtureUrl("portable-psp")).json();
@@ -139,6 +144,25 @@ describe("pocket.json v2 schema", () => {
   });
 });
 
+describe("Pocket System v1 schema", () => {
+  test("uses the deployed schema path and matches the committed JSON Schema", async () => {
+    expect(POCKET_SYSTEM_SCHEMA_ID).toBe(
+      "https://pocketjs.dev/schema/pocket-system-1.json",
+    );
+    const committed = await Bun.file(
+      new URL("../contracts/schema/pocket-system-1.json", import.meta.url),
+    ).text();
+    expect(committed).toBe(generatePocketSystemV1Schema());
+  });
+
+  test("validates a managed desktop installation model", async () => {
+    const system = await Bun.file(
+      new URL("./fixtures/systems/managed-desktop.json", import.meta.url),
+    ).json();
+    expect(validatePocketSystem(system).ok).toBe(true);
+  });
+});
+
 describe("platform registry", () => {
   test("production advertises only the truthful stock-host profiles", () => {
     expect(Object.keys(POCKET_TARGETS)).toEqual([
@@ -200,12 +224,12 @@ describe("platform registry", () => {
       max: [4096, 4096],
     });
     // The gpui app frame: same desktop wire generation as the widget shell
-    // (hostAbi 3), a general window that ALSO hosts fixed-viewport apps
+    // (hostAbi 4 adds compositor surfaces), a general window that ALSO hosts fixed-viewport apps
     // (acceptsFixed), and host text layout instead of runtime glyph baking.
     // Deliberately NARROW: only host-generic behavior registers — pointer/
     // text/IME/clipboard reach the note via its companion svc adapter and
     // are not target capabilities here (the platforms.ts header rule).
-    expect(POCKET_TARGETS["macos-app"].hostAbi).toBe(3);
+    expect(POCKET_TARGETS["macos-app"].hostAbi).toBe(4);
     expect(POCKET_TARGETS["macos-app"].form).toBe("window");
     expect(POCKET_TARGETS["macos-app"].capabilities).toEqual([
       "input.buttons",
@@ -213,6 +237,9 @@ describe("platform registry", () => {
       "text.glyphs.baked",
       "text.layout.native",
     ]);
+    expect(POCKET_TARGETS["macos-app"].roleCapabilities).toEqual({
+      systemUI: ["ui.compositor-surfaces"],
+    });
     expect(POCKET_TARGETS["macos-app"].display.dynamicViewport).toEqual({
       min: [240, 180],
       max: [4096, 4096],
@@ -249,6 +276,7 @@ describe("platform registry", () => {
       message: "widget-form targets must declare display.dynamicViewport",
     });
   });
+
 });
 
 describe("semantic resolution", () => {
@@ -263,7 +291,7 @@ describe("semantic resolution", () => {
     if (!onApp.ok) return;
     expect(onApp.plan.features["text.layout.native"]).toBe(true);
     expect(onApp.plan.features["text.glyphs.runtime"]).toBe(false);
-    expect(onApp.plan.target.hostAbi).toBe(3);
+    expect(onApp.plan.target.hostAbi).toBe(4);
 
     const onWidget = validateAndResolveBuildPlan(note, { target: "macos-widget" });
     expect(onWidget.ok).toBe(true);
@@ -405,7 +433,6 @@ describe("semantic resolution", () => {
       cards: [true, true, false, true],
       chrome: [true, true, false, true],
       cursor: [true, true, false, true],
-      desk98: [false, false, true, true], // dynamic-only desktop compositor; the desk companion is macos-app's
       gallery: [true, true, false, true],
       hero: [true, true, true, true],
       "hero-vue-sfc": [true, true, false, true],
@@ -440,6 +467,15 @@ describe("semantic resolution", () => {
         expect(`${demo}@${target}:${result.ok}`).toBe(`${demo}@${target}:${expected[demo][i]}`);
       });
     }
+    const systemUI = await Bun.file(
+      new URL("./fixtures/manifests/system-ui.json", import.meta.url),
+    ).json();
+    expect(
+      validateAndResolveBuildPlan(systemUI, {
+        target: "macos-app",
+        role: "systemUI",
+      }).ok,
+    ).toBe(true);
     // The demo shelf rule the site build applies: only psp-admissible
     // manifests are shown — the note stays off the landing/playground.
     const note = await Bun.file(new URL("../apps/note/pocket.json", import.meta.url)).json();

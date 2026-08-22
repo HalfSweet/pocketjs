@@ -23,36 +23,43 @@
 //!   forwarded as lines, guest intents (save/quit/copy/caret) handled here.
 //!   An app protocol, not a capability: the live-viewport hook and button
 //!   map work for every app regardless of this flag.
-//! - desk — the DESK COMPANION adapter (apps/desk98/svc.ts): the same
+//! - System UI shell — the `system-ui` companion adapter: the same
 //!   input-line dialect as the editor, extended with right-button mouse
 //!   lines (b:2), alt/ctl key modifiers, F1–F12, cmd-flagged ⌘ chords
 //!   (except ⌘Q = host quit and ⌘V = host-side paste), a boot epoch in the
 //!   hello (for the guest's wall clock), a {t:"cursor"} guest intent that
 //!   sets the window's pointer shape, and a {t:"paste-req"} guest intent
 //!   answered with a paste line (menu-driven Paste). Wired when the plan's
-//!   companion list names "desk"; the note dialect stays byte-compatible
-//!   (extra fields ignored).
+//!   companion id is product-neutral; the note dialect stays byte-compatible
+//!   (extra fields ignored). A resolved Pocket System may also bind installed
+//!   packages as compositor surfaces. AppSupervisor owns every independent
+//!   AppInstance and schedules them on this one process/thread.
 
 use std::cell::{Cell, RefCell};
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use gpui::{
-    App, AppContext as _, Application, Bounds, ClipboardItem, Context, CursorStyle, Entity,
-    EntityInputHandler, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, SharedString, Styled, TitlebarOptions, UTF16Selection, Window,
-    WindowBounds, WindowOptions, canvas, div, point, px, size,
+    App, AppContext as _, Application, Bounds, ClipboardItem, ContentMask, Context, CursorStyle,
+    Entity, EntityInputHandler, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled, TitlebarOptions,
+    UTF16Selection, Window, WindowBounds, WindowOptions, WindowTextSystem, canvas, div, point, px,
+    size,
 };
 use pocket_mod::Guest;
 use pocket_ui_gpui::{GpuiRenderer, TextConfig, native_measure, native_wrap};
 use pocket_ui_surface::UiSurface;
+use serde::Deserialize;
 
 const HOST_ID: &str = "macos-app";
-const HOST_ABI: u32 = 3;
+const HOST_ABI: u32 = 4;
 const TICK_HZ: f64 = 60.0;
 const MAX_CATCHUP_TICKS: u32 = 6;
 
@@ -89,6 +96,185 @@ enum ScriptEvent {
     Key(u64, String, bool, bool, bool, bool),
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // serde requires the complete package plan; not every field is consumed yet.
+struct ResolvedAppPlan {
+    id: String,
+    output: String,
+    title: String,
+    version: String,
+    entry: String,
+    framework: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedTargetPlan {
+    id: String,
+    host_abi: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct ResolvedViewportPlan {
+    logical: [u32; 2],
+    physical: [u32; 2],
+    presentation: String,
+    raster_density: u32,
+    policy: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedPackagePlan {
+    app: ResolvedAppPlan,
+    target: ResolvedTargetPlan,
+    viewport: ResolvedViewportPlan,
+    features: HashMap<String, bool>,
+    companions: Vec<String>,
+    plan_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
+struct SystemIdentity {
+    id: String,
+    name: String,
+    title: String,
+    version: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct SystemPackagePlan {
+    package: String,
+    source: String,
+    required: bool,
+    plan: ResolvedPackagePlan,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemInstallationPlan {
+    installed_packages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemRolesPlan {
+    #[serde(rename = "systemUI")]
+    system_ui: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemLifecyclePlan {
+    background_execution: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedSystemPlan {
+    system: SystemIdentity,
+    target: ResolvedTargetPlan,
+    roles: SystemRolesPlan,
+    lifecycle: SystemLifecyclePlan,
+    #[allow(dead_code)]
+    // The System owns installation state; AppSupervisor only runs its snapshot.
+    installation: SystemInstallationPlan,
+    #[serde(rename = "systemUI")]
+    system_ui: SystemPackagePlan,
+    applications: Vec<SystemPackagePlan>,
+    #[allow(dead_code)]
+    plan_hash: String,
+}
+
+impl ResolvedSystemPlan {
+    fn validate_for_host(&self) -> Result<&SystemPackagePlan> {
+        if self.target.id != HOST_ID || self.target.host_abi != HOST_ABI {
+            return Err(anyhow!(
+                "Pocket System targets {} ABI {}, host is {} ABI {}",
+                self.target.id,
+                self.target.host_abi,
+                HOST_ID,
+                HOST_ABI
+            ));
+        }
+        if self.roles.system_ui != self.system_ui.package {
+            return Err(anyhow!(
+                "SystemUI role names {}, resolved package is {}",
+                self.roles.system_ui,
+                self.system_ui.package
+            ));
+        }
+        let mut packages = HashSet::new();
+        let mut outputs = HashSet::new();
+        for package in std::iter::once(&self.system_ui).chain(self.applications.iter()) {
+            if !packages.insert(package.package.clone()) {
+                return Err(anyhow!("duplicate System package {}", package.package));
+            }
+            if !outputs.insert(package.plan.app.output.clone()) {
+                return Err(anyhow!(
+                    "duplicate System artifact output {}",
+                    package.plan.app.output
+                ));
+            }
+            if package.plan.app.id != package.package {
+                return Err(anyhow!(
+                    "package {} carries plan for {}",
+                    package.package,
+                    package.plan.app.id
+                ));
+            }
+            if package.plan.target.id != self.target.id
+                || package.plan.target.host_abi != self.target.host_abi
+            {
+                return Err(anyhow!(
+                    "package {} resolved for {} ABI {}, not Pocket System target",
+                    package.package,
+                    package.plan.target.id,
+                    package.plan.target.host_abi
+                ));
+            }
+        }
+        let installed: HashSet<String> = self
+            .installation
+            .installed_packages
+            .iter()
+            .cloned()
+            .collect();
+        if installed != packages {
+            return Err(anyhow!(
+                "resolved packages do not match the System installation snapshot"
+            ));
+        }
+        if !self.system_ui.required {
+            return Err(anyhow!("SystemUI package must be required"));
+        }
+        if self.system_ui.plan.features.get("ui.compositor-surfaces") != Some(&true) {
+            return Err(anyhow!("SystemUI plan lacks ui.compositor-surfaces"));
+        }
+        for application in &self.applications {
+            if !application.plan.companions.is_empty() {
+                return Err(anyhow!(
+                    "AppInstance {} declares unsupported companions",
+                    application.package
+                ));
+            }
+            if application.plan.features.get("ui.compositor-surfaces") == Some(&true) {
+                return Err(anyhow!(
+                    "AppInstance {} cannot host compositor surfaces",
+                    application.package
+                ));
+            }
+        }
+        Ok(&self.system_ui)
+    }
+}
+
 struct Args {
     app: String,
     js: Option<PathBuf>,
@@ -106,6 +292,8 @@ struct Args {
     editor: bool,
     /// Companion service names from the plan (svcOpen allowlist).
     companions: Vec<String>,
+    /// Complete Pocket System resolution. None runs one ordinary package.
+    system: Option<ResolvedSystemPlan>,
     density: u32,
     script: Vec<ScriptEvent>,
     quit_after_ticks: Option<u64>,
@@ -129,12 +317,14 @@ fn parse_args() -> Result<Args> {
         native_text: false,
         editor: false,
         companions: Vec::new(),
+        system: None,
         density: 2,
         script: Vec::new(),
         quit_after_ticks: None,
         storm: None,
         announce_ready: false,
     };
+    let mut system_plan_path = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = |name: &str| -> Result<String> {
@@ -160,6 +350,9 @@ fn parse_args() -> Result<Args> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .collect();
+            }
+            "--system-plan" => {
+                system_plan_path = Some(PathBuf::from(val("--system-plan")?));
             }
             "--density" => args.density = val("--density")?.parse::<u32>()?.clamp(1, 4),
             "--type" => {
@@ -264,6 +457,34 @@ fn parse_args() -> Result<Args> {
             other => return Err(anyhow!("unknown flag {other}")),
         }
     }
+    if let Some(path) = system_plan_path {
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading Pocket System plan {}", path.display()))?;
+        let system: ResolvedSystemPlan = serde_json::from_slice(&bytes)
+            .with_context(|| format!("decoding Pocket System plan {}", path.display()))?;
+        let shell = system.validate_for_host()?;
+        args.app = shell.plan.app.output.clone();
+        args.title = system.system.title.clone();
+        args.viewport = (
+            shell.plan.viewport.logical[0],
+            shell.plan.viewport.logical[1],
+        );
+        args.fixed = shell.plan.viewport.policy == "fixed";
+        args.native_text = shell
+            .plan
+            .features
+            .get("text.layout.native")
+            .copied()
+            .unwrap_or(false);
+        args.companions = shell.plan.companions.clone();
+        args.editor = args.companions.iter().any(|companion| companion == "note");
+        args.density = shell.plan.viewport.raster_density.clamp(1, 4);
+        // System package assets are selected only by their resolved outputs;
+        // command-line bundle overrides cannot replace the System UI shell.
+        args.js = None;
+        args.pak = None;
+        args.system = Some(system);
+    }
     Ok(args)
 }
 
@@ -326,6 +547,365 @@ fn register_fonts(cx: &App) {
 }
 
 // ---------------------------------------------------------------------------
+// Native AppSupervisor
+// ---------------------------------------------------------------------------
+
+struct AppCatalogEntry {
+    package: SystemPackagePlan,
+    /// Native compositor handle published to the shell as `ui.__surfaces`.
+    surface_handle: u32,
+}
+
+struct AppInstance {
+    package: SystemPackagePlan,
+    surface_handle: u32,
+    surface: UiSurface,
+    guest: Guest,
+    renderer: GpuiRenderer,
+    buttons: u32,
+    visible: bool,
+    focused: bool,
+    order: usize,
+    state: AppInstanceState,
+}
+
+struct AppSupervisor {
+    catalog: Vec<AppCatalogEntry>,
+    instances: Vec<AppInstance>,
+    suppressed: HashSet<u32>,
+    background_execution: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppInstanceState {
+    Running,
+    Suspended,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SchedulingFact {
+    visible: bool,
+    focused: bool,
+    order: usize,
+    state: AppInstanceState,
+}
+
+fn focused_app_instance(facts: &[SchedulingFact]) -> Option<usize> {
+    facts
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| fact.visible && fact.focused && fact.state == AppInstanceState::Running)
+        .max_by_key(|(_, fact)| fact.order)
+        .map(|(index, _)| index)
+}
+
+fn scheduled_app_instances(facts: &[SchedulingFact]) -> Vec<usize> {
+    let mut schedule: Vec<usize> = facts
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| fact.state == AppInstanceState::Running)
+        .map(|(index, _)| index)
+        .collect();
+    schedule.sort_by_key(|index| {
+        let fact = facts[*index];
+        (!fact.focused, Reverse(fact.order))
+    });
+    schedule
+}
+
+impl AppSupervisor {
+    fn new(system: Option<&ResolvedSystemPlan>, shell: &UiSurface) -> Result<Self> {
+        let Some(system) = system else {
+            return Ok(Self {
+                catalog: Vec::new(),
+                instances: Vec::new(),
+                suppressed: HashSet::new(),
+                background_execution: "suspend".into(),
+            });
+        };
+        system.validate_for_host()?;
+        if system.lifecycle.background_execution != "suspend"
+            && system.lifecycle.background_execution != "continue"
+        {
+            return Err(anyhow!("unknown System backgroundExecution policy"));
+        }
+        let mut catalog = Vec::new();
+        for package in &system.applications {
+            let surface_handle = shell
+                .register_compositor_surface(package.package.clone())
+                .ok_or_else(|| anyhow!("reserving compositor surface for {}", package.package))?;
+            catalog.push(AppCatalogEntry {
+                package: package.clone(),
+                surface_handle: surface_handle as u32,
+            });
+        }
+        Ok(Self {
+            catalog,
+            instances: Vec::new(),
+            suppressed: HashSet::new(),
+            background_execution: system.lifecycle.background_execution.clone(),
+        })
+    }
+
+    fn open(&mut self, surface_handle: u32, text_system: Arc<WindowTextSystem>) -> Result<bool> {
+        if self
+            .instances
+            .iter()
+            .any(|instance| instance.surface_handle == surface_handle)
+        {
+            return Ok(false);
+        }
+        let entry = self
+            .catalog
+            .iter()
+            .find(|entry| entry.surface_handle == surface_handle)
+            .ok_or_else(|| anyhow!("unknown compositor surface handle {surface_handle}"))?;
+        let plan = &entry.package.plan;
+        let output = &plan.app.output;
+        let js_path = resolve_asset(None, output, "js")?;
+        let pak_path = resolve_asset(None, output, "pak")?;
+        let bundle = std::fs::read_to_string(&js_path)
+            .with_context(|| format!("reading {}", js_path.display()))?;
+        let pak =
+            std::fs::read(&pak_path).with_context(|| format!("reading {}", pak_path.display()))?;
+
+        let surface = UiSurface::new_with_density(
+            (
+                plan.viewport.logical[0] as f32,
+                plan.viewport.logical[1] as f32,
+            ),
+            plan.viewport.raster_density,
+        );
+        surface.set_identity(&plan.target.id, plan.target.host_abi);
+        surface.set_tick_rate(TICK_HZ as u32);
+        let cfg = TextConfig::new("Inter");
+        if plan
+            .features
+            .get("text.layout.native")
+            .copied()
+            .unwrap_or(false)
+        {
+            surface.set_text_measure(native_measure(text_system.clone(), cfg.clone()));
+            surface.set_text_wrap(native_wrap(text_system, cfg.clone()));
+        }
+        surface.feed_pak(&pak);
+        let guest = Guest::new()?;
+        surface.mount(&guest)?;
+        guest.eval(output, &bundle)?;
+        if !guest.has_frame() {
+            return Err(anyhow!("{output} evaluated but installed no frame()"));
+        }
+
+        self.instances.push(AppInstance {
+            package: entry.package.clone(),
+            surface_handle: entry.surface_handle,
+            surface,
+            guest,
+            renderer: GpuiRenderer::new(cfg, plan.viewport.raster_density),
+            buttons: 0,
+            visible: false,
+            focused: false,
+            order: 0,
+            state: AppInstanceState::Running,
+        });
+        log::info!(
+            "pocket-macos: started AppInstance {} ({}, {}x{}, plan={})",
+            entry.package.package,
+            plan.app.title,
+            plan.viewport.logical[0],
+            plan.viewport.logical[1],
+            plan.plan_hash
+        );
+        Ok(true)
+    }
+
+    /// Reconcile AppInstance lifecycle and scheduling facts from the shell core.
+    /// The companion protocol is not involved in this per-frame path.
+    fn sync(
+        &mut self,
+        shell: &UiSurface,
+        text_system: Arc<WindowTextSystem>,
+    ) -> Vec<(String, String)> {
+        let bindings = shell.with_ui(|ui| ui.compositor_surface_bindings());
+        let frames = shell.with_ui(|ui| ui.compositor_surface_frames());
+        let live: HashSet<u32> = bindings.iter().map(|(handle, _)| *handle).collect();
+
+        let mut dropped = Vec::new();
+        self.instances.retain(|instance| {
+            let keep = live.contains(&instance.surface_handle);
+            if !keep {
+                dropped.push(instance.package.package.clone());
+            }
+            keep
+        });
+        for package in dropped {
+            log::info!("pocket-macos: removed AppInstance {package}");
+        }
+        self.suppressed.retain(|handle| live.contains(handle));
+
+        let mut failures = Vec::new();
+        for (handle, _) in &bindings {
+            if self
+                .instances
+                .iter()
+                .any(|instance| instance.surface_handle == *handle)
+                || self.suppressed.contains(handle)
+            {
+                continue;
+            }
+            if let Err(error) = self.open(*handle, text_system.clone()) {
+                let package = self
+                    .catalog
+                    .iter()
+                    .find(|entry| entry.surface_handle == *handle)
+                    .map_or_else(
+                        || format!("surface:{handle}"),
+                        |entry| entry.package.package.clone(),
+                    );
+                self.suppressed.insert(*handle);
+                failures.push((package, error.to_string()));
+            }
+        }
+
+        for instance in &mut self.instances {
+            instance.visible = false;
+            instance.focused = bindings
+                .iter()
+                .find(|(handle, _)| *handle == instance.surface_handle)
+                .is_some_and(|(_, focused)| *focused);
+            if !instance.focused {
+                instance.buttons = 0;
+            }
+        }
+        for frame in frames {
+            if let Some(instance) = self
+                .instances
+                .iter_mut()
+                .find(|instance| instance.surface_handle == frame.handle)
+            {
+                instance.visible = true;
+                instance.focused = frame.focused;
+                instance.order = frame.order;
+                if !frame.focused {
+                    instance.buttons = 0;
+                }
+            }
+        }
+        for instance in &mut self.instances {
+            if !instance.visible {
+                instance.focused = false;
+            }
+            if !instance.focused {
+                instance.buttons = 0;
+            }
+            if instance.state != AppInstanceState::Failed {
+                instance.state = if instance.visible || self.background_execution == "continue" {
+                    AppInstanceState::Running
+                } else {
+                    AppInstanceState::Suspended
+                };
+            }
+        }
+        failures
+    }
+
+    /// Focus is a compositor fact. Route hardware-neutral buttons to the
+    /// top focused visible surface and keep their held state across ticks.
+    fn set_focused_button(&mut self, button: u32, down: bool) -> bool {
+        let facts: Vec<SchedulingFact> = self
+            .instances
+            .iter()
+            .map(|instance| SchedulingFact {
+                visible: instance.visible,
+                focused: instance.focused,
+                order: instance.order,
+                state: instance.state,
+            })
+            .collect();
+        let Some(index) = focused_app_instance(&facts) else {
+            return false;
+        };
+        let instance = &mut self.instances[index];
+        if down {
+            instance.buttons |= button;
+        } else {
+            instance.buttons &= !button;
+        }
+        true
+    }
+
+    /// Scheduling happens in the native compositor. The System lifecycle
+    /// policy maps hidden instances to Running or Suspended; focused/top
+    /// surfaces receive their turn first, then remaining running instances.
+    fn tick(&mut self) -> Vec<(String, String)> {
+        let mut failures = Vec::new();
+        let facts: Vec<SchedulingFact> = self
+            .instances
+            .iter()
+            .map(|instance| SchedulingFact {
+                visible: instance.visible,
+                focused: instance.focused,
+                order: instance.order,
+                state: instance.state,
+            })
+            .collect();
+        let schedule = scheduled_app_instances(&facts);
+        for index in schedule {
+            let instance = &mut self.instances[index];
+            if let Err(error) = instance.guest.frame(instance.buttons) {
+                instance.state = AppInstanceState::Failed;
+                failures.push((instance.package.package.clone(), error.to_string()));
+                continue;
+            }
+            instance.surface.tick();
+        }
+        failures
+    }
+
+    fn visible_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for instance in &self.instances {
+            if !instance.visible || instance.state == AppInstanceState::Failed {
+                continue;
+            }
+            instance.surface.with_ui(|ui| {
+                let draw_hash = fnv1a64(&ui.draw().words);
+                let raster_revision = ui.raster_revision();
+                mix_app_instance_repaint_hash(
+                    &mut hash,
+                    instance.surface_handle,
+                    draw_hash,
+                    raster_revision,
+                );
+            });
+        }
+        hash
+    }
+
+    fn paint(
+        &mut self,
+        surface_handle: u32,
+        full: Bounds<Pixels>,
+        clip: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(instance) = self.instances.iter_mut().find(|instance| {
+            instance.surface_handle == surface_handle && instance.state != AppInstanceState::Failed
+        }) else {
+            return false;
+        };
+        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+            instance.surface.with_ui(|ui| {
+                instance.renderer.paint(ui, full.origin, window, cx);
+            });
+        });
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // the root view
 // ---------------------------------------------------------------------------
 
@@ -333,6 +913,8 @@ struct PocketRoot {
     surface: UiSurface,
     guest: Guest,
     renderer: Rc<RefCell<GpuiRenderer>>,
+    app_supervisor: Rc<RefCell<AppSupervisor>>,
+    text_system: Arc<WindowTextSystem>,
     focus: FocusHandle,
     args: Args,
 
@@ -353,9 +935,9 @@ struct PocketRoot {
     script_buttons: u32,
     /// Primary-button state of the --mouse script.
     script_mouse: bool,
-    // editor/desk input
-    /// The desk companion is in the plan — the extended input dialect.
-    desk: bool,
+    // editor/System UI shell input
+    /// The generic System UI companion is in the resolved package plan.
+    system_ui_input: bool,
     /// Pointer shape requested by the guest ({t:"cursor"} intent).
     cursor_style: CursorStyle,
     mouse_down: bool,
@@ -380,7 +962,15 @@ impl PocketRoot {
             (args.viewport.0 as f32, args.viewport.1 as f32),
             args.density,
         );
-        surface.set_identity(HOST_ID, HOST_ABI);
+        let identity = args
+            .system
+            .as_ref()
+            .and_then(|system| system.validate_for_host().ok())
+            .map(|shell| (&shell.plan.target.id, shell.plan.target.host_abi));
+        surface.set_identity(
+            identity.map_or(HOST_ID, |(target, _)| target.as_str()),
+            identity.map_or(HOST_ABI, |(_, abi)| abi),
+        );
         // svcOpen denies by default (pocket-ui-surface); the allowlist is
         // exactly the plan's companion list (tools/macos.ts --companions,
         // issue #295) — never an app-name convention.
@@ -388,15 +978,22 @@ impl PocketRoot {
             surface.set_svc_allowlist(args.companions.iter().map(String::as_str));
         }
         surface.feed_pak(&pak);
+        // Installed package handles must be in ui.__surfaces before the shell
+        // evaluates and resolves its CompositorSurface package bindings.
+        let app_supervisor = Rc::new(RefCell::new(AppSupervisor::new(
+            args.system.as_ref(),
+            &surface,
+        )?));
+        let text_system = window.text_system().clone();
         let cfg = TextConfig::new("Inter");
         if args.native_text {
             // BEFORE mount: measurement feeds layout, and the guest must
             // never observe a provider swap (engine/core/src/lib.rs).
-            surface.set_text_measure(native_measure(window.text_system().clone(), cfg.clone()));
+            surface.set_text_measure(native_measure(text_system.clone(), cfg.clone()));
             // The wrapText op's break positions then come from gpui's
             // LineWrapper through the SAME TextConfig — measurement, wrap
             // and paint stay one provider.
-            surface.set_text_wrap(native_wrap(window.text_system().clone(), cfg.clone()));
+            surface.set_text_wrap(native_wrap(text_system.clone(), cfg.clone()));
         }
         let guest = Guest::new()?;
         surface.mount(&guest)?;
@@ -418,11 +1015,13 @@ impl PocketRoot {
         let focus = cx.focus_handle();
         let viewport = args.viewport;
         let script = args.script.clone();
-        let desk = args.companions.iter().any(|c| c == "desk");
+        let system_ui_input = args.companions.iter().any(|c| c == "system-ui");
         let root = PocketRoot {
             surface,
             guest,
             renderer,
+            app_supervisor,
+            text_system,
             focus,
             args,
             booted: false,
@@ -436,7 +1035,7 @@ impl PocketRoot {
             buttons: 0,
             script_buttons: 0,
             script_mouse: false,
-            desk,
+            system_ui_input,
             cursor_style: CursorStyle::Arrow,
             mouse_down: false,
             click_edge: false,
@@ -495,17 +1094,17 @@ impl PocketRoot {
 
     /// Input lines flow when either JSON-line dialect is wired.
     fn forward_input(&self) -> bool {
-        self.args.editor || self.desk
+        self.args.editor || self.system_ui_input
     }
 
     /// The svc hello: viewport first, then the document (order matters — the
     /// app lays text out against the viewport it was just told about). The
-    /// epoch anchors the guest's wall clock (desk taskbar); the note dialect
+    /// epoch anchors the System UI's wall clock; the note dialect
     /// ignores it.
     fn send_hello(&mut self) {
         log::debug!(
-            "pocket-macos: svc hello (desk={}, editor={})",
-            self.desk,
+            "pocket-macos: svc hello (system_ui={}, editor={})",
+            self.system_ui_input,
             self.args.editor
         );
         self.svc(serde_json::json!({
@@ -662,6 +1261,18 @@ impl PocketRoot {
         }
         self.surface.tick();
 
+        // Live surface bindings are the lifecycle boundary. The shell core
+        // supplies focus, visibility, geometry and painter order directly to
+        // AppSupervisor through the native compositor; no companion message
+        // participates here.
+        let sync_failures = self
+            .app_supervisor
+            .borrow_mut()
+            .sync(&self.surface, self.text_system.clone());
+        for (package, message) in sync_failures {
+            log::error!("pocket-macos: starting AppInstance {package}: {message}");
+        }
+
         // Guest → host intents (editor protocol).
         for line in self.surface.svc_drain() {
             match serde_json::from_str::<serde_json::Value>(&line) {
@@ -704,9 +1315,19 @@ impl PocketRoot {
             }
         }
 
+        // AppInstances run after shell commands have been applied and before
+        // the composite hash is sampled. One failure cannot terminate or
+        // corrupt sibling instances.
+        let failures = self.app_supervisor.borrow_mut().tick();
+        for (package, message) in failures {
+            log::error!("pocket-macos: AppInstance {package} frame failed: {message}");
+        }
+
         // Tick before draw; arm a paint only when the content hash moved
         // (TEXT_RUN packs its run bytes into the words — the whole truth).
-        let hash = self.surface.with_ui(|ui| fnv1a64(&ui.draw().words));
+        let shell_hash = self.surface.with_ui(|ui| fnv1a64(&ui.draw().words));
+        let child_hash = self.app_supervisor.borrow().visible_hash();
+        let hash = shell_hash ^ child_hash.rotate_left(17);
         if hash != self.hash {
             self.hash = hash;
             cx.notify();
@@ -732,11 +1353,23 @@ impl PocketRoot {
 
     fn on_key_down(&mut self, e: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let ks = &e.keystroke;
+        if !ks.modifiers.platform
+            && !ks.modifiers.alt
+            && !ks.modifiers.control
+            && let Some(button) = button_for(&ks.key)
+            && self
+                .app_supervisor
+                .borrow_mut()
+                .set_focused_button(button, true)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if self.forward_input() {
             let shift = ks.modifiers.shift;
             if ks.modifiers.platform {
-                if self.desk {
-                    // Desk dialect: ⌘Q quits the host (macOS convention) and
+                if self.system_ui_input {
+                    // The System UI dialect reserves ⌘Q for the host and
                     // ⌘V pastes here (the guest can't read the clipboard);
                     // every other chord goes to the guest as a cmd-flagged
                     // key line — the compositor owns its own shortcuts
@@ -830,7 +1463,16 @@ impl PocketRoot {
         }
     }
 
-    fn on_key_up(&mut self, e: &KeyUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
+    fn on_key_up(&mut self, e: &KeyUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(button) = button_for(&e.keystroke.key)
+            && self
+                .app_supervisor
+                .borrow_mut()
+                .set_focused_button(button, false)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if !self.forward_input()
             && let Some(bit) = button_for(&e.keystroke.key)
         {
@@ -865,9 +1507,9 @@ impl PocketRoot {
                     self.push_mouse(x, y, true, e.modifiers.shift);
                 }
             }
-            // Right button is desk-dialect only (b:2 lines would read as
+            // Right button is System UI-only (b:2 lines would read as
             // primary presses to the note protocol).
-            MouseButton::Right if self.desk => {
+            MouseButton::Right if self.system_ui_input => {
                 let (x, y) = self.logical_pos(e.position);
                 self.svc(serde_json::json!(
                     {"t": "mouse", "x": x, "y": y, "d": true, "b": 2, "sh": e.modifiers.shift}
@@ -886,7 +1528,7 @@ impl PocketRoot {
                     self.push_mouse(x, y, false, e.modifiers.shift);
                 }
             }
-            MouseButton::Right if self.desk => {
+            MouseButton::Right if self.system_ui_input => {
                 let (x, y) = self.logical_pos(e.position);
                 self.svc(serde_json::json!(
                     {"t": "mouse", "x": x, "y": y, "d": false, "b": 2, "sh": e.modifiers.shift}
@@ -914,7 +1556,7 @@ impl PocketRoot {
 }
 
 /// {t:"cursor"} intent → pointer shape. Keys mirror CSS cursor names the
-/// desk dialect uses; unknown keys fall back to the arrow.
+/// The System UI dialect uses these names; unknown keys use the arrow.
 fn cursor_for(k: &str) -> CursorStyle {
     match k {
         "text" => CursorStyle::IBeam,
@@ -963,6 +1605,23 @@ fn fnv1a64(words: &[u32]) -> u64 {
         }
     }
     h
+}
+
+fn mix_app_instance_repaint_hash(
+    hash: &mut u64,
+    surface_handle: u32,
+    draw_hash: u64,
+    raster_revision: u64,
+) {
+    for byte in surface_handle
+        .to_le_bytes()
+        .into_iter()
+        .chain(draw_hash.to_le_bytes())
+        .chain(raster_revision.to_le_bytes())
+    {
+        *hash ^= byte as u64;
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1759,7 @@ impl Render for PocketRoot {
 
         let surface = self.surface.clone();
         let renderer = self.renderer.clone();
+        let app_supervisor = self.app_supervisor.clone();
         let frames = self.frames.clone();
         let announce_ready = self.args.announce_ready;
         let canvas_origin = self.canvas_origin.clone();
@@ -1153,7 +1813,21 @@ impl Render for PocketRoot {
                             println!("READY {}", epoch_ms());
                         }
                         surface.with_ui(|ui| {
-                            renderer.borrow_mut().paint(ui, origin, window, cx);
+                            renderer.borrow_mut().paint_with_compositor(
+                                ui,
+                                origin,
+                                window,
+                                cx,
+                                &mut |surface_handle, full, clip, _focused, window, cx| {
+                                    app_supervisor.borrow_mut().paint(
+                                        surface_handle,
+                                        full,
+                                        clip,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            );
                         });
                     },
                 )
@@ -1220,3 +1894,141 @@ fn main() -> Result<()> {
 
 /// Application::run wants a 'static closure; stash the parsed args for it.
 static ARGS: std::sync::Mutex<Option<Args>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_supervisor_uses_lifecycle_focus_and_shell_painter_order() {
+        let mut facts = [
+            SchedulingFact {
+                visible: true,
+                focused: false,
+                order: 10,
+                state: AppInstanceState::Running,
+            },
+            SchedulingFact {
+                visible: false,
+                focused: false,
+                order: 20,
+                state: AppInstanceState::Suspended,
+            },
+            SchedulingFact {
+                visible: true,
+                focused: true,
+                order: 30,
+                state: AppInstanceState::Running,
+            },
+            SchedulingFact {
+                visible: true,
+                focused: true,
+                order: 25,
+                state: AppInstanceState::Failed,
+            },
+        ];
+        assert_eq!(focused_app_instance(&facts), Some(2));
+        assert_eq!(scheduled_app_instances(&facts), vec![2, 0]);
+        facts[1].state = AppInstanceState::Running;
+        assert_eq!(scheduled_app_instances(&facts), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn app_instances_do_not_share_quickjs_globals() {
+        let hero = Guest::new().unwrap();
+        let settings = Guest::new().unwrap();
+        hero.eval("hero", "globalThis.realmProbe = 41;").unwrap();
+        settings
+            .eval(
+                "settings",
+                "globalThis.realmProbeWasAbsent = typeof realmProbe === 'undefined';",
+            )
+            .unwrap();
+
+        let hero_probe: i32 = hero.with(|ctx| ctx.globals().get("realmProbe").unwrap());
+        let settings_absent: bool =
+            settings.with(|ctx| ctx.globals().get("realmProbeWasAbsent").unwrap());
+        assert_eq!(hero_probe, 41);
+        assert!(settings_absent);
+    }
+
+    #[test]
+    fn app_instance_repaint_hash_includes_raster_revision() {
+        let surface = UiSurface::new((16.0, 16.0));
+        let texture = surface.with_ui(|ui| {
+            ui.upload_texture(
+                &[0xff, 0xff, 0xff, 0xff],
+                1,
+                1,
+                pocketjs_core::spec::psm::PSM_8888,
+            )
+        });
+        assert!(texture >= 0);
+
+        let (words_before, revision_before) =
+            surface.with_ui(|ui| (ui.draw().words.clone(), ui.raster_revision()));
+        let mut hash_before = 0xcbf2_9ce4_8422_2325u64;
+        mix_app_instance_repaint_hash(&mut hash_before, 7, fnv1a64(&words_before), revision_before);
+
+        surface.with_ui(|ui| ui.free_texture(texture));
+        let (words_after, revision_after) =
+            surface.with_ui(|ui| (ui.draw().words.clone(), ui.raster_revision()));
+        let mut hash_after = 0xcbf2_9ce4_8422_2325u64;
+        mix_app_instance_repaint_hash(&mut hash_after, 7, fnv1a64(&words_after), revision_after);
+
+        assert_eq!(words_after, words_before);
+        assert_ne!(revision_after, revision_before);
+        assert_ne!(hash_after, hash_before);
+    }
+
+    #[test]
+    fn resolved_system_plan_uses_the_exact_system_ui_wire_key() {
+        let plan: ResolvedSystemPlan = serde_json::from_value(serde_json::json!({
+            "system": {
+                "id": "dev.pocket-stack.desktop",
+                "name": "pocket-desktop",
+                "title": "Pocket Desktop",
+                "version": "0.1.0"
+            },
+            "target": { "id": "macos-app", "hostAbi": 4 },
+            "roles": { "systemUI": "dev.pocket-stack.shell" },
+            "lifecycle": { "backgroundExecution": "suspend" },
+            "installation": {
+                "installedPackages": ["dev.pocket-stack.shell"]
+            },
+            "systemUI": {
+                "package": "dev.pocket-stack.shell",
+                "source": "apps/shell/pocket.json",
+                "required": true,
+                "plan": {
+                    "app": {
+                        "id": "dev.pocket-stack.shell",
+                        "output": "shell-main",
+                        "title": "System UI",
+                        "version": "0.1.0",
+                        "entry": "apps/shell/main.tsx",
+                        "framework": "solid"
+                    },
+                    "target": { "id": "macos-app", "hostAbi": 4 },
+                    "viewport": {
+                        "logical": [800, 600],
+                        "physical": [1600, 1200],
+                        "presentation": "native",
+                        "rasterDensity": 2,
+                        "policy": "dynamic"
+                    },
+                    "features": { "ui.compositor-surfaces": true },
+                    "companions": ["system-ui"],
+                    "planHash": "sha256:package"
+                }
+            },
+            "applications": [],
+            "planHash": "sha256:system"
+        }))
+        .unwrap();
+
+        assert_eq!(plan.roles.system_ui, "dev.pocket-stack.shell");
+        assert_eq!(plan.system_ui.package, "dev.pocket-stack.shell");
+        assert!(plan.validate_for_host().is_ok());
+    }
+}

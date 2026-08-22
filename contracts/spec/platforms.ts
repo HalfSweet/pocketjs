@@ -38,6 +38,10 @@ export type Viewport = readonly [width: number, height: number];
 export const TARGET_FORMS = ["takeover", "window", "widget", "kiosk", "embedded"] as const;
 export type TargetForm = (typeof TARGET_FORMS)[number];
 
+/** Package execution role used when role-scoped host APIs are admitted. */
+export const PACKAGE_ROLES = ["application", "systemUI"] as const;
+export type PackageRole = (typeof PACKAGE_ROLES)[number];
+
 /**
  * How an application artifact executes on a device — a semantic FIELD like
  * TargetForm, and the top-level split in admission machinery:
@@ -99,6 +103,10 @@ export interface TargetProfile<C extends string = string> {
   readonly display: DisplayProfile;
   /** Framework APIs implemented and tested by this stock host. */
   readonly capabilities: readonly C[];
+  /** APIs exposed only when a package is resolved for a System-owned role. */
+  readonly roleCapabilities?: {
+    readonly systemUI?: readonly C[];
+  };
 }
 
 export type TargetRegistry<C extends string = string> = Readonly<Record<string, TargetProfile<C>>>;
@@ -136,6 +144,10 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // is the fallback spelling on targets without it.
   "input.text",
   "input.touch",
+  // A System UI can place installed Pocket applications into native
+  // compositor surfaces. This describes the UI API, not the host's internal
+  // scheduling implementation.
+  "ui.compositor-surfaces",
   // Credit-based s16 PCM streaming through the audio module's own namespace
   // (`globalThis.audio`, contracts/spec/audio.ts). Registered ahead of any
   // stock TARGET advertising it: the web dev host and the sim host implement
@@ -299,19 +311,19 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   // The gpui app frame (hosts/macos is the stock host): a resizable ordinary
   // window on Zed's gpui/Metal, painting the DrawList as vector quads and
   // host-shaped text instead of rasterized atlas cells (docs/BACKENDS.md).
-  // Same desktop HostOps wire generation as macos-widget (hostAbi 3). An app
-  // frame, not a widget shell, so fixed-viewport apps run size-locked
+  // HostAbi 4 adds the independent compositor-surface op. An app frame, not a
+  // widget shell, so fixed-viewport apps run size-locked
   // (acceptsFixed) with their baked glyph pipeline intact; apps that enhance
   // text.layout.native get host text measurement and shaping instead.
-  // The profile lists ONLY what the host implements for every app: the
-  // keyboard button map and the __pocketResizeViewport live-viewport hook.
+  // The common profile lists ONLY what the host implements for every app:
+  // the keyboard button map and the __pocketResizeViewport live-viewport hook.
   // Pointer, hardware text, IME and clipboard reach the note through its
   // companion svc adapter (an app protocol, not a host capability — see
   // tools/macos.ts), so per the header rule they are not registered here;
   // a host-generic pointer/text feed needs framework surface beyond the
   // 9-bit touch packing and is tracked as follow-up work.
   "macos-app": {
-    hostAbi: 3,
+    hostAbi: 4,
     platform: "macos",
     form: "window",
     display: {
@@ -327,6 +339,9 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
       "text.glyphs.baked",
       "text.layout.native",
     ],
+    roleCapabilities: {
+      systemUI: ["ui.compositor-surfaces"],
+    },
   },
 });
 
