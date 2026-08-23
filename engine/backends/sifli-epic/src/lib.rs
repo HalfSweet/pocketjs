@@ -171,12 +171,16 @@ pub trait EpicOps {
     ///
     /// `destination_quad` is ordered TL, BL, BR, TR and corresponds to the
     /// four edges of `source_rect`. `destination_clip` bounds every write and
-    /// permits damage/scissor clipping without changing transform phase.
+    /// permits damage/scissor clipping without changing transform phase. A
+    /// real DrawList texture supplies `handle`; synthetic transformed fills
+    /// use `None`. Hosts may use the handle to select a separately baked
+    /// hardware-native copy while software fallback retains `source`.
     /// `modulate` is the DrawList ABGR color multiplier. Returning `false`
     /// must leave the destination untouched.
     #[allow(clippy::too_many_arguments)]
     fn blend_texture_rgb565(
         &mut self,
+        _handle: Option<i32>,
         _destination: &mut [u16],
         _width: u32,
         _height: u32,
@@ -1147,6 +1151,7 @@ impl Renderer {
             },
         ];
         if epic.blend_texture_rgb565(
+            Some(op[1] as i32),
             destination,
             width,
             height,
@@ -1219,6 +1224,7 @@ impl Renderer {
             y: (vertex.y - surface.y0) * scale,
         });
         let rendered = epic.blend_texture_rgb565(
+            Some(first[1] as i32),
             destination,
             width,
             height,
@@ -1291,6 +1297,7 @@ impl Renderer {
             y: (point.y - surface.y0) * scale,
         });
         let rendered = epic.blend_texture_rgb565(
+            None,
             destination,
             width,
             height,
@@ -2050,6 +2057,7 @@ mod tests {
 
         fn blend_texture_rgb565(
             &mut self,
+            _handle: Option<i32>,
             _destination: &mut [u16],
             _width: u32,
             _height: u32,

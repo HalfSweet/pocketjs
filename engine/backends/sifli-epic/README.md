@@ -30,6 +30,10 @@ PSM 8888 and CLUT entries as RGBA bytes and PSM 5650 with red in the low bits;
 the SF32LB58 adapter uses the EPIC color matrix to swap red/blue while applying
 DrawList modulation in the same transaction.
 
+`blend_texture_rgb565` also receives the generation-tagged texture handle. A
+target can use it to select a separately baked native texture while retaining
+the portable source bytes for ordered software fallback.
+
 ## Synchronous contract
 
 Every `EpicOps` method is synchronous. Returning `true` means destination
