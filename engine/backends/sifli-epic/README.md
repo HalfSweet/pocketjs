@@ -34,17 +34,22 @@ DrawList modulation in the same transaction.
 target can use it to select a separately baked native texture while retaining
 the portable source bytes for ordered software fallback.
 
-## Synchronous contract
+## Ordered deferred contract
 
-Every `EpicOps` method is synchronous. Returning `true` means destination
-pixels are visible to the next CPU or EPIC operation. Returning `false` means
-the destination was not changed and requests software fallback.
+`EpicOps` implementations may leave one accepted transaction in flight.
+Returning `true` means the operation was accepted in painter order; `sync`
+makes its destination pixels visible before CPU fallback, transient source
+reuse, or return from the renderer. Returning `false` means the destination
+was not changed and requests software fallback.
 
 For a write-back cached framebuffer, a HAL implementation must:
 
 1. clean source, mask, and destination ranges before EPIC reads them;
-2. wait for the EPIC transaction to complete;
-3. invalidate the destination range before returning to Rust.
+2. preserve every source until the next `sync`;
+3. invalidate the destination range when `sync` completes.
+
+The renderer ping-pongs two A8 scratch planes, allowing CPU mask construction
+to overlap the preceding hardware transaction without modifying its source.
 
 The SF32LB58 EPIC coordinate limit is 1010 pixels per transaction. Opaque
 fills may be split because a later software retry overwrites them. Blend and

@@ -2,8 +2,8 @@
 //!
 //! The render target is always opaque RGB565. Hardware-friendly operations
 //! are submitted through [`EpicOps`]; unsupported operations are executed in
-//! order by the core's RGB565 software rasterizer. A single aligned A8 scratch
-//! plane batches glyphs and alpha-only quads, while compatible color textures
+//! order by the core's RGB565 software rasterizer. Ping-pong aligned A8 scratch
+//! planes batch glyphs and alpha-only quads, while compatible color textures
 //! and paired triangle quads use EPIC format conversion and 3×3 transforms.
 //! Antialiasing never requires a 32-bit color framebuffer.
 
@@ -24,6 +24,7 @@ use pocketjs_core::raster::{
 use pocketjs_core::{spec, TexView, Ui};
 
 const MASK_ALIGNMENT: usize = 128;
+const MASK_BUFFER_COUNT: usize = 2;
 const CLIP_DEPTH: usize = 32;
 const TEXTURE_CLASS_CACHE_LEN: usize = 64;
 const MAX_DAMAGE_REGIONS: usize = DEFAULT_DAMAGE_REGIONS;
@@ -99,11 +100,15 @@ pub enum GradientDirection {
 
 /// Narrow hardware surface implemented by a SiFli HAL host.
 ///
-/// All calls are synchronous from the DrawList interpreter's perspective:
-/// once a method returns `true`, the destination pixels must be visible to
-/// subsequent CPU or EPIC operations. Returning `false` requests the ordered
-/// software fallback.
+/// Accepted calls remain ordered, but an implementation may keep the final
+/// operation in flight until [`EpicOps::sync`]. Source storage must therefore
+/// remain valid until the next synchronization point. Returning `false`
+/// requests the ordered software fallback.
 pub trait EpicOps {
+    /// Complete all previously accepted hardware operations before CPU access
+    /// to the destination or transient source storage.
+    fn sync(&mut self) {}
+
     /// Fill `rect` in the full RGB565 destination.
     fn fill_rgb565(
         &mut self,
@@ -269,8 +274,9 @@ pub type RenderDamagePlan = DamagePlan<MAX_DAMAGE_REGIONS>;
 /// reused across frames.
 pub struct Renderer {
     config: RendererConfig,
-    mask_storage: Vec<u128>,
-    mask_offset: usize,
+    mask_storage: [Vec<u128>; MASK_BUFFER_COUNT],
+    mask_offset: [usize; MASK_BUFFER_COUNT],
+    mask_index: usize,
     mask_capacity: usize,
     mask_len: usize,
     fallback_words: Vec<u32>,
@@ -285,8 +291,9 @@ impl Renderer {
         }
         Some(Self {
             config,
-            mask_storage: Vec::new(),
-            mask_offset: 0,
+            mask_storage: [Vec::new(), Vec::new()],
+            mask_offset: [0; MASK_BUFFER_COUNT],
+            mask_index: 0,
             mask_capacity: 0,
             mask_len: 0,
             fallback_words: Vec::with_capacity(16),
@@ -471,9 +478,10 @@ impl Renderer {
         {
             stats.epic_fills += 1;
         } else {
+            epic.sync();
             fill_rgb565_rect(destination, width, local, 0);
         }
-        self.render_region(
+        let rendered = self.render_region(
             ui,
             words,
             destination,
@@ -483,8 +491,9 @@ impl Renderer {
             clip,
             epic,
             &mut stats,
-        )?;
-        Some(stats)
+        );
+        epic.sync();
+        rendered.map(|()| stats)
     }
 
     fn damage_target(&self, ui: &Ui) -> Option<DamageTarget> {
@@ -555,6 +564,7 @@ impl Renderer {
         }
 
         self.ensure_mask(destination.len());
+        let mut rendered = true;
         for &region in damage.regions() {
             let physical = local_physical_rect(region, surface, scale);
             if physical.area() >= self.config.min_fill_pixels
@@ -562,21 +572,29 @@ impl Renderer {
             {
                 stats.epic_fills += 1;
             } else {
+                epic.sync();
                 fill_rgb565_rect(destination, width, physical, 0);
             }
-            self.render_region(
-                ui,
-                words,
-                destination,
-                width,
-                height,
-                surface,
-                region,
-                epic,
-                &mut stats,
-            )?;
+            if self
+                .render_region(
+                    ui,
+                    words,
+                    destination,
+                    width,
+                    height,
+                    surface,
+                    region,
+                    epic,
+                    &mut stats,
+                )
+                .is_none()
+            {
+                rendered = false;
+                break;
+            }
         }
-        Some(stats)
+        epic.sync();
+        rendered.then_some(stats)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -613,7 +631,7 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                        self.software_op(ui, destination, surface, clip, op, epic, stats);
                     }
                     i += 4;
                 }
@@ -636,7 +654,7 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                        self.software_op(ui, destination, surface, clip, op, epic, stats);
                     }
                     i += 6;
                 }
@@ -660,7 +678,7 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                        self.software_op(ui, destination, surface, clip, op, epic, stats);
                     }
                     i = next;
                 }
@@ -687,7 +705,15 @@ impl Renderer {
                     if let Some(next) = next {
                         i = next;
                     } else {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 9], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 9],
+                            epic,
+                            stats,
+                        );
                         i += 9;
                     }
                 }
@@ -730,6 +756,7 @@ impl Renderer {
                                     surface,
                                     clip,
                                     &words[i..i + 7],
+                                    epic,
                                     stats,
                                 );
                                 self.software_op(
@@ -738,13 +765,22 @@ impl Renderer {
                                     surface,
                                     clip,
                                     &words[i + 7..next],
+                                    epic,
                                     stats,
                                 );
                             }
                             i = next;
                             continue;
                         }
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 7], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 7],
+                            epic,
+                            stats,
+                        );
                     }
                     i += 7;
                 }
@@ -770,6 +806,7 @@ impl Renderer {
                                     surface,
                                     clip,
                                     &words[i..i + 12],
+                                    epic,
                                     stats,
                                 );
                                 self.software_op(
@@ -778,13 +815,22 @@ impl Renderer {
                                     surface,
                                     clip,
                                     &words[i + 12..next],
+                                    epic,
                                     stats,
                                 );
                             }
                             i = next;
                             continue;
                         }
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 12], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 12],
+                            epic,
+                            stats,
+                        );
                     }
                     i += 12;
                 }
@@ -1317,24 +1363,29 @@ impl Renderer {
             0xffff_ffff,
             false,
         );
+        // The solid 2x2 source lives on this stack frame, so it cannot outlive
+        // the call even when the host normally pipelines persistent textures.
+        epic.sync();
         if rendered {
             stats.epic_fills += 1;
         }
         Some((next, rendered))
     }
 
-    fn software_op(
+    fn software_op<O: EpicOps>(
         &mut self,
         ui: &Ui,
         destination: &mut [u16],
         surface: Clip,
         clip: Clip,
         op: &[u32],
+        epic: &mut O,
         stats: &mut RenderStats,
     ) {
         if clip.is_empty() {
             return;
         }
+        epic.sync();
         self.fallback_words.clear();
         self.fallback_words.push(spec::draw_op::SCISSOR);
         self.fallback_words.push(pack_xy(clip.x0, clip.y0));
@@ -1368,18 +1419,22 @@ impl Renderer {
     fn ensure_mask(&mut self, len: usize) {
         if self.mask_capacity < len {
             let bytes = len + MASK_ALIGNMENT - 1;
-            self.mask_storage = alloc::vec![0u128; bytes.div_ceil(16)];
-            let base = self.mask_storage.as_ptr() as usize;
-            self.mask_offset = (MASK_ALIGNMENT - base % MASK_ALIGNMENT) % MASK_ALIGNMENT;
+            for index in 0..MASK_BUFFER_COUNT {
+                self.mask_storage[index] = alloc::vec![0u128; bytes.div_ceil(16)];
+                let base = self.mask_storage[index].as_ptr() as usize;
+                self.mask_offset[index] = (MASK_ALIGNMENT - base % MASK_ALIGNMENT) % MASK_ALIGNMENT;
+            }
             self.mask_capacity = len;
         }
         self.mask_len = len;
     }
 
     fn mask_mut(&mut self) -> &mut [u8] {
+        let index = self.mask_index;
+        self.mask_index = (self.mask_index + 1) % MASK_BUFFER_COUNT;
         unsafe {
             core::slice::from_raw_parts_mut(
-                (self.mask_storage.as_mut_ptr() as *mut u8).add(self.mask_offset),
+                (self.mask_storage[index].as_mut_ptr() as *mut u8).add(self.mask_offset[index]),
                 self.mask_len,
             )
         }
