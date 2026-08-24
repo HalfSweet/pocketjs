@@ -401,9 +401,10 @@ impl Renderer {
     /// stored in `target`.
     ///
     /// The destination must retain the pixels produced by the same
-    /// `RenderTargetState`; double-buffered hosts therefore keep one state per
-    /// buffer. Structural DrawList changes, invalidated resources, and damage
-    /// covering most of the screen conservatively fall back to a full redraw.
+    /// `RenderTargetState`; multi-buffered hosts therefore keep one state per
+    /// buffer. Structural DrawList changes damage every unmatched old/new
+    /// operation, while invalidated resources and damage covering most of the
+    /// screen conservatively fall back to a full redraw.
     #[allow(clippy::too_many_arguments)]
     pub fn render_incremental<O: EpicOps>(
         &mut self,
@@ -2796,7 +2797,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_render_falls_back_for_structural_changes_and_invalidation() {
+    fn incremental_render_keeps_structural_removal_partial_and_invalidation_full() {
         let mut ui = Ui::new();
         ui.set_viewport(16.0, 8.0);
         let previous = vec![
@@ -2841,7 +2842,8 @@ mod tests {
                 &mut MockEpic::default(),
             )
             .unwrap();
-        assert!(structural.full_redraw);
+        assert!(!structural.full_redraw);
+        assert_eq!(structural.damage_pixels, 3 * 3);
         assert_eq!(output, full_reference(&ui, &current, 16, 8));
 
         state.invalidate();

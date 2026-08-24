@@ -63,8 +63,10 @@ unless they can guarantee an all-or-nothing tiled transaction.
 ## Damage tracking
 
 Keep one `RenderTargetState` for every persistent framebuffer. This is
-required for RAM-less double-buffered displays because alternating targets
-contain different older frames.
+required for RAM-less multi-buffered displays because alternating targets
+contain different older frames. Structural DrawList changes resynchronize at
+exact nearby operations and damage every unmatched old/new bound instead of
+discarding the complete target.
 
 ## Test
 
