@@ -1367,6 +1367,31 @@ impl Renderer {
         if a == 0 {
             return Some((next, true));
         }
+        // Z-only 2.5D projection and scaleX keep a solid card face axis
+        // aligned. Route that common case through the native rectangle fill
+        // instead of manufacturing a 2x2 texture and asking the HAL matrix
+        // path to rediscover the same rectangle. Besides avoiding setup and a
+        // mandatory transient-source fence, this keeps translucent card
+        // surfaces off the ordered software TRI fallback on SF32LB58.
+        let quad_bounds = point_quad_bounds(logical_quad);
+        let axis_aligned = logical_quad.iter().all(|point| {
+            (point.x == quad_bounds.x0 || point.x == quad_bounds.x1)
+                && (point.y == quad_bounds.y0 || point.y == quad_bounds.y1)
+        });
+        if axis_aligned {
+            let rendered = epic.fill_color_rgb565(
+                destination,
+                width,
+                height,
+                destination_clip,
+                [r as u8, g as u8, b as u8],
+                a as u8,
+            );
+            if rendered {
+                stats.epic_fills += 1;
+            }
+            return Some((next, rendered));
+        }
         let pixel = [r as u8, g as u8, b as u8, a as u8];
         let source = AlignedRgba([
             pixel[0], pixel[1], pixel[2], pixel[3], pixel[0], pixel[1], pixel[2], pixel[3],
@@ -3218,6 +3243,52 @@ mod tests {
             .unwrap();
         assert_eq!(fallback_stats.software_ops, 2);
         assert_eq!(fallback, expected);
+    }
+
+    #[test]
+    fn routes_axis_aligned_flat_triangles_to_epic_color_fill() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let color = 0x8000_80ff;
+        let words = [
+            spec::draw_op::TRI,
+            xy_word(1, 1),
+            xy_word(1, 5),
+            xy_word(6, 5),
+            color,
+            color,
+            color,
+            spec::draw_op::TRI,
+            xy_word(1, 1),
+            xy_word(6, 5),
+            xy_word(6, 1),
+            color,
+            color,
+            color,
+        ];
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            color_fills_enabled: true,
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_fills, 2, "clear plus axis-aligned fill");
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.texture_blends, 0);
+        assert_eq!(
+            epic.last_fill_rect,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 5,
+                h: 4,
+            }
+        );
+        assert_eq!(output, full_reference(&ui, &words, 8, 8));
     }
 
     #[test]
