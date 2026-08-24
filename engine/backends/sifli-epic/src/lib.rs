@@ -262,6 +262,8 @@ pub struct RenderStats {
     pub damage_bounds: Rect,
     /// True for an initial, invalidated, or heuristically promoted full frame.
     pub full_redraw: bool,
+    /// True only when the 75% damage policy promoted a partial plan to full.
+    pub full_redraw_promoted: bool,
 }
 
 /// Core damage snapshot describing the pixels stored in one framebuffer.
@@ -335,7 +337,17 @@ impl Renderer {
         self.sync_resources(ui);
         let screen = self.target_screen(ui, destination, width, height)?;
         let damage = DamagePlan::<MAX_DAMAGE_REGIONS>::full(screen);
-        self.render_damage(ui, words, destination, width, height, &damage, true, epic)
+        self.render_damage(
+            ui,
+            words,
+            destination,
+            width,
+            height,
+            &damage,
+            true,
+            false,
+            epic,
+        )
     }
 
     /// Compute damage against the DrawList last committed to `target`.
@@ -349,13 +361,25 @@ impl Renderer {
         ui: &Ui,
         words: &[u32],
     ) -> Option<RenderDamagePlan> {
+        self.prepare_damage_with_reason(target, ui, words)
+            .map(|(damage, _)| damage)
+    }
+
+    fn prepare_damage_with_reason(
+        &mut self,
+        target: &RenderTargetState,
+        ui: &Ui,
+        words: &[u32],
+    ) -> Option<(RenderDamagePlan, bool)> {
         self.sync_resources(ui);
         let damage_target = self.damage_target(ui)?;
-        target
-            .prepare(ui, words, damage_target)
-            .ok()?
+        let raw = target.prepare(ui, words, damage_target).ok()?;
+        let was_full = raw.is_full_redraw();
+        let damage = raw
             .with_policy(DamagePolicy::new(FULL_REDRAW_PERCENT))
-            .ok()
+            .ok()?;
+        let promoted = !was_full && damage.is_full_redraw();
+        Some((damage, promoted))
     }
 
     /// Record a successfully presented DrawList in one persistent target.
@@ -392,7 +416,7 @@ impl Renderer {
         epic: &mut O,
     ) -> Option<RenderStats> {
         self.target_screen(ui, destination, width, height)?;
-        let damage = self.prepare_damage(target, ui, words)?;
+        let (damage, promoted) = self.prepare_damage_with_reason(target, ui, words)?;
         let full_redraw = damage.is_full_redraw();
 
         let result = self.render_damage(
@@ -403,6 +427,7 @@ impl Renderer {
             height,
             &damage,
             full_redraw,
+            promoted,
             epic,
         );
         if result.is_some() {
@@ -539,6 +564,7 @@ impl Renderer {
         height: u32,
         damage: &DamagePlan<MAX_DAMAGE_REGIONS>,
         full_redraw: bool,
+        full_redraw_promoted: bool,
         epic: &mut O,
     ) -> Option<RenderStats> {
         let scale = self.config.scale;
@@ -557,6 +583,7 @@ impl Renderer {
                 .min(u32::MAX as u64) as u32,
             damage_bounds: physical_rect(damage.bounds(), scale),
             full_redraw,
+            full_redraw_promoted,
             ..RenderStats::default()
         };
         if damage.is_empty() {
@@ -2515,6 +2542,45 @@ mod tests {
         assert_eq!(second.damage_pixels, 0);
         assert_eq!(epic.fills + epic.gradients + epic.blends + epic.copies, 0);
         assert_eq!(output, before);
+    }
+
+    #[test]
+    fn incremental_render_reports_policy_promoted_full_redraws() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let frame = |color| [spec::draw_op::RECT, xy_word(0, 0), wh_word(8, 8), color];
+        let mut output = vec![0u16; 64];
+        let mut state = RenderTargetState::new();
+        let mut renderer = renderer();
+        let mut epic = MockEpic::default();
+
+        let initial = renderer
+            .render_incremental(
+                &mut state,
+                &ui,
+                &frame(0xff00_00ff),
+                &mut output,
+                8,
+                8,
+                &mut epic,
+            )
+            .unwrap();
+        assert!(initial.full_redraw);
+        assert!(!initial.full_redraw_promoted);
+
+        let changed = renderer
+            .render_incremental(
+                &mut state,
+                &ui,
+                &frame(0xff00_ff00),
+                &mut output,
+                8,
+                8,
+                &mut epic,
+            )
+            .unwrap();
+        assert!(changed.full_redraw);
+        assert!(changed.full_redraw_promoted);
     }
 
     #[test]
