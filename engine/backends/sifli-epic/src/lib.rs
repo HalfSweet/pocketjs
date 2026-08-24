@@ -618,7 +618,6 @@ impl Renderer {
             match words[i] {
                 spec::draw_op::RECT if i + 4 <= words.len() => {
                     let rect = logical_rect(words[i + 1], words[i + 2]).intersect(clip);
-                    let op = &words[i..i + 4];
                     if !rect.is_empty()
                         && !self.try_rect(
                             destination,
@@ -631,7 +630,15 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, epic, stats);
+                        self.software_rect(
+                            destination,
+                            width,
+                            surface,
+                            rect,
+                            words[i + 3],
+                            epic,
+                            stats,
+                        );
                     }
                     i += 4;
                 }
@@ -1372,6 +1379,33 @@ impl Renderer {
         Some((next, rendered))
     }
 
+    fn software_rect<O: EpicOps>(
+        &mut self,
+        destination: &mut [u16],
+        width: u32,
+        surface: Clip,
+        logical: Clip,
+        color: u32,
+        epic: &mut O,
+        stats: &mut RenderStats,
+    ) {
+        epic.sync();
+        let rect = local_physical_rect(logical, surface, self.config.scale);
+        let (r, g, b, a) = channels(color);
+        if a >= 255 {
+            fill_rgb565_rect(destination, width, rect, pack_rgb565(r, g, b));
+        } else if a > 0 {
+            for y in rect.y..rect.y + rect.h {
+                let start = y as usize * width as usize + rect.x as usize;
+                for pixel in &mut destination[start..start + rect.w as usize] {
+                    blend_rgb565_pixel(pixel, r, g, b, a);
+                }
+            }
+        }
+        stats.software_ops += 1;
+        stats.software_words += 4;
+    }
+
     fn software_op<O: EpicOps>(
         &mut self,
         ui: &Ui,
@@ -1739,6 +1773,26 @@ fn fill_rgb565_rect(destination: &mut [u16], stride: u32, rect: Rect, color: u16
         let start = y as usize * stride as usize + rect.x as usize;
         destination[start..start + rect.w as usize].fill(color);
     }
+}
+
+#[inline]
+fn blend_rgb565_pixel(pixel: &mut u16, r: u32, g: u32, b: u32, a: u32) {
+    if a >= 255 {
+        *pixel = pack_rgb565(r, g, b);
+        return;
+    }
+    if a == 0 {
+        return;
+    }
+    let r5 = (*pixel as u32 >> 11) & 0x1f;
+    let g6 = (*pixel as u32 >> 5) & 0x3f;
+    let b5 = *pixel as u32 & 0x1f;
+    let dr = (r5 << 3) | (r5 >> 2);
+    let dg = (g6 << 2) | (g6 >> 4);
+    let db = (b5 << 3) | (b5 >> 2);
+    let inverse = 255 - a;
+    let mix = |source: u32, target: u32| (source * a + target * inverse + 127) / 255;
+    *pixel = pack_rgb565(mix(r, dr), mix(g, dg), mix(b, db));
 }
 
 #[inline]
@@ -2769,6 +2823,44 @@ mod tests {
         assert_eq!(epic.gradients, 1);
         assert_eq!(output[0], pack_rgb565(255, 0, 0));
         assert_ne!(output[2 * 8 + 2], output[2 * 8 + 5]);
+        assert_eq!(output, full_reference(&ui, &words, 8, 8));
+    }
+
+    #[test]
+    fn inlines_small_opaque_and_translucent_rect_fallbacks() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let words = vec![
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(8, 8),
+            0xff20_1008,
+            spec::draw_op::RECT,
+            xy_word(1, 1),
+            wh_word(2, 2),
+            0xff00_00ff,
+            spec::draw_op::RECT,
+            xy_word(2, 2),
+            wh_word(2, 2),
+            0x8000_ff00,
+        ];
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic::default();
+        let mut renderer = Renderer::new(RendererConfig {
+            scale: 1,
+            min_fill_pixels: 64,
+            min_gradient_pixels: 64,
+            min_blend_pixels: 64,
+            min_copy_pixels: 64,
+        })
+        .unwrap();
+        let stats = renderer
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_fills, 2, "clear plus background");
+        assert_eq!(stats.software_ops, 2);
+        assert_eq!(stats.software_words, 8);
         assert_eq!(output, full_reference(&ui, &words, 8, 8));
     }
 

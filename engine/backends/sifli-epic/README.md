@@ -24,6 +24,10 @@ clipped triangle fans, and unsupported copies are replayed in order through
 `pocketjs_core::raster::render_scaled_rgb565_over`. Hardware and software
 operations therefore share one RGB565 target without a 32-bit intermediate.
 
+Small solid rectangles below the hardware submission threshold use an inline
+RGB565 fill/src-over path with the core's exact integer blend formula, avoiding
+a temporary DrawList and a second generic-rasterizer dispatch per rectangle.
+
 Texture transforms use four physical edge coordinates ordered TL, BL, BR,
 TR. A HAL adapter may map them to EPIC's 3×3 transform matrix. PocketJS stores
 PSM 8888 and CLUT entries as RGBA bytes and PSM 5650 with red in the low bits;
