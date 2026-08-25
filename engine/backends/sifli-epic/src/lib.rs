@@ -203,6 +203,58 @@ pub trait EpicOps {
         false
     }
 
+    /// Scale and blend a texture into one axis-aligned destination rectangle.
+    /// Hosts with a basic fixed-function scaler can implement this without
+    /// enabling their general 3x3 matrix path. The default preserves existing
+    /// implementations by expressing the rectangle as a TL/BL/BR/TR quad.
+    #[allow(clippy::too_many_arguments)]
+    fn blend_texture_rect_rgb565(
+        &mut self,
+        handle: Option<i32>,
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        source: &[u8],
+        palette: Option<&[u8]>,
+        source_width: u32,
+        source_height: u32,
+        format: TextureFormat,
+        source_rect: Rect,
+        destination_rect: Rect,
+        destination_clip: Rect,
+        modulate: u32,
+        linear: bool,
+    ) -> bool {
+        let left = destination_rect.x as i32;
+        let top = destination_rect.y as i32;
+        let right = (destination_rect.x + destination_rect.w) as i32;
+        let bottom = (destination_rect.y + destination_rect.h) as i32;
+        self.blend_texture_rgb565(
+            handle,
+            destination,
+            width,
+            height,
+            source,
+            palette,
+            source_width,
+            source_height,
+            format,
+            source_rect,
+            [
+                Point { x: left, y: top },
+                Point { x: left, y: bottom },
+                Point {
+                    x: right,
+                    y: bottom,
+                },
+                Point { x: right, y: top },
+            ],
+            destination_clip,
+            modulate,
+            linear,
+        )
+    }
+
     /// Copy an opaque PSP PSM 5650 texture into the RGB565 destination with
     /// an optional hardware copy/transform engine. PSM 5650 stores R and B
     /// opposite to ordinary RGB565, so a host must perform that channel swap.
@@ -1304,22 +1356,42 @@ impl Renderer {
             x: (vertex.x - surface.x0) * scale,
             y: (vertex.y - surface.y0) * scale,
         });
-        let rendered = epic.blend_texture_rgb565(
-            Some(first[1] as i32),
-            destination,
-            width,
-            height,
-            view.pixels,
-            view.palette,
-            view.w,
-            view.h,
-            format,
-            source_rect,
-            physical_quad,
-            destination_clip,
-            first[11],
-            view.linear,
-        );
+        let destination_rect = axis_aligned_texture_rect(physical_quad);
+        let rendered = if let Some(destination_rect) = destination_rect {
+            epic.blend_texture_rect_rgb565(
+                Some(first[1] as i32),
+                destination,
+                width,
+                height,
+                view.pixels,
+                view.palette,
+                view.w,
+                view.h,
+                format,
+                source_rect,
+                destination_rect,
+                destination_clip,
+                first[11],
+                view.linear,
+            )
+        } else {
+            epic.blend_texture_rgb565(
+                Some(first[1] as i32),
+                destination,
+                width,
+                height,
+                view.pixels,
+                view.palette,
+                view.w,
+                view.h,
+                format,
+                source_rect,
+                physical_quad,
+                destination_clip,
+                first[11],
+                view.linear,
+            )
+        };
         if rendered {
             stats.epic_copies += 1;
         }
@@ -1655,6 +1727,25 @@ fn texture_quad_bounds(vertices: [TextureVertex; 4]) -> Clip {
         y1 = y1.max(vertex.y);
     }
     Clip { x0, y0, x1, y1 }
+}
+
+fn axis_aligned_texture_rect(quad: [Point; 4]) -> Option<Rect> {
+    let [top_left, bottom_left, bottom_right, top_right] = quad;
+    if top_left.x != bottom_left.x
+        || top_right.x != bottom_right.x
+        || top_left.y != top_right.y
+        || bottom_left.y != bottom_right.y
+        || top_right.x <= top_left.x
+        || bottom_left.y <= top_left.y
+    {
+        return None;
+    }
+    Some(Rect {
+        x: top_left.x as u32,
+        y: top_left.y as u32,
+        w: (top_right.x - top_left.x) as u32,
+        h: (bottom_left.y - top_left.y) as u32,
+    })
 }
 
 fn collect_solid_quad(first: &[u32], second: &[u32]) -> Option<[Point; 4]> {
@@ -2093,8 +2184,10 @@ mod tests {
         color_fills_enabled: bool,
         texture_blends_enabled: bool,
         texture_blends: u32,
+        texture_rect_blends: u32,
         last_texture_format: Option<TextureFormat>,
         last_texture_quad: [Point; 4],
+        last_texture_rect: Rect,
         last_texture_clip: Rect,
         last_modulate: u32,
     }
@@ -2245,6 +2338,55 @@ mod tests {
             self.last_texture_clip = destination_clip;
             self.last_modulate = modulate;
             true
+        }
+
+        fn blend_texture_rect_rgb565(
+            &mut self,
+            handle: Option<i32>,
+            destination: &mut [u16],
+            width: u32,
+            height: u32,
+            source: &[u8],
+            palette: Option<&[u8]>,
+            source_width: u32,
+            source_height: u32,
+            format: TextureFormat,
+            source_rect: Rect,
+            destination_rect: Rect,
+            destination_clip: Rect,
+            modulate: u32,
+            linear: bool,
+        ) -> bool {
+            self.texture_rect_blends += 1;
+            self.last_texture_rect = destination_rect;
+            let left = destination_rect.x as i32;
+            let top = destination_rect.y as i32;
+            let right = (destination_rect.x + destination_rect.w) as i32;
+            let bottom = (destination_rect.y + destination_rect.h) as i32;
+            self.blend_texture_rgb565(
+                handle,
+                destination,
+                width,
+                height,
+                source,
+                palette,
+                source_width,
+                source_height,
+                format,
+                source_rect,
+                [
+                    Point { x: left, y: top },
+                    Point { x: left, y: bottom },
+                    Point {
+                        x: right,
+                        y: bottom,
+                    },
+                    Point { x: right, y: top },
+                ],
+                destination_clip,
+                modulate,
+                linear,
+            )
         }
 
         fn copy_psm5650_to_rgb565(
@@ -3182,6 +3324,52 @@ mod tests {
             .unwrap();
         assert_eq!(fallback_stats.software_ops, 2);
         assert_eq!(fallback, expected);
+    }
+
+    #[test]
+    fn routes_axis_aligned_textured_triangles_to_epic_rect_blend() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let texture = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        let handle = ui.upload_texture(&texture, 2, 2, spec::psm::PSM_8888);
+        let vertex = |x: i16, y: i16, u: f32, v: f32| [xy_word(x, y), u.to_bits(), v.to_bits()];
+        let top_left = vertex(1, 1, 0.0, 0.0);
+        let bottom_left = vertex(1, 7, 0.0, 1.0);
+        let bottom_right = vertex(7, 7, 1.0, 1.0);
+        let top_right = vertex(7, 1, 1.0, 0.0);
+        let mut words = vec![spec::draw_op::TEX_TRI, handle as u32];
+        words.extend_from_slice(&top_left);
+        words.extend_from_slice(&bottom_left);
+        words.extend_from_slice(&bottom_right);
+        words.push(0xffff_ffff);
+        words.extend_from_slice(&[spec::draw_op::TEX_TRI, handle as u32]);
+        words.extend_from_slice(&top_left);
+        words.extend_from_slice(&bottom_right);
+        words.extend_from_slice(&top_right);
+        words.push(0xffff_ffff);
+        let mut output = vec![0u16; 64];
+        let mut epic = MockEpic {
+            texture_blends_enabled: true,
+            ..MockEpic::default()
+        };
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 8, &mut epic)
+            .unwrap();
+
+        assert_eq!(stats.epic_copies, 1);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(epic.texture_rect_blends, 1);
+        assert_eq!(
+            epic.last_texture_rect,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 6,
+                h: 6,
+            }
+        );
     }
 
     #[test]
