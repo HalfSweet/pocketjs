@@ -90,7 +90,8 @@ inspection and is not parsed during device boot.
 
 ## CI
 
-`.github/workflows/esp-idf.yml` runs:
+`.github/workflows/esp-idf.yml` is manually dispatched for release validation
+and runs:
 
 - host contract/package tests and the native Rust test;
 - native archive builds for both targets;

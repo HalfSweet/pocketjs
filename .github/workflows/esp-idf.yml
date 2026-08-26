@@ -1,39 +1,6 @@
 name: ESP-IDF components
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/esp-idf.yml"
-      - "contracts/**"
-      - "engine/core/**"
-      - "engine/backends/esp32p4-ppa/**"
-      - "framework/**"
-      - "hosts/esp-idf/**"
-      - "package.json"
-      - "bun.lock"
-      - "tools/build.ts"
-      - "tools/cli/**"
-      - "tools/esp-idf-native.ts"
-      - "tools/esp-idf-release.ts"
-      - "tools/pocket.ts"
-      - "tools/pocket-pack.ts"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/esp-idf.yml"
-      - "contracts/**"
-      - "engine/core/**"
-      - "engine/backends/esp32p4-ppa/**"
-      - "framework/**"
-      - "hosts/esp-idf/**"
-      - "package.json"
-      - "bun.lock"
-      - "tools/build.ts"
-      - "tools/cli/**"
-      - "tools/esp-idf-native.ts"
-      - "tools/esp-idf-release.ts"
-      - "tools/pocket.ts"
-      - "tools/pocket-pack.ts"
   workflow_dispatch: {}
 
 permissions:
