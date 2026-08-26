@@ -97,6 +97,9 @@ inspection and is not parsed during device boot.
 - ESP-IDF `release/v6.0` and `release/v6.1` firmware builds for both targets;
 - the same generated `.pocket` in each firmware build.
 
+**The committed package fixture and this workflow use Bun 1.3.14.** Bundle
+bytes are compiler-versioned; update the pin and fixture in the same change.
+
 The smoke application renders a 320×240 logical UI. The P4 build includes the
 PPA component. The S3 build uses `MINIMAL_BUILD` and excludes PPA from component
 discovery and the link map.
