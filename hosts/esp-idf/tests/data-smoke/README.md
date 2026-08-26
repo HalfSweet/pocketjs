@@ -1,9 +1,12 @@
-# data-smoke
+# ESP-IDF data-smoke
 
 On-device conformance smoke for the data modules — `pocket-db` and
 `pocket-fs` driven directly (no `mount` feature, the way a device host
 with its own guest wiring consumes them) against a LittleFS partition on
 an ESP32-P4.
+
+This is a platform hardware test, not an optional dependency of the PocketJS
+UI components.
 
 The contract semantics are verified host-side (`tests/{db,fs}.test.ts`,
 the crates' unit tests). This binary asks only the questions hardware can

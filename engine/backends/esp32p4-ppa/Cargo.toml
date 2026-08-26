@@ -13,7 +13,6 @@ pocketjs-core = { path = "../../core", features = ["std"] }
 
 [features]
 default = []
-esp-idf = []
 std = ["pocketjs-core/std"]
 
 [workspace]

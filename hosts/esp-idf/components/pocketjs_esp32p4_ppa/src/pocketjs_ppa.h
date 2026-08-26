@@ -25,10 +25,9 @@ esp_err_t pocketjs_ppa_create(pocketjs_ppa_handle_t *out_handle);
 void pocketjs_ppa_destroy(pocketjs_ppa_handle_t handle);
 
 /**
- * The following narrow C ABI is consumed by EspIdfPpaOps in the
- * pocketjs-esp32p4-ppa crate. Each function returns 1 after a completed
- * blocking transaction or 0 when the renderer must use its ordered software
- * fallback.
+ * The component's public accelerator wrapper consumes this private C ABI.
+ * Each function returns 1 after a completed blocking transaction or 0 when
+ * the renderer must use its ordered software fallback.
  */
 int pocketjs_ppa_fill_rgb565(pocketjs_ppa_handle_t handle,
                              uint16_t *destination, size_t destination_pixels,

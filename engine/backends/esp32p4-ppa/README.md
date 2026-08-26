@@ -6,11 +6,10 @@ Processing Accelerator and preserves DrawList order with an RGB565 software
 fallback for everything else.
 
 The default crate deliberately does not depend on ESP-IDF or a board support
-package. Hosts can implement `PpaOps` for another driver or test double.
-Enabling the `esp-idf` feature exposes the concrete `EspIdfPpaOps`
-implementation, backed by the reusable ESP-IDF component under
-[`hosts/esp32p4`](../../../hosts/esp32p4/README.md). Board-specific display
-presentation remains in the BSP.
+package. Hosts implement `PpaOps` through a driver adapter or test double. The
+ESP-IDF adapter and component composition live under
+[`hosts/esp-idf`](../../../hosts/esp-idf/README.md); board-specific display
+presentation remains in the product BSP.
 
 Accelerated paths:
 
@@ -67,12 +66,4 @@ Run the portable renderer and pixel-parity tests on the host:
 ```sh
 cargo test --locked --manifest-path engine/backends/esp32p4-ppa/Cargo.toml \
   --features std
-```
-
-Compile-check the Rust side of the ESP-IDF adapter without linking an IDF
-application:
-
-```sh
-cargo check --locked --manifest-path engine/backends/esp32p4-ppa/Cargo.toml \
-  --features esp-idf
 ```

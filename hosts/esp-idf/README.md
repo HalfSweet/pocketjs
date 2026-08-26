@@ -39,6 +39,13 @@ Rust environment already supplied by the developer.
 `examples/runner` executes the same application through the optional task
 runner. Neither example initializes a panel or reads a device input driver.
 
+## Hardware tests
+
+`tests/data-smoke` is an independent ESP32-P4 conformance binary for the DB/FS
+module cores over LittleFS. It does not add DB/FS to the UI components or their
+dependency graph. The test retains its own Rust and ESP-IDF v5.5.3 toolchain
+pin until that data-module fixture is upgraded separately.
+
 ## Maintainer workflow
 
 Archive receipts, Registry packaging, CI, and hardware gates are described in
