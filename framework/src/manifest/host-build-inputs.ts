@@ -31,6 +31,10 @@ export interface HostBuildInputs {
       readonly rasterDensity: number;
     };
   };
+  readonly idfHost?: {
+    readonly profileHash: string;
+    readonly tickHz: number;
+  };
 }
 
 export interface ExtractHostBuildInputsOptions {
@@ -82,6 +86,14 @@ function hasHostInputShape(input: unknown): input is ResolvedBuildPlan {
     (input.viewport.rasterDensity as number) > 255
   ) return false;
   if (typeof input.planHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(input.planHash)) return false;
+  if (input.idfHost !== undefined) {
+    if (!isRecord(input.idfHost)) return false;
+    if (typeof input.idfHost.profileHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(input.idfHost.profileHash)) {
+      return false;
+    }
+    if (!Number.isInteger(input.idfHost.tickHz) || (input.idfHost.tickHz as number) < 1 ||
+      (input.idfHost.tickHz as number) > 240) return false;
+  }
   return Object.values(input.features).every((available) => typeof available === "boolean");
 }
 
@@ -132,6 +144,7 @@ export function extractHostBuildInputs(
       rasterDensity: plan.viewport.rasterDensity,
     },
     ...(plan.surfaces ? { surfaces: plan.surfaces } : {}),
+    ...(plan.idfHost ? { idfHost: plan.idfHost } : {}),
   };
 }
 
@@ -161,5 +174,11 @@ export function hostBuildEnvironment(
     POCKETJS_AUX_PHYSICAL_HEIGHT: inputs.surfaces ? String(inputs.surfaces.auxiliary.physical[1]) : "",
     POCKETJS_AUX_PRESENTATION: inputs.surfaces ? inputs.surfaces.auxiliary.presentation : "",
     POCKETJS_AUX_RASTER_DENSITY: inputs.surfaces ? String(inputs.surfaces.auxiliary.rasterDensity) : "",
+    ...(inputs.idfHost
+      ? {
+          POCKETJS_IDF_PROFILE_HASH: inputs.idfHost.profileHash,
+          POCKETJS_TICK_HZ: String(inputs.idfHost.tickHz),
+        }
+      : {}),
   };
 }

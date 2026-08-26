@@ -23,6 +23,11 @@ export interface ResolveBuildRequest {
   /** Defaults to an ordinary application. System resolution assigns the
    *  System UI role before capability admission. */
   readonly role?: "application" | "systemUI";
+  /** Project-owned ESP-IDF host facts that must travel with the resolved plan. */
+  readonly idfHost?: {
+    readonly profileHash: string;
+    readonly tickHz: number;
+  };
 }
 
 export type ResolutionResult =
@@ -558,6 +563,7 @@ export function resolveBuildPlan(
     ...(resolvedAuxiliary ? { surfaces: { auxiliary: resolvedAuxiliary } } : {}),
     features,
     companions: manifest.app.companions ?? [],
+    ...(request.idfHost ? { idfHost: request.idfHost } : {}),
   };
   return { ok: true, plan: finalizeBuildPlan(content) };
 }

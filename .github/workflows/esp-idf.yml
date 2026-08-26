@@ -1,0 +1,133 @@
+name: ESP-IDF components
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/esp-idf.yml"
+      - "contracts/**"
+      - "engine/core/**"
+      - "engine/backends/esp32p4-ppa/**"
+      - "framework/**"
+      - "hosts/esp-idf/**"
+      - "package.json"
+      - "bun.lock"
+      - "tools/build.ts"
+      - "tools/cli/**"
+      - "tools/esp-idf-native.ts"
+      - "tools/esp-idf-release.ts"
+      - "tools/pocket.ts"
+      - "tools/pocket-pack.ts"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/esp-idf.yml"
+      - "contracts/**"
+      - "engine/core/**"
+      - "engine/backends/esp32p4-ppa/**"
+      - "framework/**"
+      - "hosts/esp-idf/**"
+      - "package.json"
+      - "bun.lock"
+      - "tools/build.ts"
+      - "tools/cli/**"
+      - "tools/esp-idf-native.ts"
+      - "tools/esp-idf-release.ts"
+      - "tools/pocket.ts"
+      - "tools/pocket-pack.ts"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: >-
+          bun test tests/idf-host-profile.test.ts tests/idf-embed.test.ts
+          tests/pocket-package.test.ts tests/platform-contracts.test.ts
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path hosts/esp-idf/native/Cargo.toml
+
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32p4, esp32s3]
+        idf: [release-v6.0, release-v6.1]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+
+      - name: Install P4 Rust target
+        if: matrix.target == 'esp32p4'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imafc-unknown-none-elf
+
+      - name: Build P4 native archive
+        if: matrix.target == 'esp32p4'
+        run: bun tools/esp-idf-native.ts --target esp32p4
+
+      - name: Install user-managed Xtensa Rust toolchain fixture
+        if: matrix.target == 'esp32s3'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/esp-rust-dist" "$RUNNER_TEMP/esp-rust"
+          gh release download v1.97.0.0 -R esp-rs/rust-build \
+            -p rust-1.97.0.0-x86_64-unknown-linux-gnu.tar.xz \
+            -p rust-src-1.97.0.0.tar.xz -D "$RUNNER_TEMP/esp-rust-dist"
+          tar -xf "$RUNNER_TEMP/esp-rust-dist/rust-1.97.0.0-x86_64-unknown-linux-gnu.tar.xz" \
+            -C "$RUNNER_TEMP/esp-rust-dist"
+          tar -xf "$RUNNER_TEMP/esp-rust-dist/rust-src-1.97.0.0.tar.xz" \
+            -C "$RUNNER_TEMP/esp-rust-dist"
+          "$RUNNER_TEMP/esp-rust-dist/rust-nightly-x86_64-unknown-linux-gnu/install.sh" \
+            --prefix="$RUNNER_TEMP/esp-rust" --disable-ldconfig
+          "$RUNNER_TEMP/esp-rust-dist/rust-src-nightly/install.sh" \
+            --prefix="$RUNNER_TEMP/esp-rust" --disable-ldconfig
+
+      - name: Build S3 native archive
+        if: matrix.target == 'esp32s3'
+        run: >-
+          bun tools/esp-idf-native.ts --target esp32s3
+          --cargo "$RUNNER_TEMP/esp-rust/bin/cargo"
+
+      - name: Build deterministic smoke package
+        run: >-
+          bun tools/pocket.ts build
+          --manifest hosts/esp-idf/examples/smoke/pocket.json
+          --host-profile hosts/esp-idf/examples/smoke/pocket.host.json
+          --project-root hosts/esp-idf/examples/smoke
+          --plan-dir "$RUNNER_TEMP/pocketjs-plans"
+          --outdir .pocket-build
+          --output idf-smoke.pocket
+
+      - name: Verify committed prebuilt package
+        run: >-
+          cmp hosts/esp-idf/examples/smoke/idf-smoke.pocket
+          hosts/esp-idf/examples/prebuilt/idf-smoke.pocket
+
+      - name: Build ESP-IDF smoke firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf }}
+          target: ${{ matrix.target }}
+          path: hosts/esp-idf/examples/smoke
+          command: idf.py -DPOCKETJS_RUST_FROM_SOURCE=OFF build
+
+      - name: Build optional runner firmware
+        if: matrix.idf == 'release-v6.0'
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf }}
+          target: ${{ matrix.target }}
+          path: hosts/esp-idf/examples/runner
+          command: idf.py -DPOCKETJS_RUST_FROM_SOURCE=OFF build

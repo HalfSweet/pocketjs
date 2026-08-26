@@ -39,6 +39,12 @@ export interface ResolvedBuildPlanContent {
    *  svcOpen strings the app's adapters speak. Hosts build their svc
    *  allowlist from this list (issue #295). */
   readonly companions: readonly string[];
+  /** Present for project-provided ESP-IDF hosts. The hash identifies the
+   * complete host profile; tickHz is the one rate the bundle may run at. */
+  readonly idfHost?: {
+    readonly profileHash: string;
+    readonly tickHz: number;
+  };
 }
 
 export interface ResolvedBuildPlan extends ResolvedBuildPlanContent {

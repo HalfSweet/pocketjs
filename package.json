@@ -158,6 +158,7 @@
     "./kinetics": "./framework/src/kinetics.ts",
     "./launcher": "./framework/src/launcher.ts",
     "./manifest": "./framework/src/manifest/index.ts",
+    "./idf-host": "./framework/src/manifest/idf-host.ts",
     "./net": "./framework/src/net-api.ts",
     "./osk": "./framework/src/osk.tsx",
     "./package": "./contracts/spec/pocket-package.ts",
@@ -266,6 +267,8 @@
     "vapor:playdate:both": "bun vapor/compiler/cli.ts vapor/examples/todo/todo.playdate.tsx --target playdate --playdate-mode both",
     "vapor:esp32:flash": "bun vapor/scripts/esp32.ts flash",
     "vapor:esp32:verify": "bun vapor/scripts/esp32.ts verify",
+    "esp-idf:native": "bun tools/esp-idf-native.ts",
+    "esp-idf:release": "bun tools/esp-idf-release.ts",
     "vapor:dev": "bun vapor/scripts/dev.ts",
     "vapor:check": "bun vapor/compiler/cli.ts check vapor/examples/todo/todo.tsx"
   },

@@ -58,7 +58,89 @@ export const POCKET_SECTION = {
   /** Cover PNG for launcher decks (256×128 full-frame, docs/LAUNCHER.md). */
   cover: 5,
   // 6 = qjsc bytecode (docs/PLATFORM.md roadmap) — reserved, not yet emitted.
+  /** Fixed-width ESP-IDF host admission data. Device readers validate this
+   * without parsing the JSON build plan. */
+  hostInputs: 7,
 } as const;
+
+export const POCKET_HOST_INPUTS_MAGIC = 0x54534850; // "PHST" as LE u32
+export const POCKET_HOST_INPUTS_VERSION = 1;
+export const POCKET_HOST_INPUTS_SIZE = 104;
+
+export interface PocketHostInputs {
+  readonly hostAbi: number;
+  readonly tickHz: number;
+  readonly logicalWidth: number;
+  readonly logicalHeight: number;
+  readonly physicalWidth: number;
+  readonly physicalHeight: number;
+  readonly rasterDensity: number;
+  readonly presentation: "fill" | "fit" | "integer-fit" | "native" | "stretch";
+  readonly profileHash: string;
+  readonly planHash: string;
+}
+
+const HOST_PRESENTATIONS = ["fill", "fit", "integer-fit", "native", "stretch"] as const;
+
+function hashBytes(hash: string, field: string): Uint8Array {
+  if (!/^sha256:[0-9a-f]{64}$/.test(hash)) throw new Error(`pocket package: invalid ${field}`);
+  return Uint8Array.from(hash.slice("sha256:".length).match(/../g)!, (byte) => Number.parseInt(byte, 16));
+}
+
+function readHash(bytes: Uint8Array, offset: number): string {
+  return `sha256:${[...bytes.subarray(offset, offset + 32)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export function encodeHostInputs(input: PocketHostInputs): Uint8Array {
+  const dimensions = [
+    input.hostAbi,
+    input.tickHz,
+    input.logicalWidth,
+    input.logicalHeight,
+    input.physicalWidth,
+    input.physicalHeight,
+    input.rasterDensity,
+  ];
+  if (dimensions.some((value) => !Number.isInteger(value) || value < 1 || value > 0xffff_ffff)) {
+    throw new Error("pocket package: invalid host inputs dimensions");
+  }
+  const presentation = HOST_PRESENTATIONS.indexOf(input.presentation);
+  if (presentation < 0) throw new Error("pocket package: invalid host inputs presentation");
+  const bytes = new Uint8Array(POCKET_HOST_INPUTS_SIZE);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, POCKET_HOST_INPUTS_MAGIC, true);
+  view.setUint32(4, POCKET_HOST_INPUTS_VERSION, true);
+  dimensions.forEach((value, index) => view.setUint32(8 + index * 4, value, true));
+  view.setUint32(36, presentation, true);
+  bytes.set(hashBytes(input.profileHash, "profile hash"), 40);
+  bytes.set(hashBytes(input.planHash, "plan hash"), 72);
+  return bytes;
+}
+
+export function decodeHostInputs(bytes: Uint8Array): PocketHostInputs {
+  if (bytes.length !== POCKET_HOST_INPUTS_SIZE) throw new Error("pocket package: invalid host inputs size");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== POCKET_HOST_INPUTS_MAGIC) {
+    throw new Error("pocket package: invalid host inputs magic");
+  }
+  if (view.getUint32(4, true) !== POCKET_HOST_INPUTS_VERSION) {
+    throw new Error("pocket package: unsupported host inputs version");
+  }
+  const presentation = HOST_PRESENTATIONS[view.getUint32(36, true)];
+  if (!presentation) throw new Error("pocket package: invalid host inputs presentation");
+  return {
+    hostAbi: view.getUint32(8, true),
+    tickHz: view.getUint32(12, true),
+    logicalWidth: view.getUint32(16, true),
+    logicalHeight: view.getUint32(20, true),
+    physicalWidth: view.getUint32(24, true),
+    physicalHeight: view.getUint32(28, true),
+    rasterDensity: view.getUint32(32, true),
+    presentation,
+    profileHash: readHash(bytes, 40),
+    planHash: readHash(bytes, 72),
+  };
+}
 
 export interface PocketPackageSection {
   kind: number;

@@ -1,0 +1,26 @@
+[package]
+name = "pocketjs-idf-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "pocketjs_idf_native"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+pocketjs-core = { path = "../../../engine/core" }
+pocketjs-esp32p4-ppa = { path = "../../../engine/backends/esp32p4-ppa" }
+
+[features]
+default = ["std"]
+std = ["pocketjs-core/std", "pocketjs-esp32p4-ppa/std"]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+
+[workspace]
