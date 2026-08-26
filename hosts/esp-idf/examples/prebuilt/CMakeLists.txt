@@ -7,7 +7,11 @@ list(APPEND EXTRA_COMPONENT_DIRS
     "${pocketjs_components}/pocketjs_ui_core"
     "${pocketjs_components}/pocketjs_ui_qjs"
     "${pocketjs_components}/pocketjs_render_rgb565")
-if(IDF_TARGET STREQUAL "esp32p4")
+set(pocketjs_idf_target "${IDF_TARGET}")
+if(NOT pocketjs_idf_target AND DEFINED ENV{IDF_TARGET})
+    set(pocketjs_idf_target "$ENV{IDF_TARGET}")
+endif()
+if(pocketjs_idf_target STREQUAL "esp32p4")
     list(APPEND EXTRA_COMPONENT_DIRS "${pocketjs_components}/pocketjs_esp32p4_ppa")
 endif()
 
