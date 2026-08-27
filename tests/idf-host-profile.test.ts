@@ -6,10 +6,14 @@ import {
 } from "../contracts/spec/idf-host.ts";
 import {
   hashPocketIdfHostProfile,
+  pocketIdfHostExtension,
+  readIdfHostExtension,
   pocketIdfHostRegistry,
   validatePocketIdfHostProfile,
 } from "../framework/src/manifest/idf-host.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
+import { createHostExtension, isHostExtension } from "../framework/src/manifest/host-extension.ts";
+import { idfHostBuildEnvironment } from "../framework/src/manifest/idf-host.ts";
 
 const profile: PocketIdfHostProfile = {
   $schema: POCKET_IDF_HOST_SCHEMA_ID,
@@ -28,6 +32,16 @@ const profile: PocketIdfHostProfile = {
 };
 
 describe("ESP-IDF host profile", () => {
+  test("extension identity is generic and payload validation belongs to the IDF adapter", () => {
+    const other = createHostExtension("another-host", 2, { answer: 42 });
+    expect(isHostExtension(other)).toBe(true);
+    expect(readIdfHostExtension(other)).toBeUndefined();
+    const extension = pocketIdfHostExtension(`sha256:${"12".repeat(32)}`, 60);
+    expect(isHostExtension({ ...extension, payload: { ...extension.payload, tickHz: 61 } })).toBe(false);
+    expect(() => readIdfHostExtension({ ...extension, version: 2 })).toThrow(/payload\/version/);
+    expect(() => readIdfHostExtension(createHostExtension("esp-idf", 1, { profileHash: "bad", tickHz: 60 }))).toThrow();
+    expect(idfHostBuildEnvironment(extension).POCKETJS_TICK_HZ).toBe("60");
+  });
   test("committed schema matches the TypeScript source", async () => {
     const committed = await Bun.file(
       new URL("../contracts/schema/pocket-idf-host-1.json", import.meta.url),
@@ -46,13 +60,13 @@ describe("ESP-IDF host profile", () => {
     ).json();
     const result = validateAndResolveBuildPlan(
       manifest,
-      { target: profile.id, idfHost: { profileHash, tickHz: profile.tickHz } },
+      { target: profile.id, hostExtension: pocketIdfHostExtension(profileHash, profile.tickHz) },
       pocketIdfHostRegistry(profile),
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.plan.target).toEqual({ id: "idf-smoke", hostAbi: 1 });
-    expect(result.plan.idfHost).toEqual({ profileHash, tickHz: 60 });
+    expect(readIdfHostExtension(result.plan.hostExtension)).toEqual({ profileHash, tickHz: 60 });
   });
 
   test("rejects target ids that exceed the package table", () => {

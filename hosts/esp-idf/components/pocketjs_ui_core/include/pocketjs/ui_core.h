@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "pocketjs/ui_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,49 +16,18 @@ extern "C" {
 
 typedef struct pocketjs_ui_core pocketjs_ui_core_t;
 
-typedef struct {
-  size_t struct_size;
-  uint32_t logical_width;
-  uint32_t logical_height;
-  uint32_t raster_density;
-  uint32_t tick_hz;
-} pocketjs_ui_core_config_t;
+typedef enum {
+  POCKETJS_UI_ASSET_STYLES = 1,
+  POCKETJS_UI_ASSET_FONT = 2,
+  POCKETJS_UI_ASSET_IMAGE = 3,
+  POCKETJS_UI_ASSET_SPRITE = 4,
+} pocketjs_ui_asset_kind_t;
 
-typedef struct {
-  size_t struct_size;
-  uint64_t epoch;
-  uint64_t raster_revision;
-  uint32_t logical_width;
-  uint32_t logical_height;
-  uint32_t raster_density;
-  const uint32_t *draw_words;
-  size_t draw_word_count;
-  /** Internal component bridge. Applications must not inspect this value. */
-  void *_private_core;
-} pocketjs_ui_frame_view_t;
-
-typedef struct {
-  size_t struct_size;
-  const uint8_t *pixels;
-  size_t pixel_bytes;
-  uint32_t width;
-  uint32_t height;
-  uint32_t psm;
-  const uint8_t *palette;
-  size_t palette_bytes;
-  uint64_t revision;
-  bool linear;
-} pocketjs_ui_texture_view_t;
-
-typedef struct {
-  size_t struct_size;
-  const uint8_t *bitmap;
-  size_t bitmap_bytes;
-  uint32_t cell_width;
-  uint32_t cell_height;
-  uint32_t raster_density;
-  uint32_t glyph_count;
-} pocketjs_ui_font_view_t;
+/** Atomic asset batch. On any returned error core and handles are unchanged.
+ * Outputs one handle per input (-1 for styles/fonts). Rust OOM is fatal. */
+esp_err_t pocketjs_ui_core_load_assets(pocketjs_ui_core_t *core,
+                                       const pocketjs_ui_asset_t *assets,
+                                       size_t count, int32_t *handles);
 
 void pocketjs_ui_core_config_defaults(pocketjs_ui_core_config_t *config);
 esp_err_t pocketjs_ui_core_create(const pocketjs_ui_core_config_t *config,

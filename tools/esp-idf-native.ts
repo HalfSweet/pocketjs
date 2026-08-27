@@ -1,126 +1,73 @@
 #!/usr/bin/env bun
-
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NATIVE_COMPONENTS, NATIVE_POLICY, RUST_TARGETS, nativeSourceDigest, sha256,
+  verifyNativeCompiler, verifyNativeReceipt, type IdfTarget, type NativeReceipt } from "./esp-idf-native-receipt.ts";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const NATIVE = join(ROOT, "hosts/esp-idf/native");
-const COMPONENT_LIB = join(ROOT, "hosts/esp-idf/components/pocketjs_ui_core/lib");
-
 const args = Bun.argv.slice(2);
-const take = (name: string): string | undefined => {
-  const index = args.indexOf(`--${name}`);
-  if (index < 0) return undefined;
-  const value = args[index + 1];
-  if (!value) throw new Error(`--${name} requires a value`);
-  args.splice(index, 2);
+function take(name: string): string | undefined {
+  const i = args.indexOf("--" + name);
+  if (i < 0) return undefined;
+  const value = args[i + 1];
+  if (!value || value.startsWith("--")) throw new Error("--" + name + " requires a value");
+  args.splice(i, 2);
   return value;
-};
-
-const target = take("target");
-const cargoInput = take("cargo") ?? Bun.which("cargo");
-const archiverInput = take("archiver");
-const archiver = archiverInput ?? process.env.AR ?? [
-  Bun.which("llvm-ar"),
-  Bun.which("gcc-ar"),
-  Bun.which("riscv32-esp-elf-ar"),
-  "/opt/homebrew/opt/llvm/bin/llvm-ar",
-  "/usr/local/opt/llvm/bin/llvm-ar",
-  Bun.which("ar"),
-].find((candidate) => candidate && (candidate === "ar" || existsSync(candidate)));
-const cargo = cargoInput ? resolve(cargoInput) : "";
-const outputRoot = resolve(take("output-root") ?? COMPONENT_LIB);
-if (!target || !["esp32p4", "esp32s3"].includes(target)) {
-  throw new Error(
-    "usage: bun tools/esp-idf-native.ts --target <esp32p4|esp32s3> " +
-      "[--cargo path] [--archiver path] [--output-root dir]",
-  );
 }
-if (!cargo || !existsSync(cargo)) throw new Error("cargo not found; PocketJS does not install Rust");
-if (target === "esp32p4" && !archiver) {
-  throw new Error("ar not found; pass the target archiver with --archiver");
-}
-if (args.length) throw new Error(`unknown option ${args[0]}`);
-
-const rustTarget = target === "esp32p4"
-  ? "riscv32imafc-unknown-none-elf"
-  : "xtensa-esp32s3-none-elf";
-const targetDirectory = join(ROOT, "dist/esp-idf-native/cargo", target);
-const command = [
-  cargo,
-  "build",
-  "--release",
-  "--locked",
-  "--no-default-features",
-  "--target",
-  rustTarget,
-  "--manifest-path",
-  join(NATIVE, "Cargo.toml"),
-];
-if (target === "esp32s3") command.splice(2, 0, "-Zbuild-std=core,alloc");
-const build = Bun.spawnSync(command, {
-  cwd: ROOT,
-  stdout: "inherit",
-  stderr: "inherit",
-  env: {
-    ...process.env,
-    PATH: `${dirname(cargo)}:${process.env.PATH ?? ""}`,
-    CARGO_TARGET_DIR: targetDirectory,
-  },
-});
-if (build.exitCode !== 0) throw new Error(`Rust build failed for ${target}`);
-
-const sourceArchive = join(targetDirectory, rustTarget, "release/libpocketjs_idf_native.a");
-const destinationDirectory = join(outputRoot, target);
-const destinationArchive = join(destinationDirectory, "libpocketjs_idf_native.a");
-mkdirSync(destinationDirectory, { recursive: true });
-await Bun.write(destinationArchive, new Uint8Array(readFileSync(sourceArchive)));
-if (target === "esp32p4") {
-  const cmake = Bun.which("cmake");
-  if (!cmake) throw new Error("cmake not found; it is required to prepare the ESP32-P4 archive");
-  const prepare = Bun.spawnSync([
-    cmake,
-    `-DPOCKETJS_ARCHIVE=${destinationArchive}`,
-    `-DPOCKETJS_ARCHIVER=${archiver}`,
-    `-DPOCKETJS_TARGET=${target}`,
-    "-P",
-    join(ROOT, "hosts/esp-idf/components/pocketjs_ui_core/prepare_archive.cmake"),
-  ], { stdout: "inherit", stderr: "inherit" });
-  if (prepare.exitCode !== 0) throw new Error("failed to prepare the ESP32-P4 archive for ESP-IDF");
-}
-const archive = new Uint8Array(readFileSync(destinationArchive));
-
-const sourceHash = createHash("sha256");
-const sourceFiles: string[] = [];
-for (const sourceRoot of [
-  "engine/core",
-  "engine/backends/esp32p4-ppa",
-  "hosts/esp-idf/native",
-]) {
-  const glob = new Bun.Glob("**/*.{rs,toml,lock}");
-  for await (const file of glob.scan({ cwd: join(ROOT, sourceRoot), absolute: false })) {
-    if (file.split("/").some((part) => part === "target" || part.startsWith("target-"))) continue;
-    sourceFiles.push(`${sourceRoot}/${file}`);
-  }
-}
-if (sourceFiles.length === 0) throw new Error("native source hash matched no files");
-for (const file of sourceFiles.sort()) {
-  sourceHash.update(file).update("\0").update(readFileSync(join(ROOT, file)));
+const target = take("target") as IdfTarget;
+const component = take("component");
+const cargo = resolve(take("cargo") ?? Bun.which("cargo") ?? "");
+const outputRoot = resolve(take("output-root") ?? join(ROOT, "hosts/esp-idf/components"));
+const archiver = take("archiver") ?? process.env.AR ?? [Bun.which("llvm-ar"), Bun.which("gcc-ar"),
+  Bun.which("riscv32-esp-elf-ar"), "/opt/homebrew/opt/llvm/bin/llvm-ar", Bun.which("ar")].find(p => p && existsSync(p));
+if (!(target in RUST_TARGETS) || args.length) throw new Error("usage: esp-idf-native --target <esp32p4|esp32s3> [--component ui-core|render-rgb565] [--cargo path] [--archiver path] [--output-root components-dir]");
+const specs = NATIVE_COMPONENTS.filter(spec => !component || spec.crate === component);
+if (!specs.length) throw new Error("unknown native component " + component);
+function run(command: string[], env?: Record<string, string | undefined>): void {
+  const result = Bun.spawnSync(command, { cwd: ROOT, stdout: "inherit", stderr: "inherit", env });
+  if (result.exitCode !== 0) throw new Error("command failed: " + command.join(" "));
 }
 const rustc = join(dirname(cargo), "rustc");
-const compiler = Bun.spawnSync([rustc, "-Vv"], { stdout: "pipe", stderr: "pipe" });
-if (compiler.exitCode !== 0) throw new Error(`rustc next to ${cargo} is not runnable`);
-const receipt = {
-  schemaVersion: 1,
-  target,
-  rustTarget,
-  compiler: compiler.stdout.toString().trim(),
-  sourceSha256: sourceHash.digest("hex"),
-  archiveSha256: createHash("sha256").update(archive).digest("hex"),
-  archiveBytes: archive.length,
-};
-await Bun.write(join(destinationDirectory, "build-receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
-console.log(`${target}: ${destinationArchive}`);
-console.log(`  sha256 ${receipt.archiveSha256} (${receipt.archiveBytes} bytes)`);
+const version = Bun.spawnSync([rustc, "-Vv"], { stdout: "pipe", stderr: "pipe" });
+if (version.exitCode !== 0) throw new Error("rustc beside the supplied cargo is not runnable");
+const compiler = version.stdout.toString().trim();
+verifyNativeCompiler(ROOT, target, compiler);
+let archiveTool: NativeReceipt["archiver"] = null;
+if (target === "esp32p4") {
+  if (!archiver) throw new Error("archive preparation needs --archiver");
+  const version = Bun.spawnSync([archiver, "--version"], { stdout: "pipe", stderr: "pipe" });
+  if (version.exitCode !== 0) throw new Error("use LLVM or GNU ar with --version support");
+  archiveTool = { version: version.stdout.toString().trim(), executableSha256: sha256(readFileSync(archiver)) };
+}
+for (const spec of specs) {
+  const sourceSha256 = await nativeSourceDigest(ROOT, spec);
+  const wrapperSource = join(ROOT, "hosts/esp-idf/components/pocketjs_ui_core/rustc_wrapper.rs");
+  const wrapperKey = sha256(readFileSync(wrapperSource)).slice(0, 16);
+  const cargoTarget = join(ROOT, "dist/esp-idf-native/cargo", spec.crate, target, wrapperKey);
+  const native = join(ROOT, "hosts/esp-idf/native", spec.crate);
+  mkdirSync(cargoTarget, { recursive: true });
+  const wrapper = join(cargoTarget, "rustc-wrapper" + (process.platform === "win32" ? ".exe" : ""));
+  run([rustc, "--edition=2021", wrapperSource, "-o", wrapper]);
+  run([cargo, "build", ...(target === "esp32s3" ? ["-Zbuild-std=core,alloc"] : []),
+    "--release", "--locked", "--no-default-features", "--target", RUST_TARGETS[target],
+    "--manifest-path", join(native, "Cargo.toml")], { ...process.env, RUSTC: rustc,
+      RUSTFLAGS: "", CARGO_ENCODED_RUSTFLAGS: "", CARGO_TARGET_DIR: cargoTarget,
+      RUSTC_WRAPPER: wrapper, POCKETJS_RUST_NAMESPACE: spec.archive.slice(3, -2),
+      PATH: dirname(cargo) + ":" + (process.env.PATH ?? "") });
+  const directory = join(outputRoot, spec.component, "lib", target);
+  mkdirSync(directory, { recursive: true });
+  const archivePath = join(directory, spec.archive);
+  await Bun.write(archivePath, readFileSync(join(cargoTarget, RUST_TARGETS[target], "release", spec.archive)));
+  if (target === "esp32p4") run(["cmake", "-DPOCKETJS_ARCHIVE=" + archivePath,
+    "-DPOCKETJS_ARCHIVER=" + archiver, "-DPOCKETJS_TARGET=" + target, "-P",
+    join(ROOT, "hosts/esp-idf/components/pocketjs_ui_core/prepare_archive.cmake")]);
+  if (sourceSha256 !== await nativeSourceDigest(ROOT, spec)) throw new Error("native sources changed while building");
+  const archive = readFileSync(archivePath);
+  const receipt: NativeReceipt = { schemaVersion: 2, component: spec.component, target,
+    rustTarget: RUST_TARGETS[target], compiler, archiver: archiveTool,
+    sourceSha256, archiveSha256: sha256(archive), archiveBytes: archive.length, policy: NATIVE_POLICY };
+  await Bun.write(join(directory, "build-receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
+  await verifyNativeReceipt(ROOT, spec, target, directory);
+  console.log(spec.component + "/" + target + ": " + archive.length + " bytes, sha256 " + receipt.archiveSha256);
+}

@@ -40,6 +40,14 @@ export const POCKET_PACKAGE_VARIANT_SIZE = 40;
 export const POCKET_PACKAGE_SECTION_SIZE = 16;
 export const POCKET_PACKAGE_ALIGN = 16;
 export const POCKET_PACKAGE_TARGET_BYTES = 16;
+export const POCKET_PACKAGE_FOOTER_SIZE = 8;
+
+export const POCKET_LAYOUT = {
+  header: { magic: 0, version: 4, manifestSize: 8, variantCount: 12 },
+  variant: { hostAbi: 16, sectionCount: 20, sectionsOffset: 24, hash: 32 },
+  section: { kind: 0, offset: 8, size: 12 },
+  hostInputs: { profileHash: 40, planHash: 72 },
+} as const;
 
 export const POCKET_SECTION = {
   /** u16-length-prefixed UTF-8 strings: output, id, title. The device-side
@@ -80,7 +88,7 @@ export interface PocketHostInputs {
   readonly planHash: string;
 }
 
-const HOST_PRESENTATIONS = ["fill", "fit", "integer-fit", "native", "stretch"] as const;
+export const HOST_PRESENTATIONS = ["fill", "fit", "integer-fit", "native", "stretch"] as const;
 
 function hashBytes(hash: string, field: string): Uint8Array {
   if (!/^sha256:[0-9a-f]{64}$/.test(hash)) throw new Error(`pocket package: invalid ${field}`);
@@ -112,8 +120,8 @@ export function encodeHostInputs(input: PocketHostInputs): Uint8Array {
   view.setUint32(4, POCKET_HOST_INPUTS_VERSION, true);
   dimensions.forEach((value, index) => view.setUint32(8 + index * 4, value, true));
   view.setUint32(36, presentation, true);
-  bytes.set(hashBytes(input.profileHash, "profile hash"), 40);
-  bytes.set(hashBytes(input.planHash, "plan hash"), 72);
+  bytes.set(hashBytes(input.profileHash, "profile hash"), POCKET_LAYOUT.hostInputs.profileHash);
+  bytes.set(hashBytes(input.planHash, "plan hash"), POCKET_LAYOUT.hostInputs.planHash);
   return bytes;
 }
 
@@ -137,8 +145,8 @@ export function decodeHostInputs(bytes: Uint8Array): PocketHostInputs {
     physicalHeight: view.getUint32(28, true),
     rasterDensity: view.getUint32(32, true),
     presentation,
-    profileHash: readHash(bytes, 40),
-    planHash: readHash(bytes, 72),
+    profileHash: readHash(bytes, POCKET_LAYOUT.hostInputs.profileHash),
+    planHash: readHash(bytes, POCKET_LAYOUT.hostInputs.planHash),
   };
 }
 
@@ -185,7 +193,7 @@ export function fnv1a64(...chunks: Uint8Array[]): bigint {
 
 // --- encode ---------------------------------------------------------------
 
-const align = (n: number) => (n + POCKET_PACKAGE_ALIGN - 1) & ~(POCKET_PACKAGE_ALIGN - 1);
+const align = (n: number) => Math.ceil(n / POCKET_PACKAGE_ALIGN) * POCKET_PACKAGE_ALIGN;
 
 export function encodeIdentity(identity: PocketPackageIdentity): Uint8Array {
   const parts: Uint8Array[] = [];
@@ -226,6 +234,7 @@ export function decodeIdentity(bytes: Uint8Array): PocketPackageIdentity {
 export function encodePocketPackage(pkg: PocketPackage): Uint8Array {
   const variants = [...pkg.variants].sort((a, b) => (a.target < b.target ? -1 : 1));
   for (const v of variants) {
+    if (!v.target || v.target.includes("\0")) throw new Error("pocket package: invalid target id");
     if (new TextEncoder().encode(v.target).length >= POCKET_PACKAGE_TARGET_BYTES) {
       throw new Error(`pocket package: target id too long: ${v.target}`);
     }
@@ -268,15 +277,15 @@ export function encodePocketPackage(pkg: PocketPackage): Uint8Array {
   variants.forEach((v, vi) => {
     const entry = tableOff + vi * POCKET_PACKAGE_VARIANT_SIZE;
     out.set(new TextEncoder().encode(v.target), entry); // NUL-padded by zero-init
-    dv.setUint32(entry + 16, v.hostAbi, true);
-    dv.setUint32(entry + 20, v.sections.length, true);
-    dv.setUint32(entry + 24, sectionTableOffs[vi], true);
-    dv.setBigUint64(entry + 32, fnv1a64(...v.sections.map((s) => s.bytes)), true);
+    dv.setUint32(entry + POCKET_LAYOUT.variant.hostAbi, v.hostAbi, true);
+    dv.setUint32(entry + POCKET_LAYOUT.variant.sectionCount, v.sections.length, true);
+    dv.setUint32(entry + POCKET_LAYOUT.variant.sectionsOffset, sectionTableOffs[vi], true);
+    dv.setBigUint64(entry + POCKET_LAYOUT.variant.hash, fnv1a64(...v.sections.map((s) => s.bytes)), true);
     v.sections.forEach((s, si) => {
       const se = sectionTableOffs[vi] + si * POCKET_PACKAGE_SECTION_SIZE;
       dv.setUint32(se, s.kind, true);
-      dv.setUint32(se + 8, payloadOffs[vi][si], true);
-      dv.setUint32(se + 12, s.bytes.length, true);
+      dv.setUint32(se + POCKET_LAYOUT.section.offset, payloadOffs[vi][si], true);
+      dv.setUint32(se + POCKET_LAYOUT.section.size, s.bytes.length, true);
       out.set(s.bytes, payloadOffs[vi][si]);
     });
   });
@@ -311,33 +320,38 @@ export function decodePocketPackage(bytes: Uint8Array, opts: DecodeOptions = {})
   }
   const manifestLen = dv.getUint32(8, true);
   const variantCount = dv.getUint32(12, true);
+  const payloadEnd = bytes.length - POCKET_PACKAGE_FOOTER_SIZE;
+  if (POCKET_PACKAGE_HEADER_SIZE + manifestLen > payloadEnd) throw new Error("pocket package: truncated manifest");
   const manifest = bytes.subarray(
     POCKET_PACKAGE_HEADER_SIZE,
     POCKET_PACKAGE_HEADER_SIZE + manifestLen,
   );
   const tableOff = align(POCKET_PACKAGE_HEADER_SIZE + manifestLen);
+  if (tableOff + variantCount * POCKET_PACKAGE_VARIANT_SIZE > payloadEnd) throw new Error("pocket package: truncated variant table");
   const variants: PocketPackageVariant[] = [];
   for (let vi = 0; vi < variantCount; vi++) {
     const entry = tableOff + vi * POCKET_PACKAGE_VARIANT_SIZE;
-    if (entry + POCKET_PACKAGE_VARIANT_SIZE > bytes.length) {
+    if (entry + POCKET_PACKAGE_VARIANT_SIZE > payloadEnd) {
       throw new Error("pocket package: truncated variant table");
     }
     let end = entry;
     while (end < entry + POCKET_PACKAGE_TARGET_BYTES && bytes[end] !== 0) end++;
+    if (end === entry || end === entry + POCKET_PACKAGE_TARGET_BYTES) throw new Error("pocket package: invalid target name");
     const target = new TextDecoder().decode(bytes.subarray(entry, end));
-    const hostAbi = dv.getUint32(entry + 16, true);
-    const sectionCount = dv.getUint32(entry + 20, true);
-    const sectionsOff = dv.getUint32(entry + 24, true);
+    const hostAbi = dv.getUint32(entry + POCKET_LAYOUT.variant.hostAbi, true);
+    const sectionCount = dv.getUint32(entry + POCKET_LAYOUT.variant.sectionCount, true);
+    const sectionsOff = dv.getUint32(entry + POCKET_LAYOUT.variant.sectionsOffset, true);
+    if (sectionsOff + sectionCount * POCKET_PACKAGE_SECTION_SIZE > payloadEnd) throw new Error("pocket package: truncated section table");
     const sections: PocketPackageSection[] = [];
     for (let si = 0; si < sectionCount; si++) {
       const se = sectionsOff + si * POCKET_PACKAGE_SECTION_SIZE;
-      if (se + POCKET_PACKAGE_SECTION_SIZE > bytes.length) {
+      if (se + POCKET_PACKAGE_SECTION_SIZE > payloadEnd) {
         throw new Error("pocket package: truncated section table");
       }
       const kind = dv.getUint32(se, true);
-      const off = dv.getUint32(se + 8, true);
-      const len = dv.getUint32(se + 12, true);
-      if (off + len > bytes.length) throw new Error("pocket package: section out of bounds");
+      const off = dv.getUint32(se + POCKET_LAYOUT.section.offset, true);
+      const len = dv.getUint32(se + POCKET_LAYOUT.section.size, true);
+      if (off + len > payloadEnd) throw new Error("pocket package: section out of bounds");
       sections.push({ kind, bytes: bytes.subarray(off, off + len) });
     }
     variants.push({ target, hostAbi, sections });

@@ -29,6 +29,7 @@ function(_pocketjs_package_attach target name package profile)
             "--package=${package}" "--host-profile=${profile}"
             "--name=${name}" "--output-dir=${generated}"
         DEPENDS "${package}" "${profile}" "${POCKETJS_PACKAGE_EMBED_TOOL}"
+            "${POCKETJS_PACKAGE_COMPONENT_DIR}/tools/package_format.py"
         VERBATIM
     )
     string(MAKE_C_IDENTIFIER "${target}_${name}" generated_suffix)
@@ -58,7 +59,7 @@ function(pocketjs_embed_package)
 endfunction()
 
 function(pocketjs_compile_app)
-    cmake_parse_arguments(APP "" "TARGET;NAME;MANIFEST;HOST_PROFILE;PROJECT_ROOT" "" ${ARGN})
+    cmake_parse_arguments(APP "" "TARGET;NAME;MANIFEST;HOST_PROFILE;PROJECT_ROOT;COMPILER_RECEIPT" "DEPENDS" ${ARGN})
     foreach(required TARGET NAME MANIFEST HOST_PROFILE)
         if(NOT APP_${required})
             message(FATAL_ERROR "pocketjs_compile_app requires ${required}")
@@ -78,16 +79,13 @@ function(pocketjs_compile_app)
     endif()
     set(generated "${CMAKE_CURRENT_BINARY_DIR}/pocketjs/${APP_NAME}")
     set(package "${generated}/${APP_NAME}.pocket")
-    # Existing project files become build dependencies. Avoid CONFIGURE_DEPENDS:
-    # IDF writes JSON under build directories while Ninja is running, which would
-    # otherwise force a CMake regeneration loop.
-    file(GLOB_RECURSE pocketjs_app_sources
-        "${project_root}/*.ts"
-        "${project_root}/*.tsx"
-        "${project_root}/*.vue"
-        "${project_root}/*.json")
-    list(FILTER pocketjs_app_sources EXCLUDE REGEX
-        "/(node_modules|build[^/]*|dist|managed_components|[.]git|[.]pocket|[.]pocket-build)/")
+    set(dependencies "${generated}/${APP_NAME}.d")
+    set(compiler_args)
+    set(compiler_receipt)
+    if(APP_COMPILER_RECEIPT)
+        get_filename_component(compiler_receipt "${APP_COMPILER_RECEIPT}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        list(APPEND compiler_args --compiler-receipt "${compiler_receipt}")
+    endif()
     add_custom_command(
         OUTPUT "${package}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${generated}"
@@ -98,7 +96,10 @@ function(pocketjs_compile_app)
             --outdir "${generated}"
             --plan-dir "${generated}/plans"
             --output "${package}"
-        DEPENDS "${manifest}" "${profile}" ${pocketjs_app_sources}
+            --depfile "${dependencies}"
+            ${compiler_args}
+        DEPFILE "${dependencies}"
+        DEPENDS "${manifest}" "${profile}" "${POCKETJS_CLI}" ${compiler_receipt} ${APP_DEPENDS}
         VERBATIM
     )
     _pocketjs_package_attach("${APP_TARGET}" "${APP_NAME}" "${package}" "${profile}")

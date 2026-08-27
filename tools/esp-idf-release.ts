@@ -1,83 +1,66 @@
 #!/usr/bin/env bun
-
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NATIVE_COMPONENTS, RUST_TARGETS, verifyNativeReceipt, type IdfTarget } from "./esp-idf-native-receipt.ts";
+import { verifyComponentVersions } from "./esp-idf-component-versions.ts";
+import { generatedIdfContracts } from "./esp-idf-contracts.ts";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const COMPONENTS = join(ROOT, "hosts/esp-idf/components");
-const names = [
-  "pocketjs_package",
-  "pocketjs_guest",
-  "pocketjs_ui_core",
-  "pocketjs_ui_qjs",
-  "pocketjs_render_rgb565",
-  "pocketjs_esp32p4_ppa",
-  "pocketjs_runner",
-] as const;
-
-const args = Bun.argv.slice(2);
-let output = join(ROOT, "dist/esp-idf-components");
-while (args.length) {
-  const option = args.shift();
-  if (option === "--output") output = resolve(args.shift() ?? "");
-  else throw new Error(`unknown option ${option}`);
-}
-
 const ignored = (source: string): boolean => {
   const name = basename(source);
-  return name === "target" || name.startsWith("target-") || name === "__pycache__" || name === ".DS_Store";
+  return name === "target" || name.startsWith("target-") || name === "__pycache__" ||
+    name === ".DS_Store" || name === "lib" || name === "vendor";
 };
 
-if (existsSync(output)) throw new Error(`output already exists: ${output}`);
-mkdirSync(output, { recursive: true });
-for (const name of names) {
-  cpSync(join(COMPONENTS, name), join(output, name), {
-    recursive: true,
-    filter: (source) => !ignored(source),
-  });
-  cpSync(join(ROOT, "LICENSE"), join(output, name, "LICENSE"));
-}
-
-const ui = join(output, "pocketjs_ui_core");
-for (const target of ["esp32p4", "esp32s3"]) {
-  for (const file of ["libpocketjs_idf_native.a", "build-receipt.json"]) {
-    if (!existsSync(join(ui, "lib", target, file))) {
-      throw new Error(`missing ${target}/${file}; run tools/esp-idf-native.ts for both targets first`);
+export async function stageEspIdfComponents(root: string, output: string): Promise<void> {
+  if (existsSync(output)) throw new Error("output already exists: " + output);
+  const names = verifyComponentVersions(root);
+  for (const [path, expected] of generatedIdfContracts())
+    if (readFileSync(join(root, path), "utf8") !== expected) throw new Error("stale generated contract: " + path);
+  for (const spec of NATIVE_COMPONENTS) for (const target of Object.keys(RUST_TARGETS) as IdfTarget[])
+    await verifyNativeReceipt(root, spec, target);
+  // No staging output is created before all source/archive/version checks pass.
+  mkdirSync(output, { recursive: true });
+  for (const name of names) {
+    cpSync(join(root, "hosts/esp-idf/components", name), join(output, name), { recursive: true, filter: source => !ignored(source) });
+    cpSync(join(root, "LICENSE"), join(output, name, "LICENSE"));
+  }
+  for (const spec of NATIVE_COMPONENTS) {
+    const component = join(output, spec.component);
+    for (const target of Object.keys(RUST_TARGETS) as IdfTarget[]) {
+      const destination = join(component, "lib", target);
+      mkdirSync(destination, { recursive: true });
+      for (const file of [spec.archive, "build-receipt.json"])
+        cpSync(join(root, "hosts/esp-idf/components", spec.component, "lib", target, file), join(destination, file));
+      await verifyNativeReceipt(root, spec, target, destination);
+    }
+    const vendor = join(component, "vendor");
+    mkdirSync(vendor, { recursive: true });
+    const sources = [
+      [join(root, "hosts/esp-idf/native", spec.crate), "native"],
+      [join(root, "hosts/esp-idf/native/abi"), "abi"],
+      [join(root, "hosts/esp-idf/native/runtime"), "runtime"],
+      [join(root, "engine/core"), "core"],
+      ...(spec.crate === "render-rgb565" ? [[join(root, "engine/backends/rgb565"), "renderer"]] : []),
+    ];
+    for (const [source, name] of sources) cpSync(source, join(vendor, name), { recursive: true, filter: path => !ignored(path) });
+    const manifest = join(vendor, "native/Cargo.toml");
+    writeFileSync(manifest, readFileSync(manifest, "utf8")
+      .replaceAll("../../../../engine/core", "../core")
+      .replaceAll("../../../../engine/backends/rgb565", "../renderer"));
+    if (spec.crate === "render-rgb565") {
+      const backendManifest = join(vendor, "renderer/Cargo.toml");
+      writeFileSync(backendManifest, readFileSync(backendManifest, "utf8").replaceAll("../../core", "../core"));
     }
   }
+  for (const spec of NATIVE_COMPONENTS) for (const target of Object.keys(RUST_TARGETS) as IdfTarget[])
+    await verifyNativeReceipt(root, spec, target, join(output, spec.component, "lib", target));
+  console.log("ESP-IDF component staging verified: " + output);
 }
-mkdirSync(join(ui, "vendor"), { recursive: true });
-cpSync(join(ROOT, "hosts/esp-idf/native"), join(ui, "vendor/native"), {
-  recursive: true,
-  filter: (source) => !ignored(source),
-});
-cpSync(join(ROOT, "engine/core"), join(ui, "vendor/core"), {
-  recursive: true,
-  filter: (source) => !ignored(source),
-});
-cpSync(join(ROOT, "engine/backends/esp32p4-ppa"), join(ui, "vendor/esp32p4-ppa"), {
-  recursive: true,
-  filter: (source) => !ignored(source),
-});
-const manifestPath = join(ui, "vendor/native/Cargo.toml");
-const manifest = readFileSync(manifestPath, "utf8")
-  .replace('path = "../../../engine/core"', 'path = "../core"')
-  .replace('path = "../../../engine/backends/esp32p4-ppa"', 'path = "../esp32p4-ppa"');
-writeFileSync(manifestPath, manifest);
-const rendererManifestPath = join(ui, "vendor/esp32p4-ppa/Cargo.toml");
-const rendererManifest = readFileSync(rendererManifestPath, "utf8")
-  .replaceAll('path = "../../core"', 'path = "../core"');
-writeFileSync(rendererManifestPath, rendererManifest);
 
-for (const name of names) {
-  const root = join(output, name);
-  const forbidden: string[] = [];
-  for await (const path of new Bun.Glob("**/{target,target-*,build,managed_components,__pycache__}/**").scan({
-    cwd: root,
-    absolute: false,
-    onlyFiles: false,
-  })) forbidden.push(path);
-  if (forbidden.length) throw new Error(`${name} contains generated paths: ${forbidden.join(", ")}`);
+if (import.meta.main) {
+  const args = Bun.argv.slice(2);
+  if (args.length && (args.length !== 2 || args[0] !== "--output")) throw new Error("usage: esp-idf-release [--output directory]");
+  await stageEspIdfComponents(ROOT, resolve(args[1] ?? join(ROOT, "dist/esp-idf-components")));
 }
-console.log(`ESP-IDF component staging ready: ${output}`);

@@ -1,26 +1,5 @@
 #include "pocketjs/render_rgb565.h"
-
-extern int
-pocketjs_native_renderer_create(const pocketjs_rgb565_renderer_config_t *,
-                                pocketjs_rgb565_renderer_t **);
-extern void pocketjs_native_renderer_destroy(pocketjs_rgb565_renderer_t *);
-extern int pocketjs_native_render_target_create(pocketjs_rgb565_target_t **);
-extern void pocketjs_native_render_target_destroy(pocketjs_rgb565_target_t *);
-extern void
-pocketjs_native_render_target_invalidate(pocketjs_rgb565_target_t *);
-extern int pocketjs_native_renderer_prepare(pocketjs_rgb565_renderer_t *,
-                                            pocketjs_rgb565_target_t *,
-                                            const pocketjs_ui_frame_view_t *,
-                                            pocketjs_rgb565_damage_plan_t *);
-extern int pocketjs_native_renderer_render_strip(
-    pocketjs_rgb565_renderer_t *, const pocketjs_ui_frame_view_t *, uint16_t *,
-    size_t, pocketjs_rgb565_rect_t, const pocketjs_rgb565_accelerator_t *,
-    pocketjs_rgb565_render_stats_t *);
-extern int pocketjs_native_renderer_commit(pocketjs_rgb565_renderer_t *,
-                                           pocketjs_rgb565_target_t *,
-                                           const pocketjs_ui_frame_view_t *);
-extern void pocketjs_native_renderer_abort(pocketjs_rgb565_renderer_t *,
-                                           pocketjs_rgb565_target_t *);
+#include "pocketjs/native_renderer.h"
 
 void pocketjs_rgb565_renderer_config_defaults(
     pocketjs_rgb565_renderer_config_t *config) {

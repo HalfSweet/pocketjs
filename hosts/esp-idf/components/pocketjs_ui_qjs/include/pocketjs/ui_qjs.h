@@ -39,11 +39,17 @@ esp_err_t pocketjs_ui_qjs_create(pocketjs_guest_t *guest,
                                  const pocketjs_ui_qjs_config_t *config,
                                  pocketjs_ui_qjs_t **out_binding);
 
-/** Feed styles/fonts/images from a borrowed PAK before mounting the surface. */
+/** Atomically feed styles/fonts/images from a borrowed PAK before mounting.
+ * Returned errors leave core/binding unchanged and permit retry. PAK bytes
+ * must remain readable and unchanged until guest and binding are destroyed.
+ * The JS ArrayBuffer is immutable; this does not extend native byte lifetime.
+ * Rust allocation exhaustion is fatal, not a recoverable ESP_ERR_NO_MEM. */
 esp_err_t pocketjs_ui_qjs_feed_pak(pocketjs_ui_qjs_t *binding, const void *pak,
                                    size_t pak_size);
 
-/** Install globalThis.ui and globalThis.__pak. Call before guest eval. */
+/** Install globalThis.ui and immutable globalThis.__pak before guest eval.
+ * One UI binding per guest; a second mount returns ESP_ERR_INVALID_STATE.
+ * Functions capture their binding and never use JSContext's opaque slot. */
 esp_err_t pocketjs_ui_qjs_mount(pocketjs_ui_qjs_t *binding);
 
 /** One synchronous PocketJS UI turn; no rendering or presentation occurs. */

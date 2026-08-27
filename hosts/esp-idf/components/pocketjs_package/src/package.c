@@ -1,24 +1,8 @@
 #include "pocketjs/package.h"
+#include "pocketjs/package_format.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-#define POCKET_MAGIC 0x544b4350U
-#define POCKET_VERSION 1U
-#define POCKET_HEADER_SIZE 16U
-#define POCKET_VARIANT_SIZE 40U
-#define POCKET_SECTION_SIZE 16U
-#define POCKET_ALIGN 16U
-#define POCKET_FOOTER_SIZE 8U
-
-#define SECTION_PLAN 2U
-#define SECTION_JS 3U
-#define SECTION_PAK 4U
-#define SECTION_HOST_INPUTS 7U
-
-#define HOST_INPUTS_MAGIC 0x54534850U
-#define HOST_INPUTS_VERSION 1U
-#define HOST_INPUTS_SIZE 104U
 
 struct pocketjs_package {
   const uint8_t *bytes;
@@ -72,6 +56,33 @@ static bool align16(size_t value, size_t *out) {
   return true;
 }
 
+static bool tables_valid(const uint8_t *bytes, size_t end, size_t table,
+                         uint32_t count) {
+  for (uint32_t i = 0; i < count; ++i) {
+    const size_t entry = table + (size_t)i * POCKET_VARIANT_SIZE;
+    if (bytes[entry] == 0U ||
+        memchr(bytes + entry, 0, POCKET_TARGET_BYTES) == NULL)
+      return false;
+    uint32_t sections, offset;
+    if (!read_u32(bytes, end, entry + OFFSET_VARIANT_SECTION_COUNT,
+                  &sections) ||
+        !read_u32(bytes, end, entry + OFFSET_VARIANT_SECTIONS_OFFSET,
+                  &offset) ||
+        sections > end / POCKET_SECTION_SIZE ||
+        !range_valid(offset, (size_t)sections * POCKET_SECTION_SIZE, end))
+      return false;
+    for (uint32_t j = 0; j < sections; ++j) {
+      const size_t section = offset + (size_t)j * POCKET_SECTION_SIZE;
+      uint32_t data, length;
+      if (!read_u32(bytes, end, section + OFFSET_SECTION_OFFSET, &data) ||
+          !read_u32(bytes, end, section + OFFSET_SECTION_SIZE, &length) ||
+          !range_valid(data, length, end))
+        return false;
+    }
+  }
+  return true;
+}
+
 esp_err_t pocketjs_package_open(const void *data, size_t size, uint32_t flags,
                                 pocketjs_package_t **out_package) {
   if (data == NULL || out_package == NULL ||
@@ -104,9 +115,11 @@ esp_err_t pocketjs_package_open(const void *data, size_t size, uint32_t flags,
   if (!range_valid(POCKET_HEADER_SIZE, manifest_size,
                    size - POCKET_FOOTER_SIZE) ||
       !align16(POCKET_HEADER_SIZE + (size_t)manifest_size, &variants_offset) ||
-      variant_count > SIZE_MAX / POCKET_VARIANT_SIZE ||
+      variant_count > (size - POCKET_FOOTER_SIZE) / POCKET_VARIANT_SIZE ||
       !range_valid(variants_offset, (size_t)variant_count * POCKET_VARIANT_SIZE,
-                   size - POCKET_FOOTER_SIZE)) {
+                   size - POCKET_FOOTER_SIZE) ||
+      !tables_valid(bytes, size - POCKET_FOOTER_SIZE, variants_offset,
+                    variant_count)) {
     return ESP_ERR_INVALID_SIZE;
   }
   pocketjs_package_t *package = calloc(1, sizeof(*package));
@@ -146,7 +159,8 @@ static esp_err_t section_at(const pocketjs_package_t *package,
                             size_t sections_offset, uint32_t section_count,
                             uint32_t wanted, pocketjs_bytes_t *out) {
   *out = (pocketjs_bytes_t){0};
-  if (section_count > SIZE_MAX / POCKET_SECTION_SIZE ||
+  if (section_count >
+          (package->size - POCKET_FOOTER_SIZE) / POCKET_SECTION_SIZE ||
       !range_valid(sections_offset, (size_t)section_count * POCKET_SECTION_SIZE,
                    package->size - POCKET_FOOTER_SIZE)) {
     return ESP_ERR_INVALID_SIZE;
@@ -157,8 +171,10 @@ static esp_err_t section_at(const pocketjs_package_t *package,
     uint32_t offset = 0;
     uint32_t length = 0;
     if (!read_u32(package->bytes, package->size, entry, &kind) ||
-        !read_u32(package->bytes, package->size, entry + 8U, &offset) ||
-        !read_u32(package->bytes, package->size, entry + 12U, &length) ||
+        !read_u32(package->bytes, package->size, entry + OFFSET_SECTION_OFFSET,
+                  &offset) ||
+        !read_u32(package->bytes, package->size, entry + OFFSET_SECTION_SIZE,
+                  &length) ||
         !range_valid(offset, length, package->size - POCKET_FOOTER_SIZE)) {
       return ESP_ERR_INVALID_SIZE;
     }
@@ -192,11 +208,12 @@ host_inputs_match(const pocketjs_bytes_t inputs,
       fields[7] != contract->physical_height ||
       fields[8] != contract->raster_density ||
       fields[9] != (uint32_t)contract->presentation ||
-      memcmp(inputs.data + 40U, contract->profile_hash,
-             POCKETJS_PACKAGE_HASH_BYTES) != 0) {
+      memcmp(inputs.data + OFFSET_HOST_INPUTS_PROFILE_HASH,
+             contract->profile_hash, POCKETJS_PACKAGE_HASH_BYTES) != 0) {
     return false;
   }
-  memcpy(out_plan_hash, inputs.data + 72U, POCKETJS_PACKAGE_HASH_BYTES);
+  memcpy(out_plan_hash, inputs.data + OFFSET_HOST_INPUTS_PLAN_HASH,
+         POCKETJS_PACKAGE_HASH_BYTES);
   return true;
 }
 
@@ -222,11 +239,13 @@ pocketjs_package_select(const pocketjs_package_t *package,
     uint32_t host_abi = 0;
     uint32_t section_count = 0;
     uint32_t sections_offset = 0;
-    if (!read_u32(package->bytes, package->size, entry + 16U, &host_abi) ||
-        !read_u32(package->bytes, package->size, entry + 20U, &section_count) ||
-        !read_u32(package->bytes, package->size, entry + 24U,
-                  &sections_offset) ||
-        !read_u64(package->bytes, package->size, entry + 32U,
+    if (!read_u32(package->bytes, package->size,
+                  entry + OFFSET_VARIANT_HOST_ABI, &host_abi) ||
+        !read_u32(package->bytes, package->size,
+                  entry + OFFSET_VARIANT_SECTION_COUNT, &section_count) ||
+        !read_u32(package->bytes, package->size,
+                  entry + OFFSET_VARIANT_SECTIONS_OFFSET, &sections_offset) ||
+        !read_u64(package->bytes, package->size, entry + OFFSET_VARIANT_HASH,
                   &out_variant->variant_hash)) {
       return ESP_ERR_INVALID_SIZE;
     }

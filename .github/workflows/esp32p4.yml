@@ -5,13 +5,13 @@ on:
     paths:
       - ".github/workflows/esp32p4.yml"
       - "engine/core/**"
-      - "engine/backends/esp32p4-ppa/**"
+      - "engine/backends/rgb565/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/esp32p4.yml"
       - "engine/core/**"
-      - "engine/backends/esp32p4-ppa/**"
+      - "engine/backends/rgb565/**"
   workflow_dispatch: {}
 
 permissions:
@@ -31,4 +31,4 @@ jobs:
         run: cargo test --locked --manifest-path engine/core/Cargo.toml
 
       - name: Test ESP32-P4 DrawList backend
-        run: cargo test --locked --manifest-path engine/backends/esp32p4-ppa/Cargo.toml --features std
+        run: cargo test --locked --manifest-path engine/backends/rgb565/Cargo.toml --features std

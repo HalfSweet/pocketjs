@@ -11,7 +11,7 @@
 
 use pocketjs_core::raster::render_scaled_rgb565;
 use pocketjs_core::{spec, Ui};
-use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
+use pocketjs_render_rgb565::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
 
 fn xy_word(x: i16, y: i16) -> u32 {
     x as u16 as u32 | ((y as u16 as u32) << 16)

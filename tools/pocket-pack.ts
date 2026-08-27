@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readIdfHostExtension } from "../framework/src/manifest/idf-host.ts";
 
 // `.pocket` packaging (docs/PLATFORM.md L2; format in contracts/spec/pocket-package.ts).
 //
@@ -84,19 +85,20 @@ export function makeVariant(input: {
     { kind: POCKET_SECTION.pak, bytes: input.pak },
   ];
   if (input.cover) sections.push({ kind: POCKET_SECTION.cover, bytes: input.cover });
-  if (plan.idfHost) {
+  const idfHost = readIdfHostExtension(plan.hostExtension);
+  if (idfHost) {
     sections.push({
       kind: POCKET_SECTION.hostInputs,
       bytes: encodeHostInputs({
         hostAbi: input.hostAbi,
-        tickHz: plan.idfHost.tickHz,
+        tickHz: idfHost.tickHz,
         logicalWidth: plan.viewport.logical[0],
         logicalHeight: plan.viewport.logical[1],
         physicalWidth: plan.viewport.physical[0],
         physicalHeight: plan.viewport.physical[1],
         rasterDensity: plan.viewport.rasterDensity,
         presentation: plan.viewport.presentation,
-        profileHash: plan.idfHost.profileHash,
+        profileHash: idfHost.profileHash,
         planHash: plan.planHash,
       }),
     });
@@ -268,15 +270,16 @@ function verifyCommand(file: string): void {
       const planBytes = findSection(v, POCKET_SECTION.plan);
       if (!planBytes) throw new Error(`verify: ESP-IDF variant ${v.target} has no plan`);
       const plan = JSON.parse(new TextDecoder().decode(planBytes)) as ResolvedBuildPlan;
-      if (!verifyPlanHash(plan) || plan.target.id !== v.target || plan.target.hostAbi !== v.hostAbi || !plan.idfHost) {
+      const idfHost = readIdfHostExtension(plan.hostExtension);
+      if (!verifyPlanHash(plan) || plan.target.id !== v.target || plan.target.hostAbi !== v.hostAbi || !idfHost) {
         throw new Error(`verify: ESP-IDF variant ${v.target} has inconsistent plan identity`);
       }
       const inputs = decodeHostInputs(hostInputs);
-      if (inputs.hostAbi !== v.hostAbi || inputs.tickHz !== plan.idfHost.tickHz ||
+      if (inputs.hostAbi !== v.hostAbi || inputs.tickHz !== idfHost.tickHz ||
         inputs.logicalWidth !== plan.viewport.logical[0] || inputs.logicalHeight !== plan.viewport.logical[1] ||
         inputs.physicalWidth !== plan.viewport.physical[0] || inputs.physicalHeight !== plan.viewport.physical[1] ||
         inputs.rasterDensity !== plan.viewport.rasterDensity || inputs.presentation !== plan.viewport.presentation ||
-        inputs.profileHash !== plan.idfHost.profileHash || inputs.planHash !== plan.planHash) {
+        inputs.profileHash !== idfHost.profileHash || inputs.planHash !== plan.planHash) {
         throw new Error(`verify: ESP-IDF variant ${v.target} host inputs drifted`);
       }
       expectedPlan = plan;

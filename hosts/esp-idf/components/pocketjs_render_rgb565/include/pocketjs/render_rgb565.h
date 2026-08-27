@@ -5,81 +5,15 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "pocketjs/render_types.h"
 #include "pocketjs/ui_core.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define POCKETJS_RGB565_MAX_DAMAGE_REGIONS 8U
-
 typedef struct pocketjs_rgb565_renderer pocketjs_rgb565_renderer_t;
 typedef struct pocketjs_rgb565_target pocketjs_rgb565_target_t;
-
-typedef struct {
-  uint32_t x;
-  uint32_t y;
-  uint32_t width;
-  uint32_t height;
-} pocketjs_rgb565_rect_t;
-
-typedef struct {
-  size_t struct_size;
-  /** Must equal the UI core raster density used to produce each frame. */
-  uint32_t scale;
-  uint32_t min_fill_pixels;
-  uint32_t min_blend_pixels;
-  uint32_t min_srm_pixels;
-} pocketjs_rgb565_renderer_config_t;
-
-typedef struct {
-  size_t struct_size;
-  uint32_t region_count;
-  bool full_redraw;
-  pocketjs_rgb565_rect_t regions[POCKETJS_RGB565_MAX_DAMAGE_REGIONS];
-} pocketjs_rgb565_damage_plan_t;
-
-typedef struct {
-  size_t struct_size;
-  uint32_t ppa_fills;
-  uint32_t ppa_blends;
-  uint32_t ppa_srm;
-  uint32_t software_ops;
-  uint32_t software_words;
-  uint32_t damage_regions;
-  uint32_t damage_pixels;
-  pocketjs_rgb565_rect_t damage_bounds;
-  bool full_redraw;
-} pocketjs_rgb565_render_stats_t;
-
-typedef bool (*pocketjs_rgb565_fill_fn)(void *user_data, uint16_t *destination,
-                                        size_t destination_pixels,
-                                        uint32_t width, uint32_t height,
-                                        pocketjs_rgb565_rect_t rect,
-                                        uint16_t color);
-
-typedef bool (*pocketjs_rgb565_blend_fn)(void *user_data, uint16_t *destination,
-                                         size_t destination_pixels,
-                                         uint32_t width, uint32_t height,
-                                         const uint8_t *mask, size_t mask_size,
-                                         pocketjs_rgb565_rect_t rect,
-                                         uint8_t red, uint8_t green,
-                                         uint8_t blue, uint8_t alpha);
-
-typedef bool (*pocketjs_rgb565_srm_fn)(
-    void *user_data, uint16_t *destination, size_t destination_pixels,
-    uint32_t width, uint32_t height, const uint8_t *source, size_t source_size,
-    uint32_t source_width, uint32_t source_height,
-    pocketjs_rgb565_rect_t source_rect, pocketjs_rgb565_rect_t destination_rect,
-    uint32_t quarter_turn, bool mirror_x, bool mirror_y);
-
-typedef struct {
-  size_t struct_size;
-  void *user_data;
-  pocketjs_rgb565_fill_fn fill_rgb565;
-  pocketjs_rgb565_blend_fn blend_a8_rgb565;
-  pocketjs_rgb565_srm_fn srm_psm5650_rgb565;
-} pocketjs_rgb565_accelerator_t;
 
 void pocketjs_rgb565_renderer_config_defaults(
     pocketjs_rgb565_renderer_config_t *config);

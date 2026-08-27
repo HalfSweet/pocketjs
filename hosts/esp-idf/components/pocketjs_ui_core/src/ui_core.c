@@ -1,4 +1,5 @@
 #include "pocketjs/ui_core.h"
+#include "pocketjs/native_ui.h"
 
 #include <stdlib.h>
 
@@ -7,71 +8,14 @@
 
 static const char *TAG = "pocketjs_ui_core";
 
-extern int pocketjs_native_ui_create(const pocketjs_ui_core_config_t *config,
-                                     pocketjs_ui_core_t **out_core);
-extern int pocketjs_native_ui_get_config(const pocketjs_ui_core_t *core,
-                                         pocketjs_ui_core_config_t *out_config);
-extern void pocketjs_native_ui_destroy(pocketjs_ui_core_t *core);
-extern int32_t pocketjs_native_ui_create_node(pocketjs_ui_core_t *core,
-                                              uint32_t node_type);
-extern void pocketjs_native_ui_destroy_node(pocketjs_ui_core_t *core,
-                                            int32_t id);
-extern void pocketjs_native_ui_insert_before(pocketjs_ui_core_t *, int32_t,
-                                             int32_t, int32_t);
-extern void pocketjs_native_ui_remove_child(pocketjs_ui_core_t *, int32_t,
-                                            int32_t);
-extern void pocketjs_native_ui_set_style(pocketjs_ui_core_t *, int32_t,
-                                         int32_t);
-extern void pocketjs_native_ui_set_prop(pocketjs_ui_core_t *, int32_t, uint32_t,
-                                        double);
-extern int pocketjs_native_ui_set_text(pocketjs_ui_core_t *, int32_t,
-                                       const uint8_t *, size_t);
-extern int pocketjs_native_ui_replace_text(pocketjs_ui_core_t *, int32_t,
-                                           const uint8_t *, size_t);
-extern int32_t pocketjs_native_ui_animate(pocketjs_ui_core_t *, int32_t,
-                                          uint32_t, double, uint32_t, uint32_t,
-                                          uint32_t);
-extern void pocketjs_native_ui_cancel_animation(pocketjs_ui_core_t *, int32_t);
-extern void pocketjs_native_ui_set_focus(pocketjs_ui_core_t *, int32_t);
-extern void pocketjs_native_ui_set_active(pocketjs_ui_core_t *, int32_t,
-                                          int32_t);
-extern int32_t pocketjs_native_ui_hit_test(pocketjs_ui_core_t *, float, float);
-extern int32_t pocketjs_native_ui_hit_test_bounds(pocketjs_ui_core_t *, float,
-                                                  float);
-extern void pocketjs_native_ui_set_cursor(pocketjs_ui_core_t *, int32_t, float,
-                                          float, float, float);
-extern void pocketjs_native_ui_set_cursor_position(pocketjs_ui_core_t *, float,
-                                                   float);
-extern int pocketjs_native_ui_load_styles(pocketjs_ui_core_t *, const uint8_t *,
-                                          size_t);
-extern int pocketjs_native_ui_load_font(pocketjs_ui_core_t *, const uint8_t *,
-                                        size_t);
-extern int32_t pocketjs_native_ui_upload_texture(pocketjs_ui_core_t *,
-                                                 const uint8_t *, size_t,
-                                                 uint32_t, uint32_t, uint32_t);
-extern int32_t pocketjs_native_ui_upload_img_entry(pocketjs_ui_core_t *,
-                                                   const uint8_t *, size_t);
-extern void pocketjs_native_ui_free_texture(pocketjs_ui_core_t *, int32_t);
-extern void pocketjs_native_ui_set_image(pocketjs_ui_core_t *, int32_t,
-                                         int32_t);
-extern void pocketjs_native_ui_set_sprite(pocketjs_ui_core_t *, int32_t,
-                                          int32_t, uint32_t, uint32_t,
-                                          uint32_t);
-extern float pocketjs_native_ui_measure_text(pocketjs_ui_core_t *,
-                                             const uint8_t *, size_t, uint32_t);
-extern size_t pocketjs_native_ui_wrap_text(pocketjs_ui_core_t *,
-                                           const uint8_t *, size_t, uint32_t,
-                                           float, uint32_t *, size_t);
-extern void pocketjs_native_ui_tick(pocketjs_ui_core_t *);
-extern int pocketjs_native_ui_draw(pocketjs_ui_core_t *,
-                                   pocketjs_ui_frame_view_t *);
-extern size_t pocketjs_native_ui_touch_hits(pocketjs_ui_core_t *,
-                                            const uint32_t *, size_t, int32_t *,
-                                            size_t);
-extern int pocketjs_native_ui_texture(pocketjs_ui_core_t *, int32_t,
-                                      pocketjs_ui_texture_view_t *);
-extern int pocketjs_native_ui_font(pocketjs_ui_core_t *, uint32_t,
-                                   pocketjs_ui_font_view_t *);
+esp_err_t pocketjs_ui_core_load_assets(pocketjs_ui_core_t *core,
+                                       const pocketjs_ui_asset_t *assets,
+                                       size_t count, int32_t *handles) {
+  int result = pocketjs_native_ui_load_assets(core, assets, count, handles);
+  return result == 0    ? ESP_OK
+         : result == -2 ? ESP_ERR_NO_MEM
+                        : ESP_ERR_INVALID_RESPONSE;
+}
 
 void *pocketjs_idf_rust_alloc(size_t size, size_t alignment) {
   if (size == 0U || alignment == 0U || (alignment & (alignment - 1U)) != 0U) {

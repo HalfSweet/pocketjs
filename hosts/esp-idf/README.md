@@ -20,6 +20,13 @@ The full dependency graph and integration sequence are documented in the
 [ESP-IDF guide](https://pocketjs.dev/docs/esp-idf/). Component headers live
 under `include/pocketjs/`; their comments are the API authority.
 
+The core and renderer each own a Rust archive. The renderer reads resources
+through the C ABI and does not dereference the core's Rust representation.
+Generated C/Rust layouts are checked by `bun tools/esp-idf-contracts.ts --check`.
+
+PAK bytes remain caller-owned and immutable in JavaScript. Asset loading is
+atomic for returned errors; Rust allocation exhaustion is fatal.
+
 ## Build the examples
 
 The caller-driven smoke example builds a package from source when the PocketJS

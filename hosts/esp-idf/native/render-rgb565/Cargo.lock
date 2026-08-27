@@ -22,18 +22,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocketjs-esp32p4-ppa"
+name = "pocketjs-idf-abi"
+version = "0.1.0"
+
+[[package]]
+name = "pocketjs-idf-render-rgb565"
 version = "0.1.0"
 dependencies = [
  "pocketjs-core",
+ "pocketjs-idf-abi",
+ "pocketjs-idf-runtime",
+ "pocketjs-render-rgb565",
 ]
 
 [[package]]
-name = "pocketjs-idf-native"
+name = "pocketjs-idf-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "pocketjs-render-rgb565"
 version = "0.1.0"
 dependencies = [
  "pocketjs-core",
- "pocketjs-esp32p4-ppa",
 ]
 
 [[package]]

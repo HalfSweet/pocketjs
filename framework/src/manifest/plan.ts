@@ -1,3 +1,4 @@
+import type { HostExtension } from "./host-extension.ts";
 import { createHash } from "node:crypto";
 import type { PocketManifestV2 } from "../../../contracts/spec/pocket-manifest.ts";
 import type { PresentationMode, Viewport } from "../../../contracts/spec/platforms.ts";
@@ -39,12 +40,8 @@ export interface ResolvedBuildPlanContent {
    *  svcOpen strings the app's adapters speak. Hosts build their svc
    *  allowlist from this list (issue #295). */
   readonly companions: readonly string[];
-  /** Present for project-provided ESP-IDF hosts. The hash identifies the
-   * complete host profile; tickHz is the one rate the bundle may run at. */
-  readonly idfHost?: {
-    readonly profileHash: string;
-    readonly tickHz: number;
-  };
+  /** Versioned, content-verified adapter payload. */
+  readonly hostExtension?: HostExtension;
 }
 
 export interface ResolvedBuildPlan extends ResolvedBuildPlanContent {

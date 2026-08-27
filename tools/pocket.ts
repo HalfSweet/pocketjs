@@ -7,11 +7,13 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { checkAppTypes } from "../framework/compiler/app-check.ts";
+import { depfile } from "../framework/compiler/build-inputs.ts";
 import type { PocketTargetId } from "../contracts/spec/platforms.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import { canonicalJson, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import {
   hashPocketIdfHostProfile,
+  pocketIdfHostExtension,
   pocketIdfHostRegistry,
   validatePocketIdfHostProfile,
 } from "../framework/src/manifest/idf-host.ts";
@@ -58,6 +60,10 @@ const projectRoot = resolve(takeOption("project-root") ?? dirname(manifestPath))
 const outdir = resolve(projectRoot, takeOption("outdir") ?? "dist");
 const planRoot = resolve(projectRoot, takeOption("plan-dir") ?? ".pocket");
 const outputOption = takeOption("output");
+const depfileOption = takeOption("depfile");
+const compilerReceipt = takeOption("compiler-receipt");
+if (depfileOption && (!hostProfileOption || command !== "build")) usage("--depfile requires build --host-profile");
+if (compilerReceipt && !existsSync(resolve(compilerReceipt))) usage("compiler receipt does not exist");
 if (outputOption && (!hostProfileOption || command !== "build")) {
   usage("--output is only valid with build --host-profile");
 }
@@ -94,7 +100,7 @@ const resolution = validateAndResolveBuildPlan(
   manifestInput,
   {
     target,
-    ...(profileHash ? { idfHost: { profileHash, tickHz } } : {}),
+    ...(profileHash ? { hostExtension: pocketIdfHostExtension(profileHash, tickHz) } : {}),
   },
   registry,
 );
@@ -156,6 +162,7 @@ await run(
     `--project-root=${projectRoot}`,
     `--outdir=${outdir}`,
     `--hz=${tickHz}`,
+    ...(depfileOption ? [`--inputs-file=${resolve(outdir, `${plan.app.output}.inputs.json`)}`] : []),
   ],
   "PocketJS compiler",
 );
@@ -177,6 +184,13 @@ if (hostProfileOption) {
   const output = outputOption
     ? resolve(projectRoot, outputOption)
     : resolve(outdir, `${plan.app.output}.pocket`);
+  if (depfileOption) {
+    const inputs = await Bun.file(resolve(outdir, `${plan.app.output}.inputs.json`)).json() as string[];
+    await Bun.write(resolve(projectRoot, depfileOption), depfile(output, [
+      ...inputs, ...typeResult.checkedFiles.filter(file => !file.endsWith("/styles.generated.ts")),
+      manifestPath, resolve(hostProfileOption), ...(compilerReceipt ? [resolve(compilerReceipt)] : []),
+    ]));
+  }
   await Bun.write(output, encodePocketPackage({
     manifest: new Uint8Array(readFileSync(manifestPath)),
     variants: [variant],

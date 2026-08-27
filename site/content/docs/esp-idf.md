@@ -119,9 +119,11 @@ The helper never installs Bun, Node packages, or Rust. A missing `pocket`
 executable is a configuration error. Generated JS, PAK, package, C, and
 assembly files stay under the IDF build directory.
 
-**Existing TypeScript, Vue, and JSON files are build dependencies. Run
-`idf.py reconfigure` after adding a new application source file so CMake can
-add it to that dependency set.**
+**The compiler emits a depfile from the bundler graph and resource reads.**
+Ninja tracks imported modules, images, fonts, configuration, the host profile,
+and compiler inputs. Adding an imported module does not require reconfigure.
+`COMPILER_RECEIPT` adds a product-owned toolchain receipt as a dependency;
+`DEPENDS` lists additional inputs read by custom build steps.
 
 ## Package
 
@@ -148,6 +150,11 @@ Package, JS, PAK, and plan spans point into the caller-owned source bytes.
 Keep those bytes readable until the guest, binding, and package handle have
 been destroyed. Storage may be embedded flash, an mmap-capable partition, or
 another product-owned source.
+
+**The PAK ArrayBuffer exposed to JavaScript is immutable and still borrows
+the source bytes.** No complete PAK copy is allocated in the JS heap.
+`pakGet()` returns a writable copy of the requested entry. Native code must
+keep the borrowed package readable and unchanged for its documented lifetime.
 
 ## Guest
 
@@ -187,13 +194,22 @@ ESP_ERROR_CHECK(pocketjs_ui_core_create(&config, &core));
 
 Native firmware can call the tree mutation API directly without creating a
 guest. A `pocketjs_ui_frame_view_t` borrows the latest DrawList and resource
-state. **Its pointers expire on the next mutation or tick.**
+state. **Its pointers expire on the next draw, mutation, or tick.** Its epoch
+is a borrow generation, not a snapshot or a logical-state revision.
 
 ## UI QuickJS binding
 
 Create the binding with caller-owned guest and core handles, feed its PAK, then
 mount before bundle evaluation. **The binding derives viewport and tick rate
 from the core; its own config carries only target id and HostOps ABI.**
+
+PAK loading validates and stages resources before committing them to the
+core. A returned error leaves the core and binding unchanged and permits a
+retry. Successfully installed resources belong to the core.
+
+One guest accepts one UI binding. UI functions capture that binding in native
+closures; they do not use the QuickJS context opaque slot. Other native
+extensions can coexist in the same guest.
 
 ```c
 ESP_ERROR_CHECK(pocketjs_ui_qjs_feed_pak(binding, app.pak.data, app.pak.size));
@@ -296,7 +312,10 @@ When using the runner, call `pocketjs_runner_stop` before step 2.
 
 ## Rust archives
 
-Registry releases contain target-native archives for P4 and S3. Set
+Registry releases contain separate core and renderer archives for P4 and S3:
+`pocketjs_ui_core` owns `libpocketjs_idf_ui_core.a`, and
+`pocketjs_render_rgb565` owns `libpocketjs_idf_render_rgb565.a`. The renderer
+uses C resource views, not the private Rust layout of the core. Set
 `POCKETJS_RUST_FROM_SOURCE=ON` only when modifying the core or renderer. The
 build checks the developer-provided Cargo, compiler target, and linker and does
 not install a Rust toolchain.
@@ -312,6 +331,14 @@ When `POCKETJS_CARGO` selects a custom executable, the component uses the
 **For P4, archive preparation removes Rust-bundled soft-float compiler-rt C
 members. ESP-IDF supplies the equivalent runtime symbols from ROM or libgcc
 under its `ilp32f` ABI.**
+
+## Error and allocation policy
+
+Invalid configuration is rejected with an error code, including raster
+density outside `1..=255`. C and QuickJS allocation failures are reported
+where their APIs permit recovery. **Rust allocation exhaustion is fatal.**
+The native core and renderer do not promise to translate every OOM into
+`ESP_ERR_NO_MEM`; provision their memory separately from the guest heap limit.
 
 ## Examples
 

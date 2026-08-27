@@ -1,4 +1,4 @@
-//! Hybrid PocketJS DrawList backend for the ESP32-P4 PPA.
+//! PocketJS RGB565 DrawList renderer with optional accelerator callbacks.
 //!
 //! The render target is always opaque RGB565. Hardware-friendly operations
 //! are submitted through [`PpaOps`]; unsupported operations are executed in
@@ -11,6 +11,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use pocketjs_core::resources::RenderResources;
 
 use pocketjs_core::damage::{
     DamagePlan, DamagePolicy, DamageRect as Clip, DamageTarget, DamageTracker,
@@ -20,7 +21,9 @@ use pocketjs_core::raster::{
     coverage_index, linear_sample_coordinates, pack_rgb565, render_scaled_rgb565_over,
     render_scaled_rgb565_window_over,
 };
-use pocketjs_core::{spec, TexView, Ui};
+#[cfg(test)]
+use pocketjs_core::Ui;
+use pocketjs_core::{spec, TexView};
 
 const MASK_ALIGNMENT: usize = 128;
 const CLIP_DEPTH: usize = 32;
@@ -200,7 +203,7 @@ impl Renderer {
         self.raster_revision = 0;
     }
 
-    fn sync_resources(&mut self, ui: &Ui) {
+    fn sync_resources(&mut self, ui: &impl RenderResources) {
         let revision = ui.raster_revision();
         if self.raster_revision != revision {
             self.alpha_texture_cache.clear();
@@ -212,7 +215,7 @@ impl Renderer {
     /// UI viewport multiplied by `config.scale`.
     pub fn render<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         destination: &mut [u16],
         width: u32,
@@ -233,7 +236,7 @@ impl Renderer {
     pub fn prepare_damage(
         &mut self,
         target: &RenderTargetState,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
     ) -> Option<RenderDamagePlan> {
         self.sync_resources(ui);
@@ -246,7 +249,12 @@ impl Renderer {
     }
 
     /// Record a successfully presented DrawList in one persistent target.
-    pub fn commit_damage(&self, target: &mut RenderTargetState, ui: &Ui, words: &[u32]) -> bool {
+    pub fn commit_damage(
+        &self,
+        target: &mut RenderTargetState,
+        ui: &impl RenderResources,
+        words: &[u32],
+    ) -> bool {
         let Some(damage_target) = self.damage_target(ui) else {
             target.invalidate();
             return false;
@@ -271,7 +279,7 @@ impl Renderer {
     pub fn render_incremental<O: PpaOps>(
         &mut self,
         target: &mut RenderTargetState,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         destination: &mut [u16],
         width: u32,
@@ -313,7 +321,7 @@ impl Renderer {
     /// and mask offsets are translated to strip-local coordinates.
     pub fn render_strip<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         destination: &mut [u16],
         region: Rect,
@@ -381,7 +389,7 @@ impl Renderer {
         Some(stats)
     }
 
-    fn damage_target(&self, ui: &Ui) -> Option<DamageTarget> {
+    fn damage_target(&self, ui: &impl RenderResources) -> Option<DamageTarget> {
         let scale = self.config.scale;
         let (viewport_w, viewport_h) = ui.viewport();
         let width = (viewport_w as u32).checked_mul(scale)?;
@@ -397,7 +405,13 @@ impl Renderer {
         ))
     }
 
-    fn target_screen(&self, ui: &Ui, destination: &[u16], width: u32, height: u32) -> Option<Clip> {
+    fn target_screen(
+        &self,
+        ui: &impl RenderResources,
+        destination: &[u16],
+        width: u32,
+        height: u32,
+    ) -> Option<Clip> {
         let scale = self.config.scale;
         let (viewport_w, viewport_h) = ui.viewport();
         if viewport_w as u32 * scale != width
@@ -417,7 +431,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn render_damage<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         destination: &mut [u16],
         width: u32,
@@ -476,7 +490,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn render_region<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         destination: &mut [u16],
         width: u32,
@@ -657,7 +671,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn try_glyph_run<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         destination: &mut [u16],
         width: u32,
         height: u32,
@@ -748,7 +762,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn try_tex_quad_run<O: PpaOps>(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         words: &[u32],
         start: usize,
         destination: &mut [u16],
@@ -852,7 +866,7 @@ impl Renderer {
 
     fn software_op(
         &mut self,
-        ui: &Ui,
+        ui: &impl RenderResources,
         destination: &mut [u16],
         surface: Clip,
         clip: Clip,
@@ -934,7 +948,7 @@ impl Renderer {
     }
 }
 
-fn glyph_run_bounds(ui: &Ui, words: &[u32], clip: Clip) -> Clip {
+fn glyph_run_bounds(ui: &impl RenderResources, words: &[u32], clip: Clip) -> Clip {
     if words.len() < 3 || words[2] >> 24 == 0 {
         return Clip::empty();
     }

@@ -8,13 +8,14 @@ import json
 import re
 import struct
 from pathlib import Path
+import package_format as fmt
 
-MAGIC = 0x544B4350
-VERSION = 1
+MAGIC = fmt.POCKET_MAGIC
+VERSION = fmt.POCKET_VERSION
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-HOST_INPUTS_MAGIC = 0x54534850
-HOST_INPUTS_VERSION = 1
-HOST_INPUTS_SIZE = 104
+HOST_INPUTS_MAGIC = fmt.HOST_INPUTS_MAGIC
+HOST_INPUTS_VERSION = fmt.HOST_INPUTS_VERSION
+HOST_INPUTS_SIZE = fmt.HOST_INPUTS_SIZE
 
 
 def fnv1a64(data: bytes) -> int:
@@ -36,28 +37,46 @@ def validate(data: bytes) -> None:
     expected = struct.unpack_from("<Q", data, len(data) - 8)[0]
     if fnv1a64(data[:-8]) != expected:
         raise ValueError(".pocket footer hash mismatch")
+    end = len(data) - fmt.POCKET_FOOTER_SIZE
+    manifest, count = struct.unpack_from("<II", data, fmt.OFFSET_HEADER_MANIFEST_SIZE)
+    table = (fmt.POCKET_HEADER_SIZE + manifest + fmt.POCKET_ALIGN - 1) & ~(fmt.POCKET_ALIGN - 1)
+    if fmt.POCKET_HEADER_SIZE + manifest > end or table + count * fmt.POCKET_VARIANT_SIZE > end:
+        raise ValueError("manifest or variant table is truncated")
+    for index in range(count):
+        entry = table + index * fmt.POCKET_VARIANT_SIZE
+        target = data[entry:entry + fmt.POCKET_TARGET_BYTES]
+        if target.find(b"\0") <= 0:
+            raise ValueError("variant target is not NUL terminated")
+        sections, offset = struct.unpack_from("<II", data, entry + fmt.OFFSET_VARIANT_SECTION_COUNT)
+        if offset + sections * fmt.POCKET_SECTION_SIZE > end:
+            raise ValueError("section table is truncated")
+        for section in range(sections):
+            at = offset + section * fmt.POCKET_SECTION_SIZE
+            start, size = struct.unpack_from("<II", data, at + fmt.OFFSET_SECTION_OFFSET)
+            if start + size > end:
+                raise ValueError("section payload is truncated")
 
 
 def host_contract(data: bytes) -> tuple[str, tuple[int, ...], bytes]:
     manifest_size, variant_count = struct.unpack_from("<II", data, 8)
-    table = (16 + manifest_size + 15) & ~15
+    table = (fmt.POCKET_HEADER_SIZE + manifest_size + fmt.POCKET_ALIGN - 1) & ~(fmt.POCKET_ALIGN - 1)
     matches: list[tuple[str, tuple[int, ...], bytes]] = []
     for index in range(variant_count):
-        entry = table + index * 40
-        if entry + 40 > len(data) - 8:
+        entry = table + index * fmt.POCKET_VARIANT_SIZE
+        if entry + fmt.POCKET_VARIANT_SIZE > len(data) - 8:
             raise ValueError("variant table is truncated")
-        raw_target = data[entry : entry + 16]
+        raw_target = data[entry : entry + fmt.OFFSET_VARIANT_HOST_ABI]
         end = raw_target.find(b"\0")
         if end <= 0:
             raise ValueError("variant target is not NUL terminated")
         target = raw_target[:end].decode("utf-8")
-        variant_abi, section_count, sections = struct.unpack_from("<III", data, entry + 16)
+        variant_abi, section_count, sections = struct.unpack_from("<III", data, entry + fmt.OFFSET_VARIANT_HOST_ABI)
         for section_index in range(section_count):
-            section = sections + section_index * 16
-            if section + 16 > len(data) - 8:
+            section = sections + section_index * fmt.POCKET_SECTION_SIZE
+            if section + fmt.POCKET_SECTION_SIZE > len(data) - 8:
                 raise ValueError("section table is truncated")
             kind, _, offset, size = struct.unpack_from("<IIII", data, section)
-            if kind != 7:
+            if kind != fmt.SECTION_HOST_INPUTS:
                 continue
             if size != HOST_INPUTS_SIZE or offset + size > len(data) - 8:
                 raise ValueError("hostInputs section is malformed")
@@ -67,7 +86,7 @@ def host_contract(data: bytes) -> tuple[str, tuple[int, ...], bytes]:
                 raise ValueError("hostInputs header is unsupported")
             if fields[2] != variant_abi:
                 raise ValueError("hostInputs ABI differs from its variant")
-            matches.append((target, fields, payload[40:72]))
+            matches.append((target, fields, payload[fmt.OFFSET_HOST_INPUTS_PROFILE_HASH:fmt.OFFSET_HOST_INPUTS_PLAN_HASH]))
     if len(matches) != 1:
         raise ValueError("embedded ESP-IDF package must contain exactly one hostInputs variant")
     return matches[0]
@@ -88,7 +107,7 @@ def validate_profile(
     if hashlib.sha256(canonical.encode("utf-8")).digest() != profile_hash:
         raise ValueError("package host profile hash does not match HOST_PROFILE")
     display = profile.get("display", {})
-    presentations = ["fill", "fit", "integer-fit", "native", "stretch"]
+    presentations = fmt.HOST_PRESENTATIONS
     if (
         profile.get("id") != target
         or profile.get("platform") != "esp-idf"

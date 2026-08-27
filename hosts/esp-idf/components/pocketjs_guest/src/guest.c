@@ -17,6 +17,17 @@ typedef union {
   max_align_t alignment;
 } allocation_header_t;
 
+typedef struct rejection {
+  JSValue promise;
+  JSValue reason;
+  struct rejection *next;
+} rejection_t;
+
+typedef struct surface {
+  char *name;
+  struct surface *next;
+} surface_t;
+
 struct pocketjs_guest {
   JSRuntime *runtime;
   JSContext *context;
@@ -25,7 +36,9 @@ struct pocketjs_guest {
   bool prefer_psram;
   atomic_uint interrupt_epoch;
   unsigned int handled_interrupt_epoch;
-  int unhandled_rejections;
+  rejection_t *rejections;
+  bool rejection_tracking_failed;
+  surface_t *surfaces;
   uint32_t frames;
   uint32_t frame_errors;
   uint32_t jobs;
@@ -116,21 +129,31 @@ static int guest_interrupt(JSRuntime *runtime, void *opaque) {
 
 static void promise_rejection(JSContext *context, JSValueConst promise,
                               JSValueConst reason, bool handled, void *opaque) {
-  (void)promise;
   pocketjs_guest_t *guest = opaque;
+  rejection_t **slot = &guest->rejections;
+  while (*slot &&
+         JS_VALUE_GET_PTR((*slot)->promise) != JS_VALUE_GET_PTR(promise))
+    slot = &(*slot)->next;
   if (handled) {
-    if (guest->unhandled_rejections > 0) {
-      guest->unhandled_rejections--;
+    if (*slot) {
+      rejection_t *entry = *slot;
+      *slot = entry->next;
+      JS_FreeValue(context, entry->promise);
+      JS_FreeValue(context, entry->reason);
+      free(entry);
     }
     return;
   }
-  guest->unhandled_rejections++;
-  const char *text = JS_ToCString(context, reason);
-  ESP_LOGE(TAG, "Unhandled Promise rejection: %s",
-           text != NULL ? text : "<value>");
-  if (text != NULL) {
-    JS_FreeCString(context, text);
+  if (*slot)
+    return;
+  rejection_t *entry = calloc(1, sizeof(*entry));
+  if (!entry) {
+    guest->rejection_tracking_failed = true;
+    return;
   }
+  entry->promise = JS_DupValue(context, promise);
+  entry->reason = JS_DupValue(context, reason);
+  *slot = entry;
 }
 
 static esp_err_t drain_jobs(pocketjs_guest_t *guest) {
@@ -145,11 +168,30 @@ static esp_err_t drain_jobs(pocketjs_guest_t *guest) {
     }
     return ESP_FAIL;
   }
-  if (guest->unhandled_rejections != 0) {
-    guest->unhandled_rejections = 0;
-    return ESP_FAIL;
+  bool failed = guest->rejection_tracking_failed;
+  guest->rejection_tracking_failed = false;
+  size_t pending = 0;
+  for (rejection_t *entry = guest->rejections; entry; entry = entry->next)
+    ++pending;
+  while (pending--) {
+    rejection_t *entry = guest->rejections;
+    if (!entry)
+      break;
+    guest->rejections = entry->next;
+    failed = true;
+    /* Detach before toString can reenter the tracker. Reported promises no
+     * longer need a retained reference; a later handled event is ignored. */
+    const char *text = JS_ToCString(guest->context, entry->reason);
+    ESP_LOGE(TAG, "Unhandled Promise rejection: %s", text ? text : "<value>");
+    if (text)
+      JS_FreeCString(guest->context, text);
+    else
+      JS_FreeValue(guest->context, JS_GetException(guest->context));
+    JS_FreeValue(guest->context, entry->reason);
+    JS_FreeValue(guest->context, entry->promise);
+    free(entry);
   }
-  return ESP_OK;
+  return failed ? ESP_FAIL : ESP_OK;
 }
 
 void pocketjs_guest_config_defaults(pocketjs_guest_config_t *config) {
@@ -213,6 +255,40 @@ pocketjs_guest_quickjs_install(pocketjs_guest_t *guest,
 
 JSContext *pocketjs_guest_quickjs_context(pocketjs_guest_t *guest) {
   return guest != NULL ? guest->context : NULL;
+}
+
+esp_err_t
+pocketjs_guest_quickjs_install_once(pocketjs_guest_t *guest, const char *name,
+                                    pocketjs_guest_quickjs_install_fn install,
+                                    void *user_data) {
+  if (!guest || !name || !*name || !install)
+    return ESP_ERR_INVALID_ARG;
+  for (surface_t *entry = guest->surfaces; entry; entry = entry->next)
+    if (!strcmp(entry->name, name))
+      return ESP_ERR_INVALID_STATE;
+  surface_t *entry = calloc(1, sizeof(*entry));
+  if (!entry)
+    return ESP_ERR_NO_MEM;
+  entry->name = strdup(name);
+  if (!entry->name) {
+    free(entry);
+    return ESP_ERR_NO_MEM;
+  }
+  entry->next = guest->surfaces;
+  guest->surfaces = entry;
+  esp_err_t result = pocketjs_guest_quickjs_install(guest, install, user_data);
+  if (result != ESP_OK) {
+    if (JS_HasException(guest->context))
+      JS_FreeValue(guest->context, JS_GetException(guest->context));
+    surface_t **slot = &guest->surfaces;
+    while (*slot && *slot != entry)
+      slot = &(*slot)->next;
+    if (*slot)
+      *slot = entry->next;
+    free(entry->name);
+    free(entry);
+  }
+  return result;
 }
 
 esp_err_t pocketjs_guest_eval(pocketjs_guest_t *guest, const char *source,
@@ -283,7 +359,6 @@ esp_err_t pocketjs_guest_frame(pocketjs_guest_t *guest,
   if (!JS_IsFunction(guest->context, guest->frame)) {
     return ESP_ERR_INVALID_STATE;
   }
-  guest->unhandled_rejections = 0;
   JSValue arguments[4] = {
       JS_NewUint32(guest->context, frame->buttons),
       JS_NewUint32(guest->context, frame->analog),
@@ -371,11 +446,24 @@ void pocketjs_guest_destroy(pocketjs_guest_t *guest) {
     js_std_free_handlers(guest->runtime);
   }
   if (guest->context != NULL) {
+    while (guest->rejections) {
+      rejection_t *entry = guest->rejections;
+      guest->rejections = entry->next;
+      JS_FreeValue(guest->context, entry->promise);
+      JS_FreeValue(guest->context, entry->reason);
+      free(entry);
+    }
     JS_FreeValue(guest->context, guest->frame);
     JS_FreeContext(guest->context);
   }
   if (guest->runtime != NULL) {
     JS_FreeRuntime(guest->runtime);
+  }
+  while (guest->surfaces) {
+    surface_t *entry = guest->surfaces;
+    guest->surfaces = entry->next;
+    free(entry->name);
+    free(entry);
   }
   free(guest);
 }

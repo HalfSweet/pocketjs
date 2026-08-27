@@ -11,7 +11,39 @@ import {
   type PlatformContractRegistry,
 } from "../../../contracts/spec/platforms.ts";
 import { canonicalJson } from "./plan.ts";
+import { createHostExtension, isHostExtension, type HostExtension } from "./host-extension.ts";
 import { validateSchema, type ContractDiagnostic, type ValidationResult } from "./validate.ts";
+
+export interface IdfHostBuildPayload {
+  readonly profileHash: string;
+  readonly tickHz: number;
+}
+
+export function readIdfHostExtension(extension: HostExtension | undefined): IdfHostBuildPayload | undefined {
+  if (extension === undefined) return undefined;
+  if (!isHostExtension(extension)) throw new TypeError("invalid host extension identity");
+  if (extension.kind !== "esp-idf") return undefined;
+  const { profileHash, tickHz } = extension.payload;
+  if (extension.version !== 1 || typeof profileHash !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(profileHash) || typeof tickHz !== "number" ||
+      !Number.isInteger(tickHz) || tickHz < 1 || tickHz > 240) {
+    throw new TypeError("invalid ESP-IDF host extension payload/version");
+  }
+  return { profileHash, tickHz };
+}
+
+export function pocketIdfHostExtension(profileHash: string, tickHz: number): HostExtension {
+  const extension = createHostExtension("esp-idf", 1, { profileHash, tickHz });
+  readIdfHostExtension(extension);
+  return extension;
+}
+
+/** Platform environment projection belongs to this adapter, not generic hosts. */
+export function idfHostBuildEnvironment(extension: HostExtension): Readonly<Record<string, string>> {
+  const payload = readIdfHostExtension(extension);
+  if (!payload) throw new TypeError("expected ESP-IDF host extension");
+  return { POCKETJS_IDF_PROFILE_HASH: payload.profileHash, POCKETJS_TICK_HZ: String(payload.tickHz) };
+}
 
 export function validatePocketIdfHostProfile(input: unknown): ValidationResult<PocketIdfHostProfile> {
   const diagnostics: ContractDiagnostic[] = [];

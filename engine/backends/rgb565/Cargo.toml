@@ -1,5 +1,5 @@
 [package]
-name = "pocketjs-esp32p4-ppa"
+name = "pocketjs-render-rgb565"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"

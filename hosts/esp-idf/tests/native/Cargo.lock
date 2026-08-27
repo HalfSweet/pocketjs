@@ -22,7 +22,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocketjs-esp32p4-ppa"
+name = "pocketjs-idf-abi"
+version = "0.1.0"
+
+[[package]]
+name = "pocketjs-idf-native-tests"
+version = "0.1.0"
+dependencies = [
+ "pocketjs-idf-abi",
+ "pocketjs-idf-render-rgb565",
+ "pocketjs-idf-ui-core",
+]
+
+[[package]]
+name = "pocketjs-idf-render-rgb565"
+version = "0.1.0"
+dependencies = [
+ "pocketjs-core",
+ "pocketjs-idf-abi",
+ "pocketjs-idf-runtime",
+ "pocketjs-render-rgb565",
+]
+
+[[package]]
+name = "pocketjs-idf-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "pocketjs-idf-ui-core"
+version = "0.1.0"
+dependencies = [
+ "pocketjs-core",
+ "pocketjs-idf-abi",
+ "pocketjs-idf-runtime",
+]
+
+[[package]]
+name = "pocketjs-render-rgb565"
 version = "0.1.0"
 dependencies = [
  "pocketjs-core",
@@ -87,9 +123,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
