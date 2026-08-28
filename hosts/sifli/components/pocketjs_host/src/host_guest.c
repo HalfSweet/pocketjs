@@ -1206,7 +1206,23 @@ bool pocketjs_guest_frame(uint32_t buttons, const uint32_t *touches, size_t touc
 bool pocketjs_guest_render(uint16_t *framebuffer, size_t pixel_count, uint32_t target_index,
                            PocketRenderStats *stats)
 {
+#ifdef POCKETJS_FORCE_SOFTWARE
+    (void)target_index;
+    memset(stats, 0, sizeof(*stats));
+    return pocket_core_render_rgb565_software(g_core, framebuffer, pixel_count) == 0;
+#else
     return pocket_core_render_rgb565(g_core, framebuffer, pixel_count, target_index, stats) == 0;
+#endif
+}
+
+bool pocketjs_guest_render_software(uint16_t *framebuffer, size_t pixel_count)
+{
+    return pocket_core_render_rgb565_software(g_core, framebuffer, pixel_count) == 0;
+}
+
+uint64_t pocketjs_guest_draw_hash(void)
+{
+    return pocket_core_draw_hash(g_core);
 }
 
 size_t pocketjs_guest_js_heap_bytes(void)

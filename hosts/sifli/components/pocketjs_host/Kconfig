@@ -88,3 +88,41 @@ config POCKETJS_PROFILE
     default y
 
 endif
+
+if POCKETJS_HOST
+
+config POCKETJS_FORCE_SOFTWARE
+    bool "Render every frame with the core software rasterizer (bring-up)"
+    default n
+    help
+      Bypasses the GPU queue: each frame is a full software render into the
+      framebuffer. Use it to validate the heap, MPU, LCD ring, and input
+      before trusting the hardware path.
+
+config POCKETJS_SELF_CHECK
+    bool "Compare hardware frames against the software rasterizer"
+    default n
+    help
+      Every POCKETJS_SELF_CHECK_INTERVAL frames the current DrawList is
+      also rendered by the core software rasterizer into a scratch PSRAM
+      buffer and compared pixel by pixel; the serial port reports the
+      mismatch ratio, PSNR, the largest channel delta, both CRC32s, and up
+      to 16 differing pixels. `bun tools/sifli.ts selfcheck <log>` applies
+      the acceptance thresholds.
+
+config POCKETJS_SELF_CHECK_INTERVAL
+    int "Frames between self-checks"
+    default 60
+    range 1 3600
+    depends on POCKETJS_SELF_CHECK
+
+config POCKETJS_FRAME_CRC
+    bool "Print a CRC32 of every presented frame"
+    default n
+    help
+      `[PocketJS] crc frame=<n> hash=<draw hash> crc=<crc32>` per frame
+      for `bun tools/sifli.ts crc <output> --assert <log>`, which renders
+      the same guest through the simulator's RGB565 path and compares the
+      sequence. Costs one uncached read of the framebuffer per frame.
+
+endif

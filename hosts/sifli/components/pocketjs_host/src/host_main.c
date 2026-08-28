@@ -218,6 +218,17 @@ int pocketjs_host_run(const PocketjsCatalog *catalog)
         }
         perf.render_cycles += (uint32_t)(HAL_DBG_DWT_GetCycles() - started);
 
+#ifdef POCKETJS_SELF_CHECK
+        {
+            PocketjsGpuProfile probe;
+            pocketjs_gpu_profile_peek(&probe);
+            pocketjs_selfcheck_frame(frame, framebuffer, &stats, probe.vglite_commands);
+        }
+#endif
+#ifdef POCKETJS_FRAME_CRC
+        pocketjs_frame_crc(frame, framebuffer, pocketjs_guest_draw_hash());
+#endif
+
         started = HAL_DBG_DWT_GetCycles();
         pocketjs_lcd_present(framebuffer);
         perf.lcd_cycles += (uint32_t)(HAL_DBG_DWT_GetCycles() - started);

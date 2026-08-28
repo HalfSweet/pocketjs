@@ -39,7 +39,15 @@ void pocketjs_guest_unmount(void);
 bool pocketjs_guest_frame(uint32_t buttons, const uint32_t *touches, size_t touch_count);
 bool pocketjs_guest_render(uint16_t *framebuffer, size_t pixel_count, uint32_t target_index,
                            PocketRenderStats *stats);
+bool pocketjs_guest_render_software(uint16_t *framebuffer, size_t pixel_count);
+uint64_t pocketjs_guest_draw_hash(void);
 size_t pocketjs_guest_js_heap_bytes(void);
+
+/* host_selfcheck.c */
+uint32_t pocketjs_crc32(const void *data, size_t len);
+void pocketjs_frame_crc(uint32_t frame, const uint16_t *framebuffer, uint64_t draw_hash);
+void pocketjs_selfcheck_frame(uint32_t frame, const uint16_t *hardware,
+                              const PocketRenderStats *stats, uint32_t vglite_commands);
 
 /* host_main.c */
 void pocketjs_host_fatal(const char *message);

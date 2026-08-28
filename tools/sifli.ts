@@ -11,6 +11,12 @@
 //   bun tools/sifli.ts build <project> [--board=<board>] [--search=<dir>] [-j<n>]
 //   bun tools/sifli.ts audit <main.elf> [--nm=<arm-none-eabi-nm>]
 //   bun tools/sifli.ts verify                    the simulator smoke (tests/sifli-sim.test.ts)
+//   bun tools/sifli.ts crc <output> [--frames=N] [--assert=<serial log>]
+//                                                per-frame CRC32 of the simulator's RGB565 frames
+//                                                (512x300, density 2, scale 2) for parity with a
+//                                                board built with POCKETJS_FRAME_CRC
+//   bun tools/sifli.ts selfcheck <serial log>    apply the acceptance thresholds to
+//                                                POCKETJS_SELF_CHECK lines; exits 1 on failure
 //
 // pocket-sifli.json:
 //   {
@@ -312,6 +318,133 @@ function verify(): void {
   if (result.exitCode !== 0) throw new Error(`sifli sim smoke failed (${result.exitCode})`);
 }
 
+/** IEEE CRC-32 (reflected, 0xEDB88320): the same digest host_selfcheck.c prints. */
+export function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let index = 0; index < bytes.length; index++) {
+    crc ^= bytes[index];
+    for (let bit = 0; bit < 8; bit++) {
+      crc = (crc & 1) !== 0 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const hex8 = (value: number): string => value.toString(16).padStart(8, "0");
+
+/** CRC32 of every frame of `output` at the device viewport, frames 0..N-1 with no input. */
+export async function frameCrcs(output: string, frames: number): Promise<string[]> {
+  const { bootWorld } = await import("../hosts/sim/sim.ts");
+  const world = await bootWorld(output, 60, undefined, undefined,
+    { width: 512, height: 300, rasterDensity: 2, renderScale: 2 });
+  const crcs: string[] = [];
+  for (let frame = 0; frame < frames; frame++) {
+    world.frame(0);
+    world.tick();
+    const pixels = world.renderRgb565();
+    crcs.push(hex8(crc32(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength))));
+  }
+  return crcs;
+}
+
+/** `[PocketJS] crc frame=<n> ... crc=<hex>` lines of a serial log, by frame index. */
+export function parseCrcLog(text: string): Map<number, string> {
+  const crcs = new Map<number, string>();
+  for (const match of text.matchAll(/\[PocketJS\] crc frame=(\d+) hash=[0-9a-fA-F]+ crc=([0-9a-fA-F]{8})/g)) {
+    crcs.set(Number(match[1]), match[2].toLowerCase());
+  }
+  return crcs;
+}
+
+async function crc(output: string, frames: number, assertLog: string | undefined): Promise<boolean> {
+  const expected = await frameCrcs(output, frames);
+  const board = assertLog ? parseCrcLog(readFileSync(assertLog, "utf8")) : undefined;
+  let ok = true;
+  let compared = 0;
+  for (let frame = 0; frame < expected.length; frame++) {
+    const actual = board?.get(frame);
+    if (board && actual === undefined) {
+      console.log(`frame ${frame} crc=${expected[frame]} (not in log)`);
+      continue;
+    }
+    if (board) compared++;
+    const status = board ? (actual === expected[frame] ? " ok" : ` MISMATCH board=${actual}`) : "";
+    console.log(`frame ${frame} crc=${expected[frame]}${status}`);
+    if (board && actual !== expected[frame]) ok = false;
+  }
+  if (board) {
+    console.log(`${compared} frame(s) compared, ${ok ? "all equal" : "mismatches found"}`);
+    if (compared === 0) ok = false;
+  }
+  return ok;
+}
+
+export interface SelfCheckLine {
+  readonly frame: number;
+  readonly mismatchPermille: number;
+  readonly psnr: number;
+  readonly maxDelta: number;
+  readonly gradients: number;
+  readonly copies: number;
+  readonly vglite: number;
+}
+
+export function parseSelfCheckLog(text: string): SelfCheckLine[] {
+  const lines: SelfCheckLine[] = [];
+  const pattern =
+    /\[PocketJS\] selfcheck frame=(\d+) mismatch=\d+\/\d+ \((\d+)\.(\d)%\) psnr=(\d+)\.(\d) maxd=(\d+) crc_hw=[0-9a-f]+ crc_sw=[0-9a-f]+ gpu=(\d+)\/(\d+)\/(\d+)\/(\d+) sw=\d+ vg=(\d+)/g;
+  for (const match of text.matchAll(pattern)) {
+    lines.push({
+      frame: Number(match[1]),
+      mismatchPermille: Number(match[2]) * 10 + Number(match[3]),
+      psnr: Number(match[4]) + Number(match[5]) / 10,
+      maxDelta: Number(match[6]),
+      gradients: Number(match[8]),
+      copies: Number(match[10]),
+      vglite: Number(match[11]),
+    });
+  }
+  return lines;
+}
+
+/**
+ * Acceptance: frames whose hardware work is fills, A8 blends, and 1:1
+ * copies must match exactly; EPIC gradients and scaled blits allow
+ * psnr >= 45 dB, maxd <= 8, mismatch <= 0.5 %; VG Lite frames allow
+ * psnr >= 38 dB and mismatch <= 3 %; below 35 dB is a failure everywhere.
+ */
+export function judgeSelfCheck(line: SelfCheckLine): string | undefined {
+  if (line.psnr < 35) return `psnr ${line.psnr} < 35`;
+  if (line.vglite > 0) {
+    if (line.psnr < 38) return `VG Lite psnr ${line.psnr} < 38`;
+    if (line.mismatchPermille > 30) return `VG Lite mismatch ${line.mismatchPermille / 10}% > 3%`;
+    return undefined;
+  }
+  if (line.gradients > 0 || line.copies > 0) {
+    if (line.psnr < 45) return `EPIC psnr ${line.psnr} < 45`;
+    if (line.maxDelta > 8) return `EPIC maxd ${line.maxDelta} > 8`;
+    if (line.mismatchPermille > 5) return `EPIC mismatch ${line.mismatchPermille / 10}% > 0.5%`;
+    return undefined;
+  }
+  if (line.mismatchPermille > 0 || line.maxDelta > 0) return "exact path differs from the software rasterizer";
+  return undefined;
+}
+
+function selfcheck(logPath: string): boolean {
+  const lines = parseSelfCheckLog(readFileSync(logPath, "utf8"));
+  if (lines.length === 0) {
+    console.log(`${logPath}: no selfcheck lines (build with POCKETJS_SELF_CHECK)`);
+    return false;
+  }
+  let ok = true;
+  for (const line of lines) {
+    const verdict = judgeSelfCheck(line);
+    console.log(`frame ${line.frame}: psnr=${line.psnr} maxd=${line.maxDelta} mismatch=${line.mismatchPermille / 10}% vg=${line.vglite} ${verdict ? `FAIL (${verdict})` : "ok"}`);
+    if (verdict) ok = false;
+  }
+  return ok;
+}
+
 function flag(args: readonly string[], name: string): string | undefined {
   const prefix = `--${name}=`;
   return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
@@ -348,6 +481,14 @@ if (import.meta.main) {
       break;
     case "verify":
       verify();
+      break;
+    case "crc":
+      if (!positional[0]) throw new Error("usage: bun tools/sifli.ts crc <output> [--frames=N] [--assert=<log>]");
+      if (!(await crc(positional[0], Number(flag(rest, "frames") ?? "60"), flag(rest, "assert")))) process.exit(1);
+      break;
+    case "selfcheck":
+      if (!positional[0]) throw new Error("usage: bun tools/sifli.ts selfcheck <serial log>");
+      if (!selfcheck(resolve(positional[0]))) process.exit(1);
       break;
     default:
       console.error(`usage: bun tools/sifli.ts <assets|bake|vendor|build|audit|verify> ... (${basename(import.meta.path)})`);

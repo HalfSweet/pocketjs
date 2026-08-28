@@ -60,10 +60,14 @@ typedef struct
     uint32_t transactions;   /* hardware transactions started */
     uint32_t rejected;       /* commands the queue refused */
     uint32_t engine_switches; /* EPIC <-> VG Lite drains */
+    uint32_t vglite_commands; /* commands VG Lite ran */
 } PocketjsGpuProfile;
 
 /* Read and reset the counters (NULL just resets). */
 void pocketjs_gpu_profile_take(PocketjsGpuProfile *out);
+
+/* Read the counters without resetting them. */
+void pocketjs_gpu_profile_peek(PocketjsGpuProfile *out);
 
 #ifdef __cplusplus
 }

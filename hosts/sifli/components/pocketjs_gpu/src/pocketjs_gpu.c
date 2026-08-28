@@ -311,6 +311,11 @@ void pocketjs_gpu_profile_take(PocketjsGpuProfile *out)
     memset(&g_profile, 0, sizeof(g_profile));
 }
 
+void pocketjs_gpu_profile_peek(PocketjsGpuProfile *out)
+{
+    *out = g_profile;
+}
+
 /* ---- renderer API ----------------------------------------------------- */
 
 int pocketjs_gpu_caps(PocketjsGpuCaps *out)
@@ -394,8 +399,14 @@ static int run_blit(const PocketjsGpuCmd *cmd, bool quad)
 #if POCKETJS_GPU_HAS_VGLITE
     if (g_vglite && pocketjs_gpu_vglite_ready())
     {
+        int result;
         switch_engine(ENGINE_VGLITE);
-        return pocketjs_gpu_vglite_blit(cmd, quad);
+        result = pocketjs_gpu_vglite_blit(cmd, quad);
+        if (result == POCKETJS_GPU_EXEC_OK)
+        {
+            ++g_profile.vglite_commands;
+        }
+        return result;
     }
 #endif
     return POCKETJS_GPU_EXEC_REJECT;

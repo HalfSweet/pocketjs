@@ -249,6 +249,39 @@ With `POCKETJS_PROFILE`, every `POCKETJS_TICK_HZ` presented frames print:
   of the last frame; a static launcher screen reports `sw=0/0`.
 - `mem` is QuickJS bytes in use and the free bytes of the shared heap.
 
+## Self-check and frame CRC
+
+`POCKETJS_SELF_CHECK` renders every `POCKETJS_SELF_CHECK_INTERVAL`-th frame
+a second time with `pocket_core_render_rgb565_software` into a scratch
+buffer in PSRAM2 (one more framebuffer, 1,228,800 bytes) and compares it
+with the hardware frame just rendered:
+
+```
+[PocketJS] selfcheck frame=<n> mismatch=<px>/<total> (<p>%) psnr=<dB> maxd=<0..255> crc_hw=<crc32> crc_sw=<crc32> gpu=<fills>/<gradients>/<blends>/<copies> sw=<ops> vg=<n>
+[PocketJS] selfcheck diff x=<x> y=<y> hw=<rgb565> sw=<rgb565>      (up to 16)
+```
+
+`maxd` is the largest 8-bit channel difference after expanding RGB565;
+PSNR is computed over all three channels of every pixel (999.0 for
+identical frames); `vg` is the number of commands VG Lite ran since the
+last profiler reset. `bun tools/sifli.ts selfcheck <log>` applies the
+thresholds: a frame whose hardware work is fills, A8 blends, and 1:1
+copies must match **exactly**; EPIC gradients and scaled blits allow
+**PSNR ≥ 45 dB, maxd ≤ 8, mismatch ≤ 0.5 %** (1/1024 scale rounding and
+2×2 corner interpolation); VG Lite frames allow **PSNR ≥ 38 dB and
+mismatch ≤ 3 %**; anything below 35 dB fails.
+
+`POCKETJS_FRAME_CRC` prints `[PocketJS] crc frame=<n> hash=<draw hash>
+crc=<crc32>` for every presented frame (IEEE CRC-32 over the little-endian
+RGB565 bytes; one uncached read of the framebuffer per frame). `bun
+tools/sifli.ts crc <output> --frames N --assert <log>` boots the same guest
+in the simulator at 512×300, density 2, scale 2 with no input, renders
+through `ui_render_rgb565_scaled` (the core's RGB565 rasterizer, byte for
+byte the device's software path), and compares frame by frame. With
+`POCKETJS_FORCE_SOFTWARE` the sequence must be equal; with the hardware
+path only frames the self-check classifies as exact are expected to
+match.
+
 ## Verification boundary
 
 Before a commit:
@@ -265,7 +298,9 @@ Before a commit:
 
 On the board: the profiler at 60 Hz with `rejected=0`, `sw=0/0` on a
 static screen, a heap that returns to its baseline after a guest switch,
-and no tearing over a continuous animation. Hardware sampling is not
+no tearing over a continuous animation, `bun tools/sifli.ts selfcheck`
+passing on a self-check build, and `bun tools/sifli.ts crc --assert`
+equal for 600 frames on a `POCKETJS_FORCE_SOFTWARE` build. Hardware sampling is not
 byte-identical to the core rasterizer for scaled blits and gradients
 (1/1024 scale rounding, 2×2 corner interpolation); fills, A8 blends, 1:1
 copies, and every CPU fallback are exact.

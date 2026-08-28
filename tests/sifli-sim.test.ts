@@ -12,6 +12,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { BTN } from "../contracts/spec/spec.ts";
 import { bootWorld, fnv1a } from "../hosts/sim/sim.ts";
+import { crc32, frameCrcs, judgeSelfCheck, parseCrcLog, parseSelfCheckLog } from "../tools/sifli.ts";
 
 const VIEWPORT = { width: 512, height: 300, rasterDensity: 2, renderScale: 2 };
 const FRAME_BYTES = 1024 * 600 * 4;
@@ -53,6 +54,32 @@ describe("sifli sim", () => {
     const second = await settle("hero-main");
     expect(second.hashes).toEqual(first.hashes);
   }, 60000);
+
+  test("crc32 matches the IEEE check vector the firmware computes", () => {
+    expect(crc32(new TextEncoder().encode("123456789")).toString(16)).toBe("cbf43926");
+  });
+
+  test("the RGB565 frame CRC sequence is deterministic and parses back from a board log", async () => {
+    const first = await frameCrcs("hero-main", 4);
+    const second = await frameCrcs("hero-main", 4);
+    expect(second).toEqual(first);
+    const log = first.map((crc, frame) => `[PocketJS] crc frame=${frame} hash=0123456789abcdef crc=${crc}`).join("\n");
+    expect([...parseCrcLog(log).values()]).toEqual(first);
+  }, 60000);
+
+  test("self-check thresholds", () => {
+    const [exact, gradient, vglite] = parseSelfCheckLog([
+      "[PocketJS] selfcheck frame=60 mismatch=0/614400 (0.0%) psnr=999.0 maxd=0 crc_hw=deadbeef crc_sw=deadbeef gpu=12/0/3/0 sw=0 vg=0",
+      "[PocketJS] selfcheck frame=120 mismatch=1200/614400 (0.2%) psnr=47.3 maxd=6 crc_hw=00000001 crc_sw=00000002 gpu=12/2/3/1 sw=0 vg=0",
+      "[PocketJS] selfcheck frame=180 mismatch=9000/614400 (1.5%) psnr=39.1 maxd=40 crc_hw=00000003 crc_sw=00000004 gpu=12/0/3/0 sw=0 vg=2",
+    ].join("\n"));
+    expect(judgeSelfCheck(exact)).toBeUndefined();
+    expect(judgeSelfCheck(gradient)).toBeUndefined();
+    expect(judgeSelfCheck(vglite)).toBeUndefined();
+    expect(judgeSelfCheck({ ...exact, mismatchPermille: 1, maxDelta: 8 })).toBeDefined();
+    expect(judgeSelfCheck({ ...gradient, psnr: 44 })).toBeDefined();
+    expect(judgeSelfCheck({ ...vglite, psnr: 34 })).toBeDefined();
+  });
 });
 
 interface ProjectManifest {

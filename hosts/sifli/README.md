@@ -228,6 +228,18 @@ board layout reserves 4 MiB.
   queue and HAL EPIC entry points linked, `EPIC_IRQHandler` owned by the
   component, no `drv_epic` symbols.
 - `bun tests/contract.ts` — `pocket_spec.h` matches `contracts/spec/spec.ts`.
+- `bun tools/sifli.ts selfcheck <serial log>` — a board built with
+  `POCKETJS_SELF_CHECK` renders every 60th frame twice, on the hardware
+  and with the core software rasterizer, and prints the mismatch ratio,
+  PSNR, largest channel delta, and both CRC32s; the tool applies the
+  acceptance thresholds (exact for fills, A8 blends, and 1:1 copies;
+  ≥ 45 dB for EPIC gradients and scaled blits; ≥ 38 dB for VG Lite).
+- `bun tools/sifli.ts crc <output> --frames N --assert <serial log>` — a
+  board built with `POCKETJS_FRAME_CRC` prints a CRC32 per presented
+  frame; the tool renders the same guest through the simulator's RGB565
+  path (`ui_render_rgb565_scaled`) and compares the sequence. Run it with
+  `POCKETJS_FORCE_SOFTWARE` first to validate the host, heap, MPU, LCD,
+  and input chain, then with the hardware path.
 
 On the board the serial profiler prints three lines per second; the fields
 are documented in [`docs/PORTING.md`](docs/PORTING.md).
@@ -258,3 +270,6 @@ are documented in [`docs/PORTING.md`](docs/PORTING.md).
 | `POCKETJS_INPUT_TOUCH` | y | Forward touch contacts (needs `BSP_USING_TOUCHD`) |
 | `POCKETJS_NATIVE_TEXTURE_STAGING` | y | Copy `.epic` blobs into the heap at mount |
 | `POCKETJS_PROFILE` | y | Serial statistics once per second |
+| `POCKETJS_FORCE_SOFTWARE` | n | Full software render every frame (bring-up) |
+| `POCKETJS_SELF_CHECK` / `_INTERVAL` | n / 60 | Compare hardware frames against the software rasterizer |
+| `POCKETJS_FRAME_CRC` | n | Print a CRC32 of every presented frame |
