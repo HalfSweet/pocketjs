@@ -20,6 +20,9 @@ const CAP_A8_BLEND: u32 = 1 << 2;
 const CAP_GRADIENT: u32 = 1 << 3;
 const CAP_COPY_PSM5650: u32 = 1 << 4;
 const CAP_DIRECT_CPU_WRITES: u32 = 1 << 5;
+const CAP_BLIT_NATIVE: u32 = 1 << 6;
+const CAP_BLIT_QUAD_NATIVE: u32 = 1 << 7;
+const CAP_BLIT_MODULATE: u32 = 1 << 8;
 
 const FORMAT_PSM5650: u32 = 1 << 0;
 const FORMAT_RGBA8888: u32 = 1 << 1;
@@ -192,6 +195,9 @@ fn capabilities(raw: &RawCaps) -> Capabilities {
         copy_psm5650: raw.flags & CAP_COPY_PSM5650 != 0,
         blit: formats(raw.blit_formats),
         blit_quad: formats(raw.blit_quad_formats),
+        blit_native: raw.flags & CAP_BLIT_NATIVE != 0,
+        blit_quad_native: raw.flags & CAP_BLIT_QUAD_NATIVE != 0,
+        blit_modulate: raw.flags & CAP_BLIT_MODULATE != 0,
         coordinate_limit: raw.coordinate_limit,
         direct_cpu_writes: raw.flags & CAP_DIRECT_CPU_WRITES != 0,
         mask_tile_bytes: raw.mask_tile_bytes,

@@ -46,6 +46,10 @@ pub struct MockGpu {
     pub last_quad: [Point; 4],
     pub last_quad_clip: Rect,
     pub last_corners: Option<Corners>,
+    /// Core texture handles the mock pretends to hold native copies of,
+    /// with the id it reports for each.
+    pub native: Vec<(i32, u32)>,
+    pub last_native: Option<u32>,
 }
 
 impl MockGpu {
@@ -115,6 +119,14 @@ impl Submit for MockGpu {
 }
 
 impl Frame for MockFrame<'_> {
+    fn native_texture(&mut self, handle: i32, _revision: u64) -> Option<u32> {
+        self.gpu
+            .native
+            .iter()
+            .find(|(registered, _)| *registered == handle)
+            .map(|(_, id)| *id)
+    }
+
     fn submit(&mut self, cmds: &[Cmd<'_>]) -> Result<(), SubmitError> {
         for (index, cmd) in cmds.iter().enumerate() {
             if !self.execute(cmd) {
@@ -269,6 +281,10 @@ impl MockFrame<'_> {
                 self.gpu.last_format = Some(src.format());
                 self.gpu.last_modulate = modulate;
                 self.gpu.last_filter = filter;
+                self.gpu.last_native = match src {
+                    TexSrc::Native { id } => Some(id),
+                    _ => None,
+                };
                 let write = dst.intersect(clip);
                 for y in write.y..write.y + write.h {
                     let dy = (y - dst.y) as f32 + 0.5;
@@ -307,6 +323,10 @@ impl MockFrame<'_> {
                 self.gpu.last_format = Some(src.format());
                 self.gpu.last_modulate = modulate;
                 self.gpu.last_filter = filter;
+                self.gpu.last_native = match src {
+                    TexSrc::Native { id } => Some(id),
+                    _ => None,
+                };
                 let [tl, bl, br, tr] = quad;
                 let tex = |uv: (f32, f32)| {
                     (
@@ -740,6 +760,10 @@ impl DeferredFrame<'_> {
 }
 
 impl Frame for DeferredFrame<'_> {
+    fn native_texture(&mut self, handle: i32, revision: u64) -> Option<u32> {
+        self.inner.native_texture(handle, revision)
+    }
+
     fn submit(&mut self, cmds: &[Cmd<'_>]) -> Result<(), SubmitError> {
         self.queue.extend(cmds.iter().map(OwnedCmd::from));
         Ok(())

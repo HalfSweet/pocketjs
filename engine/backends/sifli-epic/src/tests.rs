@@ -22,6 +22,9 @@ fn caps() -> Capabilities {
         copy_psm5650: true,
         blit: Formats::NONE,
         blit_quad: Formats::NONE,
+        blit_native: false,
+        blit_quad_native: false,
+        blit_modulate: true,
         coordinate_limit: u32::MAX,
         direct_cpu_writes: true,
         mask_tile_bytes: 0,
@@ -1741,4 +1744,139 @@ fn strips_assemble_into_the_full_render_at_every_scale() {
             }
         }
     }
+}
+
+// ---- coordinate limits and native textures ----------------------------------------
+
+#[test]
+fn fills_split_at_the_coordinate_limit_and_gradients_beyond_it_use_the_cpu() {
+    let mut ui = Ui::new();
+    ui.set_viewport(24.0, 8.0);
+    let words = vec![
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(24, 8),
+        0xff20_1008,
+        spec::draw_op::RECT,
+        xy_word(2, 1),
+        wh_word(20, 6),
+        0x8000_00ff,
+        spec::draw_op::GRAD_RECT,
+        xy_word(1, 1),
+        wh_word(12, 3),
+        0xff00_0000,
+        0xffff_ffff,
+        spec::GradDir::ToRight as u32,
+    ];
+    let mut output = vec![0u16; 24 * 8];
+    let mut epic = MockGpu::new(Capabilities {
+        coordinate_limit: 10,
+        fill_alpha: true,
+        ..caps()
+    });
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 24, 8, &mut epic)
+        .unwrap();
+    // The 24-wide clear and background each need three pieces; the 20-wide
+    // translucent rect needs two.
+    assert_eq!(stats.epic_fills, 3 + 3 + 2);
+    assert!(epic.last_fill_rect.w <= 10 && epic.last_fill_rect.h <= 10);
+    assert_eq!(stats.epic_gradients, 0);
+    assert_eq!(stats.software_ops, 1, "12-wide gradient exceeds the limit");
+    assert_eq!(output, full_reference(&ui, &words, 24, 8));
+
+    let mut scaled = vec![0u16; 48 * 16];
+    let mut renderer = Renderer::new(RendererConfig { scale: 2 }).unwrap();
+    let mut epic = MockGpu::new(Capabilities {
+        coordinate_limit: 10,
+        fill_alpha: true,
+        ..caps()
+    });
+    renderer
+        .render(&ui, &words, &mut scaled, 48, 16, &mut epic)
+        .unwrap();
+    let mut expected = vec![0u16; 48 * 16];
+    pocketjs_core::raster::render_scaled_rgb565(&ui, &words, &mut expected, 2);
+    assert!(epic.last_fill_rect.w <= 10 && epic.last_fill_rect.h <= 10);
+    assert_eq!(scaled, expected);
+}
+
+#[test]
+fn a8_bands_respect_the_coordinate_limit() {
+    let mut ui = Ui::new();
+    ui.set_viewport(30.0, 6.0);
+    let words = [
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(30, 6),
+        0x8000_ff00,
+    ];
+    let mut output = vec![0u16; 30 * 6];
+    let mut epic = MockGpu::new(Capabilities {
+        coordinate_limit: 8,
+        ..caps()
+    });
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 30, 6, &mut epic)
+        .unwrap();
+    assert_eq!(stats.epic_blends, 4, "30 columns in bands of at most 8");
+    assert!(epic.last_blend_rect.w <= 8);
+    assert_eq!(output, full_reference(&ui, &words, 30, 6));
+}
+
+#[test]
+fn native_textures_are_blitted_by_id_when_the_executor_holds_a_copy() {
+    let mut ui = Ui::new();
+    ui.set_viewport(8.0, 8.0);
+    let texture = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let handle = ui.upload_texture(&texture, 2, 2, spec::psm::PSM_8888);
+    let words = [
+        spec::draw_op::TEX_QUAD,
+        handle as u32,
+        xy_word(1, 1),
+        wh_word(4, 4),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0x80ff_ffff,
+    ];
+    let native_only = Capabilities {
+        blit_native: true,
+        ..caps()
+    };
+
+    // Without a registered copy the portable RGBA texture stays on the CPU.
+    let mut output = vec![0u16; 64];
+    let mut epic = MockGpu::new(native_only);
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 8, 8, &mut epic)
+        .unwrap();
+    assert_eq!(stats.epic_copies, 0);
+    assert_eq!(stats.software_ops, 1);
+
+    // With one, the blit references the executor's id.
+    let mut epic = MockGpu::new(native_only);
+    epic.native.push((handle, 7));
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 8, 8, &mut epic)
+        .unwrap();
+    assert_eq!(stats.epic_copies, 1);
+    assert_eq!(stats.software_ops, 0);
+    assert_eq!(epic.last_native, Some(7));
+    assert_eq!(epic.last_modulate, 0x80ff_ffff);
+
+    // A tinted blit needs blit_modulate even for native copies.
+    let mut tinted = words;
+    tinted[8] = 0x80ff_80ff;
+    let mut epic = MockGpu::new(Capabilities {
+        blit_modulate: false,
+        ..native_only
+    });
+    epic.native.push((handle, 7));
+    let stats = renderer()
+        .render(&ui, &tinted, &mut output, 8, 8, &mut epic)
+        .unwrap();
+    assert_eq!(stats.epic_copies, 0);
+    assert_eq!(stats.software_ops, 1);
 }

@@ -90,6 +90,15 @@ pub struct Capabilities {
     /// Four-point (affine or projective) texture blits for the listed
     /// formats, including solid-color quads.
     pub blit_quad: Formats,
+    /// Axis-aligned blits of textures the executor registered natively
+    /// (`Frame::native_texture`), whatever their portable format.
+    pub blit_native: bool,
+    /// Four-point blits of natively registered textures.
+    pub blit_quad_native: bool,
+    /// Blits may multiply texels by the DrawList's RGB modulate color. When
+    /// false only the modulate alpha is honoured and tinted blits stay on
+    /// the CPU.
+    pub blit_modulate: bool,
     /// Largest transaction extent in physical pixels per axis (EPIC
     /// coordinate registers); `u32::MAX` when unlimited.
     pub coordinate_limit: u32,
@@ -117,6 +126,9 @@ impl Capabilities {
         copy_psm5650: false,
         blit: Formats::NONE,
         blit_quad: Formats::NONE,
+        blit_native: false,
+        blit_quad_native: false,
+        blit_modulate: false,
         coordinate_limit: u32::MAX,
         direct_cpu_writes: true,
         mask_tile_bytes: 0,
@@ -137,6 +149,9 @@ impl Capabilities {
         copy_psm5650: false,
         blit: Formats::NONE,
         blit_quad: Formats::NONE,
+        blit_native: true,
+        blit_quad_native: false,
+        blit_modulate: false,
         coordinate_limit: 1010,
         direct_cpu_writes: false,
         mask_tile_bytes: 64 * 1024,
@@ -154,6 +169,8 @@ impl Capabilities {
     pub const SF32LB58X_VGLITE: Capabilities = Capabilities {
         blit: Formats::ALL,
         blit_quad: Formats::ALL,
+        blit_quad_native: true,
+        blit_modulate: true,
         ..Capabilities::SF32LB58X
     };
 

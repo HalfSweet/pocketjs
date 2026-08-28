@@ -148,6 +148,7 @@ impl Context<'_> {
             }
             let scale = self.scale;
             let capacity = self.caps.cpu_tile_pixels;
+            let limit = self.caps.coordinate_limit;
             let mut visit = |band: Clip| -> Option<()> {
                 let local = self.local(band);
                 let tile = TileId(self.tile_index);
@@ -177,7 +178,7 @@ impl Context<'_> {
                 self.stats.cpu_tile_pixels += local.area();
                 Some(())
             };
-            for_each_band(bounds, scale, Some(capacity), &mut visit)?;
+            for_each_band(bounds, scale, Some(capacity), limit, &mut visit)?;
         }
         self.fallback.clear();
         self.cpu_bounds = Clip::empty();
@@ -204,15 +205,7 @@ impl Context<'_> {
             return Some(());
         }
         if self.caps.fill_opaque && physical.area() >= self.caps.thresholds.min_fill {
-            self.submit(
-                ui,
-                frame,
-                Cmd::Fill {
-                    dst: physical,
-                    color: [0, 0, 0],
-                },
-            )?;
-            self.stats.epic_fills += 1;
+            self.fill(ui, frame, region, [0, 0, 0], 255)?;
         } else {
             let clear = [
                 spec::draw_op::RECT,
@@ -381,17 +374,7 @@ impl Context<'_> {
             self.caps.fill_alpha
         };
         if hardware_fill && rect.area() >= threshold {
-            let cmd = if opaque {
-                Cmd::Fill { dst: rect, color: rgb }
-            } else {
-                Cmd::FillAlpha {
-                    dst: rect,
-                    color: rgb,
-                    alpha: a as u8,
-                }
-            };
-            self.submit(ui, frame, cmd)?;
-            self.stats.epic_fills += 1;
+            self.fill(ui, frame, logical, rgb, a as u8)?;
             return Some(());
         }
         if !opaque && self.caps.a8_blend && rect.area() >= self.caps.thresholds.min_blend {
@@ -415,6 +398,42 @@ impl Context<'_> {
         Some(())
     }
 
+    /// Fill the logical `bounds`, split into pieces the executor's
+    /// coordinate registers can address. Fills are idempotent, so a later
+    /// software retry may overwrite them.
+    fn fill<F: Frame>(
+        &mut self,
+        ui: &Ui,
+        frame: &mut F,
+        bounds: Clip,
+        color: [u8; 3],
+        alpha: u8,
+    ) -> Option<()> {
+        let limit = self.caps.coordinate_limit;
+        let scale = self.scale;
+        let mut visit = |piece: Clip| -> Option<()> {
+            let dst = self.local(piece);
+            if dst.is_empty() {
+                return Some(());
+            }
+            let cmd = if alpha == 255 {
+                Cmd::Fill { dst, color }
+            } else {
+                Cmd::FillAlpha { dst, color, alpha }
+            };
+            self.submit(ui, frame, cmd)?;
+            self.stats.epic_fills += 1;
+            Some(())
+        };
+        for_each_band(bounds, scale, None, limit, &mut visit)
+    }
+
+    /// True when a physical rectangle fits the executor's coordinate
+    /// registers.
+    fn addressable(&self, rect: Rect) -> bool {
+        rect.w <= self.caps.coordinate_limit && rect.h <= self.caps.coordinate_limit
+    }
+
     /// Blend one A8 run covering the logical `bounds`, splitting it into row
     /// bands that fit the executor's planes. `compose(plane, stride, window,
     /// band)` fills the plane window for one band (`window` is the band in
@@ -433,6 +452,7 @@ impl Context<'_> {
         }
         let capacity = (self.caps.mask_tile_bytes != 0).then_some(self.caps.mask_tile_bytes);
         let scale = self.scale;
+        let limit = self.caps.coordinate_limit;
         let mut bands = 0u32;
         let mut visit = |band: Clip| -> Option<()> {
             let window = self.local(band);
@@ -461,7 +481,7 @@ impl Context<'_> {
             bands += 1;
             Some(())
         };
-        for_each_band(bounds, scale, capacity, &mut visit)?;
+        for_each_band(bounds, scale, capacity, limit, &mut visit)?;
         if bands > 1 {
             self.stats.mask_bands += bands;
         }
@@ -521,7 +541,10 @@ impl Context<'_> {
             _ => return Some(false),
         };
         let rect = self.local(logical);
-        if rect.is_empty() || rect.area() < self.caps.thresholds.min_gradient {
+        if rect.is_empty()
+            || rect.area() < self.caps.thresholds.min_gradient
+            || !self.addressable(rect)
+        {
             return Some(false);
         }
         self.submit(ui, frame, Cmd::Gradient { dst: rect, corners })?;
@@ -637,13 +660,13 @@ impl Context<'_> {
         if destination.is_empty() {
             return Some(true);
         }
+        if destination.area() < self.caps.thresholds.min_blit || !self.addressable(destination) {
+            return Some(false);
+        }
 
         // Opaque PSM_5650 copies: 1:1 (with mirroring) or hardware-scaled
         // when the texture asks for linear sampling.
-        if view.psm == spec::psm::PSM_5650
-            && self.caps.copy_psm5650
-            && destination.area() >= self.caps.thresholds.min_blit
-        {
+        if view.psm == spec::psm::PSM_5650 && self.caps.copy_psm5650 {
             // A fractional texel edge on a PSM_5650 quad is a sampling
             // transform the copy engine cannot express; keep the whole op on
             // the CPU rather than re-deriving a different phase.
@@ -680,12 +703,9 @@ impl Context<'_> {
         if alpha == 0 {
             return Some(true);
         }
-        let Some(format) = pixel_format(&view) else {
+        let Some(src) = self.blit_source(ui, frame, handle, &view, modulate, false) else {
             return Some(false);
         };
-        if !self.caps.blits(format) || destination.area() < self.caps.thresholds.min_blit {
-            return Some(false);
-        }
         let Some((source_rect, mirror_x, mirror_y)) = texture_source_rect(&view, op, logical)
         else {
             return Some(false);
@@ -694,7 +714,7 @@ impl Context<'_> {
             ui,
             frame,
             Cmd::Blit {
-                src: portable(&view, format),
+                src,
                 src_rect: source_rect,
                 dst: destination,
                 clip: destination,
@@ -708,6 +728,41 @@ impl Context<'_> {
         )?;
         self.stats.epic_copies += 1;
         Some(true)
+    }
+
+    /// The texture source an executor can blit for `handle`: a native copy
+    /// it registered, else the portable bytes when it reads that format.
+    /// `None` when neither applies or the modulate tint is unsupported.
+    fn blit_source<'a, F: Frame>(
+        &self,
+        ui: &Ui,
+        frame: &mut F,
+        handle: i32,
+        view: &TexView<'a>,
+        modulate: u32,
+        quad: bool,
+    ) -> Option<TexSrc<'a>> {
+        if modulate & 0x00ff_ffff != 0x00ff_ffff && !self.caps.blit_modulate {
+            return None;
+        }
+        let native_ok = if quad {
+            self.caps.blit_quad_native
+        } else {
+            self.caps.blit_native
+        };
+        if native_ok {
+            let revision = ui.texture_revision(handle).unwrap_or(0);
+            if let Some(id) = frame.native_texture(handle, revision) {
+                return Some(TexSrc::Native { id });
+            }
+        }
+        let format = pixel_format(view)?;
+        let portable_ok = if quad {
+            self.caps.blits_quad(format)
+        } else {
+            self.caps.blits(format)
+        };
+        portable_ok.then(|| portable(view, format))
     }
 
     fn tri_pair<F: Frame>(
@@ -730,29 +785,18 @@ impl Context<'_> {
         if axis_aligned {
             // Z-only 2.5D projection and scaleX keep a solid card face axis
             // aligned; the native rectangle fill covers it without a texture.
-            let cmd = if a == 255 {
-                if !self.caps.fill_opaque {
-                    return Some(false);
-                }
-                Cmd::Fill {
-                    dst: destination_clip,
-                    color: [r as u8, g as u8, b as u8],
-                }
+            let supported = if a == 255 {
+                self.caps.fill_opaque
             } else {
-                if !self.caps.fill_alpha {
-                    return Some(false);
-                }
-                Cmd::FillAlpha {
-                    dst: destination_clip,
-                    color: [r as u8, g as u8, b as u8],
-                    alpha: a as u8,
-                }
+                self.caps.fill_alpha
             };
-            self.submit(ui, frame, cmd)?;
-            self.stats.epic_fills += 1;
+            if !supported {
+                return Some(false);
+            }
+            self.fill(ui, frame, bounds, [r as u8, g as u8, b as u8], a as u8)?;
             return Some(true);
         }
-        if !self.caps.blit_quad.rgba8888 {
+        if !self.caps.blit_quad.rgba8888 || !self.addressable(destination_clip) {
             return Some(false);
         }
         let physical_quad = self.physical_quad(quad);
@@ -778,6 +822,7 @@ impl Context<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn tex_tri_pair<F: Frame>(
         &mut self,
         ui: &Ui,
@@ -789,7 +834,9 @@ impl Context<'_> {
         bounds: Clip,
     ) -> Option<bool> {
         let destination_clip = self.local(bounds);
-        if destination_clip.area() < self.caps.thresholds.min_blit {
+        if destination_clip.area() < self.caps.thresholds.min_blit
+            || !self.addressable(destination_clip)
+        {
             return Some(false);
         }
         let (_, _, _, alpha) = channels(modulate);
@@ -799,17 +846,14 @@ impl Context<'_> {
         let Some(view) = ui.texture(handle) else {
             return Some(false);
         };
-        let Some(format) = pixel_format(&view) else {
-            return Some(false);
-        };
         let physical_quad = self.physical_quad(quad);
         if let Some(destination) = axis_aligned_texture_rect(physical_quad) {
-            if self.caps.blits(format) {
+            if let Some(src) = self.blit_source(ui, frame, handle, &view, modulate, false) {
                 self.submit(
                     ui,
                     frame,
                     Cmd::Blit {
-                        src: portable(&view, format),
+                        src,
                         src_rect: source_rect,
                         dst: destination,
                         clip: destination_clip,
@@ -822,14 +866,14 @@ impl Context<'_> {
                 return Some(true);
             }
         }
-        if !self.caps.blits_quad(format) {
+        let Some(src) = self.blit_source(ui, frame, handle, &view, modulate, true) else {
             return Some(false);
-        }
+        };
         self.submit(
             ui,
             frame,
             Cmd::BlitQuad {
-                src: portable(&view, format),
+                src,
                 src_rect: source_rect,
                 quad: physical_quad,
                 clip: destination_clip,
@@ -858,25 +902,33 @@ fn for_each_band(
     bounds: Clip,
     scale: u32,
     capacity: Option<u32>,
+    extent_limit: u32,
     mut visit: impl FnMut(Clip) -> Option<()>,
 ) -> Option<()> {
     if bounds.is_empty() {
         return Some(());
     }
-    let Some(capacity) = capacity else {
-        return visit(bounds);
+    let width = (bounds.x1 - bounds.x0) as u32;
+    let height = (bounds.y1 - bounds.y0) as u32;
+    // Logical pixels per axis that keep one band under the executor's
+    // coordinate registers.
+    let axis_max = (extent_limit / scale).max(1);
+    let capacity = match capacity {
+        Some(capacity) => capacity,
+        None if width <= axis_max && height <= axis_max => return visit(bounds),
+        None => u32::MAX,
     };
     let pixel = scale * scale;
     if pixel == 0 || capacity < pixel {
         return None;
     }
-    let width = (bounds.x1 - bounds.x0) as u32;
-    let height = (bounds.y1 - bounds.y0) as u32;
     let (cols, rows) = if width * pixel <= capacity {
         (width, (capacity / (width * pixel)).clamp(1, height))
     } else {
         ((capacity / pixel).clamp(1, width), 1)
     };
+    let cols = cols.min(axis_max);
+    let rows = rows.min(axis_max);
     let mut y = bounds.y0;
     while y < bounds.y1 {
         let y1 = (y + rows as i32).min(bounds.y1);

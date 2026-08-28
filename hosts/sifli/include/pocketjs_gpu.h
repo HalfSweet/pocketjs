@@ -29,6 +29,9 @@ extern "C"
 #define POCKETJS_GPU_CAP_GRADIENT          (1u << 3)
 #define POCKETJS_GPU_CAP_COPY_PSM5650      (1u << 4)
 #define POCKETJS_GPU_CAP_DIRECT_CPU_WRITES (1u << 5)
+#define POCKETJS_GPU_CAP_BLIT_NATIVE       (1u << 6) /* axis-aligned blits of registered textures */
+#define POCKETJS_GPU_CAP_BLIT_QUAD_NATIVE  (1u << 7) /* four-point blits of registered textures */
+#define POCKETJS_GPU_CAP_BLIT_MODULATE     (1u << 8) /* blits honour the RGB modulate color */
 
 /* Texture format bits (PocketJS portable layouts). */
 #define POCKETJS_GPU_FORMAT_PSM5650  (1u << 0) /* RGB565, red in the low bits */
