@@ -548,10 +548,10 @@ function buildNativeLibrary(bundle: GuestBundle, quickJsLibrary: string, coreLib
     `-DPOCKETJS_TARGET_ID="${bundle.inputs.target}"`,
     `-DPOCKETJS_HOST_ABI=${bundle.inputs.hostAbi}`,
     `-DPOCKET_RASTER_DENSITY=${bundle.inputs.viewport.rasterDensity}`,
-    `-I${join(repository, "hosts/iphone2g")}`,
+    `-I${join(repository, "hosts/soft")}`,
     `-I${quickJs.source}`,
     "-c",
-    join(repository, "hosts/iphone2g/pocket_runtime.c"),
+    join(repository, "hosts/soft/pocket_runtime.c"),
     "-o",
     portableRuntime,
   ]);
@@ -560,7 +560,7 @@ function buildNativeLibrary(bundle: GuestBundle, quickJsLibrary: string, coreLib
     ...cFlags,
     `-DPOCKET_LOGICAL_WIDTH=${bundle.inputs.viewport.logical[0]}`,
     `-DPOCKET_LOGICAL_HEIGHT=${bundle.inputs.viewport.logical[1]}`,
-    `-I${join(repository, "hosts/iphone2g")}`,
+    `-I${join(repository, "hosts/soft")}`,
     "-c",
     join(appHost, "jni/runtime.c"),
     "-o",
@@ -570,9 +570,9 @@ function buildNativeLibrary(bundle: GuestBundle, quickJsLibrary: string, coreLib
     const object = join(objects, `${name}.o`);
     mustRun(clang, [
       ...cFlags,
-      `-I${join(repository, "hosts/iphone2g")}`,
+      `-I${join(repository, "hosts/soft")}`,
       "-c",
-      join(repository, `hosts/iphone2g/${name}.c`),
+      join(repository, `hosts/soft/${name}.c`),
       "-o",
       object,
     ]);

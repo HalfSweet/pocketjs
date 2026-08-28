@@ -689,7 +689,7 @@ async function build(): Promise<void> {
     `-DPOCKET_BUILD_ID=\"${BUILD_ID_PLACEHOLDER}\"`,
     "-Wno-cast-function-type-mismatch",
   ]);
-  compile(join(REPOSITORY, "hosts/iphone2g/pocket_runtime.c"), pocketRuntimeObject, [
+  compile(join(REPOSITORY, "hosts/soft/pocket_runtime.c"), pocketRuntimeObject, [
     ...warnings,
     `-DPOCKETJS_TARGET_ID=\"${inputs.target}\"`,
     `-DPOCKETJS_HOST_ABI=${inputs.hostAbi}`,

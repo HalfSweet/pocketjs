@@ -67,15 +67,15 @@ first_party_flags=(
   -DPOCKETJS_TARGET_ID=\""$POCKETJS_TARGET_ID"\" \
   -DPOCKETJS_HOST_ABI="$POCKETJS_HOST_ABI" \
   -DPOCKET_RASTER_DENSITY="$POCKET_RASTER_DENSITY" \
-  -I/repo/hosts/iphone2g \
+  -I/repo/hosts/soft \
   -I"$quickjs" \
-  -c /repo/hosts/iphone2g/pocket_runtime.c \
+  -c /repo/hosts/soft/pocket_runtime.c \
   -o "$objects/pocket_runtime.o"
 
 for shared in pocket_input rust_eh_personality; do
   "$qcc" "${first_party_flags[@]}" \
-    -I/repo/hosts/iphone2g \
-    -c "/repo/hosts/iphone2g/$shared.c" \
+    -I/repo/hosts/soft \
+    -c "/repo/hosts/soft/$shared.c" \
     -o "$objects/$shared.o"
 done
 
@@ -83,7 +83,7 @@ done
   -DPOCKET_BUILD_ID=\""$POCKET_BUILD_ID"\" \
   -DPOCKET_LOGICAL_WIDTH="$POCKET_LOGICAL_WIDTH" \
   -DPOCKET_LOGICAL_HEIGHT="$POCKET_LOGICAL_HEIGHT" \
-  -I/repo/hosts/iphone2g \
+  -I/repo/hosts/soft \
   -c /repo/hosts/blackberry-qnx/main.c \
   -o "$objects/main.o"
 

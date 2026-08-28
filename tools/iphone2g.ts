@@ -482,7 +482,7 @@ function buildRuntime(): void {
     ],
   );
   compile(
-    join(repository, "hosts/iphone2g/pocket_runtime.c"),
+    join(repository, "hosts/soft/pocket_runtime.c"),
     join(build, "pocket_runtime.o"),
     [
       ...firstPartyWarnings,

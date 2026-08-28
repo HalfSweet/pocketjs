@@ -35,6 +35,7 @@
     "apps/nsengine",
     "hosts/apple",
     "hosts/iphone2g",
+    "hosts/soft",
     "hosts/iphone4s",
     "hosts/ipodtouch",
     "hosts/meizu-m8",

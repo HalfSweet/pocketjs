@@ -3,7 +3,7 @@
 PocketJS runs on the BlackBerry Classic (SQC100, BlackBerry 10.3) through two
 hosts that share everything above the operating-system boundary. **Both mount
 the same guest bundle shape, the same no-std Rust UI core with its GLES2
-DrawList backend, and the same QuickJS bridge (`hosts/iphone2g/pocket_runtime.c`)
+DrawList backend, and the same QuickJS bridge (`hosts/soft/pocket_runtime.c`)
 against one private device profile: 720×720 physical, 360×360 logical at
 raster density 2, 60 Hz fixed simulation time, `input.buttons`, `input.touch`,
 and `text.glyphs.baked`.** They differ only in how the process is packaged,
@@ -49,10 +49,10 @@ build time; neither host directory holds a second copy of the id or version.
 
 Input reaches the guest only through the portable button mask and touch
 snapshot; no Android or QNX concept crosses the boundary. **The mask constants
-come from `hosts/iphone2g/pocket_spec.h`, generated from
+come from `hosts/soft/pocket_spec.h`, generated from
 `contracts/spec/spec.ts` by `contracts/spec/gen-c.ts` and byte-compared by
 `tests/contract.ts`**, and both hosts feed their platform events into the same
-state machine, `hosts/iphone2g/pocket_input.c` (unit-tested with the host
+state machine, `hosts/soft/pocket_input.c` (unit-tested with the host
 compiler in `tests/pocket-input.test.ts`):
 
 | Physical input | Portable input |
@@ -67,7 +67,7 @@ compiler in `tests/pocket-input.test.ts`):
 | touchscreen | one tracked contact (a second finger never becomes input), divided into 360×360 logical coordinates, with the host-resolved bounds hit fact; **a contact that went down and up between two frames still reports one down frame, and a release is reported at the very next frame** |
 
 The frame call is `pocket_runtime_tick(&input)` in
-`hosts/iphone2g/pocket_runtime.c`: **exactly one guest turn followed by one
+`hosts/soft/pocket_runtime.c`: **exactly one guest turn followed by one
 core tick per presented frame** (docs/RUNTIMES.md, law 3), taking the mask,
 the sampled contact, and its hit fact. The older `pocket_runtime_frame` /
 `pocket_runtime_frame_ticks` entry points stay for the original iPhone host

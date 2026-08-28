@@ -6,7 +6,7 @@ The BlackBerry Classic is the only machine we have ported to that will run the s
 
 One is QNX-native: a BlackBerry 10 Core Native application that asks `libscreen` for a window, gets an OpenGL ES 2 context through EGL, and drives every frame from a BPS event loop. The other is the Android Runtime: an Android 4.3 (API 18) APK, a `GLSurfaceView` Activity sitting on one `armeabi-v7a` JNI library.
 
-The two paths diverge entirely **below** the QuickJS bridge. Above it, they mount the same guest bundle, the same no-std Rust UI core (with its GLES2 DrawList backend), the same QuickJS bridge (`hosts/iphone2g/pocket_runtime.c` — the filename is a historical accident; the iPhone 2G/4S and Meizu M8 hosts link it too), against one private device profile: **720×720 physical pixels, 360×360 logical, raster density 2, a fixed 60 Hz simulation clock, `input.buttons` + `input.touch` + `text.glyphs.baked`**.
+The two paths diverge entirely **below** the QuickJS bridge. Above it, they mount the same guest bundle, the same no-std Rust UI core (with its GLES2 DrawList backend), the same QuickJS bridge (`hosts/soft/pocket_runtime.c` — the iPhone 2G/4S and Meizu M8 hosts link it too), against one private device profile: **720×720 physical pixels, 360×360 logical, raster density 2, a fixed 60 Hz simulation clock, `input.buttons` + `input.touch` + `text.glyphs.baked`**.
 
 They differ in only three things: how the process is packaged, how it is installed, and how it is fed input.
 
@@ -374,7 +374,7 @@ For us, this trackpad is an interesting engineering problem, because **it is a r
 - **The QNX host**: the trackpad arrives in `libscreen` as **`SCREEN_EVENT_JOYSTICK`** events carrying `SCREEN_PROPERTY_DISPLACEMENT` (displacement) and buttons. The displacement is an integer, every event is one "notch," so the host feeds it in with a threshold of 1 — every non-zero event is one d-pad pulse in its direction; a click (`buttons != 0`) becomes `CIRCLE`.
 - **The Android host**: the runtime delivers the trackpad as generic-motion scroll axes or trackball deltas — continuous floats — so the host feeds them in with a threshold of 0.35 and a pulse fires only once the running sum crosses it. This mapping is **provisional** — we haven't yet watched, on a device, whether the Classic's Android runtime presents the trackpad as scroll, trackball, or a pointer.
 
-Both hosts hand their deltas to the same few lines, in the input state machine they share (`hosts/iphone2g/pocket_input.c`); only the threshold differs:
+Both hosts hand their deltas to the same few lines, in the input state machine they share (`hosts/soft/pocket_input.c`); only the threshold differs:
 
 ```c
 /* Relative motion → one d-pad pulse per threshold crossing; the axis resets

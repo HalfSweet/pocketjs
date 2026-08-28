@@ -28,6 +28,9 @@ pocketjs/
 │  ├─ apple/      NativeScript iOS shell over engine/apple + @nativescript/pocketjs
 │  ├─ desktop/    gpui window host — macos-app + linux-app (standalone lone-bin crate)
 │  ├─ web/        browser dev + Pocket System host (wasm core, isolated iframe Realms)
+│  ├─ soft/       software framebuffer host: the shared QuickJS C runtime (pocket_runtime.c,
+│  │              linked by the iPhone, BlackBerry and Meizu M8 hosts) + a no-window
+│  │              main that renders into memory and prints per-frame hashes
 │  └─ sim/        deterministic headless simulation host (docs/DETERMINISM.md)
 ├─ framework/    Guest: @pocketjs/framework
 │  ├─ src/        the TS runtime (Solid + Vue Vapor renderers, components, input, osk…)
