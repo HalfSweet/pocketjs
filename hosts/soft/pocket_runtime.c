@@ -746,6 +746,31 @@ int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit
   return pocket_runtime_frame_ticks(touch_down, touch_x, touch_y, touch_hit, 2);
 }
 
+/*
+ * Evaluate a small script in the guest realm and read its result as an
+ * int32 — the hook a harness uses to drive a bundle's own protocol
+ * (`globalThis.__bench.run("x")`). No job drain: whatever the script queued
+ * runs in the next guest turn, exactly as if an app callback had queued it.
+ */
+int pocket_runtime_eval_int32(const char *source, size_t length, int32_t *out) {
+  JSValue value;
+  int32_t number = 0;
+  if (runtime == 0 || context == 0 || runtime_failed) return 0;
+  value = JS_Eval(context, source, length, "<harness>", JS_EVAL_TYPE_GLOBAL);
+  if (JS_IsException(value)) {
+    take_exception(context);
+    return 0;
+  }
+  if (out != 0 && JS_ToInt32(context, &number, value) < 0) {
+    JS_FreeValue(context, value);
+    take_exception(context);
+    return 0;
+  }
+  JS_FreeValue(context, value);
+  if (out != 0) *out = number;
+  return 1;
+}
+
 int pocket_runtime_hit_test(float x, float y) {
   if (runtime == 0 || context == 0 || runtime_failed) return 0;
   return ui_hit_test(x, y);

@@ -53,6 +53,12 @@ int pocket_runtime_frame_ticks(
   int touch_hit,
   unsigned int tick_count
 );
+/*
+ * Evaluate `source` in the guest realm and store its int32 result in `out`
+ * (may be NULL). Returns zero on an exception (pocket_runtime_error()). Does
+ * not drain jobs. Harness use only: bench protocols, device smoke tests.
+ */
+int pocket_runtime_eval_int32(const char *source, size_t length, int32_t *out);
 int pocket_runtime_hit_test(float x, float y);
 int pocket_runtime_hit_test_bounds(float x, float y);
 const char *pocket_runtime_action_name(void);
