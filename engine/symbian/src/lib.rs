@@ -179,6 +179,13 @@ fn ui() -> &'static mut Ui {
     unsafe { UI.get_or_insert_with(Ui::new) }
 }
 
+/// Run `f` against the single `Ui` instance. Bench and capture tooling built
+/// on this crate's rlib reach `Ui` through it (DrawList words, rasterizing
+/// into caller-owned buffers) instead of duplicating the C ABI's singleton.
+pub fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> R {
+    f(ui())
+}
+
 #[inline]
 unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if ptr.is_null() || len == 0 {

@@ -4,6 +4,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * Stage ids delivered to pocket_bench_stage() when pocket_runtime.c is
+ * compiled with POCKET_RUNTIME_BENCH_HOOKS (hosts/soft/README.md).
+ */
+#define POCKET_BENCH_STAGE_IDLE 0
+#define POCKET_BENCH_STAGE_EVAL 1
+#define POCKET_BENCH_STAGE_JS 2
+#define POCKET_BENCH_STAGE_JOBS 3
+#define POCKET_BENCH_STAGE_TICK 4
+
 int pocket_runtime_boot(
   const char *java_script,
   size_t java_script_length,

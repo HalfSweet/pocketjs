@@ -27,6 +27,20 @@ extern void pocket_host_boot_stage(int stage);
 #define REPORT_BOOT_STAGE(stage) ((void)(stage))
 #endif
 
+/*
+ * Benchmark stage boundaries (hosts/soft/README.md, "Bench hooks"): a bench
+ * shell compiles this file with POCKET_RUNTIME_BENCH_HOOKS and provides
+ * pocket_bench_stage(), which receives POCKET_BENCH_STAGE_* at the edges of
+ * the eval, guest-turn, job-drain and tick phases. Device hosts never define
+ * it and pay nothing.
+ */
+#if defined(POCKET_RUNTIME_BENCH_HOOKS)
+extern void pocket_bench_stage(int stage);
+#define BENCH_STAGE(stage) pocket_bench_stage(stage)
+#else
+#define BENCH_STAGE(stage) ((void)(stage))
+#endif
+
 typedef enum {
   HostCreateNode,
   HostDestroyNode,
@@ -599,6 +613,7 @@ int pocket_runtime_boot(
   }
   REPORT_BOOT_STAGE(7);
 
+  BENCH_STAGE(POCKET_BENCH_STAGE_EVAL);
   JSValue result = JS_Eval(
     context,
     java_script,
@@ -626,6 +641,7 @@ int pocket_runtime_boot(
     return 0;
   }
   REPORT_BOOT_STAGE(10);
+  BENCH_STAGE(POCKET_BENCH_STAGE_IDLE);
   return 1;
 }
 
@@ -680,20 +696,26 @@ static int run_frame(
     touch_array,
     hit_array,
   };
+  BENCH_STAGE(POCKET_BENCH_STAGE_JS);
   JSValue result = JS_Call(context, frame_function, global, 4, arguments);
   JS_FreeValue(context, hit_array);
   JS_FreeValue(context, touch_array);
   if (JS_IsException(result)) {
     take_exception(context);
     runtime_failed = 1;
+    BENCH_STAGE(POCKET_BENCH_STAGE_IDLE);
     return 0;
   }
   JS_FreeValue(context, result);
+  BENCH_STAGE(POCKET_BENCH_STAGE_JOBS);
   if (!drain_jobs()) {
     runtime_failed = 1;
+    BENCH_STAGE(POCKET_BENCH_STAGE_IDLE);
     return 0;
   }
+  BENCH_STAGE(POCKET_BENCH_STAGE_TICK);
   for (tick = 0; tick < tick_count; ++tick) ui_tick();
+  BENCH_STAGE(POCKET_BENCH_STAGE_IDLE);
   return 1;
 }
 

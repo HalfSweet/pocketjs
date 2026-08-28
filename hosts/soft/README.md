@@ -76,3 +76,17 @@ runtime here, with a main that needs no device, gives them a twin that runs
 on any machine: bundles can be executed on the shipped engine lineage in
 CI, goldens can be checked on QuickJS rather than only on Bun, and a
 benchmark shell can link the exact runtime the devices run.
+
+## Bench hooks
+
+`pocket_runtime.c` compiled with `-DPOCKET_RUNTIME_BENCH_HOOKS` calls
+`pocket_bench_stage(int stage)` — provided by the embedding program — at the
+edges of its phases: `POCKET_BENCH_STAGE_EVAL` before the bundle is
+evaluated, `_JS` before the guest turn (`frame()`), `_JOBS` before the job
+drain, `_TICK` before the core ticks, and `_IDLE` when the runtime hands
+control back. A benchmark shell reads its clock or emits a marker at each
+call and attributes the interval to the stage. Without the define the macro
+expands to nothing, so device hosts are unchanged. Draw and render are not
+in this list: a shell that wants them separately calls the core directly
+(`engine/symbian`'s `with_ui`) instead of `pocket_runtime_render`.
+
