@@ -9,7 +9,9 @@ it runs PocketJS guests on SF32LB5x boards through the SDK's EPIC 2.5D engine:
   command sequences against the chip's capabilities, and keeps painter order
   between hardware commands and its RGB565 software fallback;
 - `components/pocketjs_gpu` executes those commands on EPIC through public
-  HAL entry points and owns the A8 planes and RGB565 tiles in SRAM;
+  HAL entry points, on VG Lite (SF32LB58) for the projective quads, tinted
+  blits, and portable-format textures EPIC cannot read, and owns the A8
+  planes and RGB565 tiles in SRAM;
 - `components/pocketjs_host` owns the shared PSRAM heap, the framebuffer
   ring, the LCD device, keys and touch, the QuickJS realm, and the guest
   catalog;
@@ -140,10 +142,14 @@ is deterministic, so regenerating from the same checkout reproduces them.
 A `.epic` pak holds every `ui:img.*` entry as an 8-byte header plus
 EPIC-order pixels: **RGB565 with red in the high bits, BGRA8888, or L8 with a
 1024-byte BGRA palette**. The core keeps the portable PSM bytes, so software
-fallback stays exact; the native copy only feeds hardware blits. A guest
-without a `.epic` pak renders every texture through the portable path.
+fallback stays exact; the native copy only feeds hardware blits.
 `native: { "opaque": "RRGGBB" }` precomposites PSM_8888 alpha over that color
 at bake time and stores opaque RGB565.
+
+Images without a native copy are registered in their portable format when
+`POCKETJS_GPU_VGLITE` is on: VG Lite reads PSM_5650, PSM_4444, PSM_8888,
+and PSM_T8 directly, so a guest needs no `.epic` pak to blit through
+hardware. Without VG Lite those textures render through the CPU tile path.
 
 ## Buffer contract
 
@@ -236,6 +242,9 @@ are documented in [`docs/PORTING.md`](docs/PORTING.md).
 | `POCKETJS_GPU_MAX_TEXTURES` | 32 | Native texture registry capacity |
 | `POCKETJS_GPU_MIN_PIXELS` | 64 | Smallest rectangle worth a hardware transaction |
 | `POCKETJS_GPU_DIRECT_CPU_WRITES` | n | Let the renderer write the framebuffer from the CPU |
+| `POCKETJS_GPU_VGLITE` | y | VG Lite executor for quads, tinted and portable-format blits (needs `USING_VGLITE`, SF32LB58) |
+| `POCKETJS_GPU_VGLITE_POOL_KB` | 320 | VG Lite contiguous pool in SRAM |
+| `POCKETJS_GPU_VGLITE_CMD_KB` | 64 | VG Lite command buffer size |
 | `POCKETJS_HOST` | y | Heap, LCD ring, input, QuickJS guest, frame loop |
 | `POCKETJS_LOGICAL_WIDTH` / `_HEIGHT` | 512 / 300 | Guest viewport |
 | `POCKETJS_RENDER_SCALE` | 2 | Physical pixels per logical pixel |

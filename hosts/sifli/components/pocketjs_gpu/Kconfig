@@ -39,3 +39,29 @@ config POCKETJS_GPU_DIRECT_CPU_WRITES
       shows tile copies cost more than direct writes.
 
 endif
+
+if POCKETJS_GPU
+
+config POCKETJS_GPU_VGLITE
+    bool "Run transformed, tinted, and portable-format blits on VG Lite (SF32LB58)"
+    default y
+    depends on USING_VGLITE
+    help
+      Adds a second executor for the commands EPIC cannot run on 58x:
+      four-point (projective) texture quads, RGB-modulated blits, and
+      textures kept in PocketJS portable formats. Commands switch engines
+      with a drain of the other engine; the profiler counts the switches.
+
+config POCKETJS_GPU_VGLITE_POOL_KB
+    int "VG Lite contiguous pool in SRAM (KB)"
+    default 320
+    range 128 1024
+    depends on POCKETJS_GPU_VGLITE
+
+config POCKETJS_GPU_VGLITE_CMD_KB
+    int "VG Lite command buffer (KB, two of them come from the pool)"
+    default 64
+    range 16 256
+    depends on POCKETJS_GPU_VGLITE
+
+endif

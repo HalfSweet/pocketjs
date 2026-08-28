@@ -239,6 +239,37 @@ static bool register_native_texture(int32_t handle, const uint8_t *blob, size_t 
     return true;
 }
 
+#ifdef POCKETJS_GPU_VGLITE
+/* Without a native blob, VG Lite still blits the portable entry once it
+ * sits 64-byte aligned in cache-clean memory. */
+static bool register_portable_texture(int32_t handle, const uint8_t *entry, size_t entry_len)
+{
+    void *copy;
+    uint64_t revision;
+
+    if (entry == RT_NULL || entry_len == 0 || g_native_count >= MAX_TEXTURES)
+    {
+        return false;
+    }
+    copy = pocket_heap_alloc(entry_len, 64);
+    if (copy == RT_NULL)
+    {
+        return false;
+    }
+    memcpy(copy, entry, entry_len);
+    revision = pocket_core_texture_revision(g_core, handle);
+    if (revision == UINT64_MAX ||
+        !pocketjs_gpu_texture_register_portable(handle, revision, copy, entry_len))
+    {
+        pocket_heap_free(copy);
+        return false;
+    }
+    g_native_copies[g_native_count++] = copy;
+    g_native_bytes += entry_len;
+    return true;
+}
+#endif
+
 static void release_native_textures(void)
 {
     size_t index;
@@ -259,6 +290,7 @@ static bool load_pak(const uint8_t *pak, size_t pak_len, const uint8_t *epic, si
     PakDirectory dir;
     uint32_t index;
     size_t native_registered = 0;
+    size_t portable_registered = 0;
 
     if (!pak_open(&dir, pak, pak_len))
     {
@@ -336,6 +368,12 @@ static bool load_pak(const uint8_t *pak, size_t pak_len, const uint8_t *epic, si
                                registration->name);
                 }
             }
+#ifdef POCKETJS_GPU_VGLITE
+            else if (register_portable_texture(handle, blob, blob_len))
+            {
+                ++portable_registered;
+            }
+#endif
         }
         else if (key_has_prefix(key, key_len, "ui:sprite.", &resource_name,
                                 &resource_name_len))
@@ -368,9 +406,10 @@ static bool load_pak(const uint8_t *pak, size_t pak_len, const uint8_t *epic, si
             ++g_sprite_count;
         }
     }
-    rt_kprintf("[PocketJS] pak loaded: %u texture(s), %u sprite(s), %u native (%uKB)\n",
+    rt_kprintf("[PocketJS] pak loaded: %u texture(s), %u sprite(s), %u native + %u portable "
+               "registered (%uKB)\n",
                (unsigned)g_texture_count, (unsigned)g_sprite_count, (unsigned)native_registered,
-               (unsigned)(g_native_bytes >> 10));
+               (unsigned)portable_registered, (unsigned)(g_native_bytes >> 10));
     return true;
 }
 

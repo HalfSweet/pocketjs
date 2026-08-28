@@ -267,7 +267,8 @@ int pocketjs_gpu_epic_blit(const PocketjsGpuCmd *cmd)
         return POCKETJS_GPU_EXEC_REJECT;
     }
     texture = pocketjs_gpu_texture_by_id(cmd->src_id);
-    if (texture == NULL || cmd->src.w == 0 || cmd->src.h == 0 ||
+    if (texture == NULL || texture->kind != POCKETJS_GPU_TEXTURE_NATIVE || cmd->src.w == 0 ||
+        cmd->src.h == 0 ||
         cmd->src.x >= texture->width || cmd->src.y >= texture->height ||
         cmd->src.w > texture->width - cmd->src.x ||
         cmd->src.h > texture->height - cmd->src.y)

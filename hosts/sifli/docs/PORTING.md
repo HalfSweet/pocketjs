@@ -108,6 +108,41 @@ Every rectangle is checked against the bound target and
 limit and routes oversized blits to the CPU, so refusals only happen for
 malformed input.
 
+### VG Lite executor recipes (SF32LB58, `POCKETJS_GPU_VGLITE`)
+
+`vg_lite_init_mem` receives a **contiguous pool in SRAM**
+(`POCKETJS_GPU_VGLITE_POOL_KB`, 64-byte aligned, `L1_NON_RET_BSS`); the
+library carves its two command buffers (`POCKETJS_GPU_VGLITE_CMD_KB` each)
+and a 64×64 tessellation buffer from it. The component enables
+`V2D_GPU_IRQn` at priority 3; the SDK's `vg_lite_hal.c` owns
+`V2D_GPU_IRQHandler` and turns on `RCC_MOD_GPU`. The target is the bound
+framebuffer described as `VG_LITE_BGR565` (the format names list channels
+from the low byte up, so BGR565 is EPIC's RGB565 and `VG_LITE_RGB565` is
+PocketJS PSM_5650).
+
+| Command | Path | Notes |
+| --- | --- | --- |
+| `BLIT` from a native RGB565/BGRA8888/L8 texture, white tint | EPIC | unchanged |
+| `BLIT` with an RGB tint, or from a portable-format texture | `vg_lite_blit_rect` | matrix = translate/scale (negative scale for mirrors), `VG_LITE_MULTIPLY_IMAGE_MODE` carries the tint |
+| `BLIT_QUAD` | `vg_lite_get_transform_matrix` + `vg_lite_blit_rect` | source TL/BL/BR/TR onto the command's quad; solid quads sample a 4×4 RGBA8888 color texture in SRAM |
+| clip | `vg_lite_set_scissor` | per command |
+| global alpha | `vg_lite_source_global_alpha(VG_LITE_SCALED)` | per command |
+| PSM_T8 / L8 | `vg_lite_set_CLUT(256)` | ARGB words built from the RGBA (portable) or BGRA (native) palette, cached by palette pointer |
+
+Sources must be **64-byte aligned and cache-clean**, which the registry
+enforces at registration; the queue therefore advertises no inline portable
+formats and the host registers every image without a native copy as a
+portable copy staged in the heap (`register_portable_texture`). Code-bus
+addresses (`0x10000000..0x1BFFFFFF`) are rewritten with
+`HCPU_MPI_SBUS_ADDR`; staged copies in PSRAM1 need no rewrite.
+
+Engine arbitration: the queue tracks the engine in use; a command bound for
+the other engine first drains the current one (EPIC wait or
+`vg_lite_finish`), and `engine_switches` in the profile counts those
+drains. Commands on VG Lite are flushed after each blit; fences, `end`, and
+texture resets call `vg_lite_finish`. A `vg_lite_finish` failure disables
+VG Lite for the rest of the session and the renderer falls back.
+
 Cache rules: the framebuffer and the SRAM planes are non-cacheable, so no
 maintenance is required for them. `mpu_dcache_clean` runs once over a
 native texture blob at registration and over a tile before `TILE_IN`; both
@@ -195,17 +230,18 @@ With `POCKETJS_PROFILE`, every `POCKETJS_TICK_HZ` presented frames print:
 
 ```
 [PocketJS] perf frame=<n> fps=<f> total=<ms> guest=<ms> render=<ms> lcd_wait=<ms> other=<ms>
-[PocketJS] render cpu=<ms> gpu_submit=<ms> gpu_wait=<ms> calls=<n>/f rejected=<n> full=<a>/<b> policy=<n> dirty_avg=<px> last=<px> regions=<n>[ full]
+[PocketJS] render cpu=<ms> gpu_submit=<ms> gpu_wait=<ms> calls=<n>/f switches=<n> rejected=<n> full=<a>/<b> policy=<n> dirty_avg=<px> last=<px> regions=<n>[ full]
 [PocketJS] work words=<n> gpu=<fills>/<gradients>/<blends>/<copies> sw=<ops>/<words> tiles=<n>/<KB> fences=<n> bands=<n> miss=<n> mem=<qjsKB>/<freeKB>
 ```
 
 - `guest` is the JavaScript frame plus `pocket_core_tick`; `render` is
   `pocket_core_render_rgb565`; `lcd_wait` is the present call including the
   wait for the previous scan; `other` is the remainder of the frame period.
-- `gpu_submit` and `gpu_wait` are DWT cycles inside the executor (HAL
-  programming, and waiting for a transaction); `cpu` is the rest of
+- `gpu_submit` and `gpu_wait` are DWT cycles inside the executors (HAL or
+  VG Lite programming, and waiting for completion); `cpu` is the rest of
   `render`: planning, A8 composition, tile rasterization. `calls` counts
-  transactions per frame; `rejected` must stay 0.
+  transactions per frame; `switches` counts EPIC/VG Lite drains;
+  `rejected` must stay 0.
 - `full`/`policy`: frames repainted whole, and how many of those the 75 %
   damage threshold promoted. A large `full` with a small `policy` points at
   structural DrawList changes or invalidation.
@@ -238,9 +274,12 @@ copies, and every CPU fallback are exact.
 
 - SF32LB58 EPIC has no color matrix and no 3×3 transform: the SDK defines
   `EPIC_SUPPORT_TRANS_MATRIX` and `EPIC_SUPPORT_COLOR_MATRIX` for 57x only.
-  Portable PSM textures, RGB modulation, and projective quads therefore
-  fall back to the CPU until the VG Lite executor lands; `BLIT_QUAD` is
-  refused by the EPIC executor.
+  Portable PSM textures, RGB modulation, and projective quads run on VG
+  Lite; without `POCKETJS_GPU_VGLITE` they fall back to the CPU.
+- VG Lite conventions still to confirm on a board: the `vg_lite_color_t`
+  channel order for the tint, `VG_LITE_BLEND_SRC_OVER` against
+  non-premultiplied sources, and the projective sampling phase against the
+  core rasterizer. The device self-check reports the mismatch.
 - The executor keeps a single transaction in flight. Continuous blends
   (`HAL_EPIC_ContBlendStart`) and the shadow-instance fast path are not
   used yet; `calls`/f in the profiler is the number to watch.

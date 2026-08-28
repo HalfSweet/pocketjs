@@ -126,12 +126,12 @@ static void report(uint32_t frame, uint32_t elapsed_frames, uint32_t elapsed_tic
                render_ms_tenths / 10u, render_ms_tenths % 10u, lcd_ms_tenths / 10u,
                lcd_ms_tenths % 10u, other_ms_tenths / 10u, other_ms_tenths % 10u);
     rt_kprintf("[PocketJS] render cpu=%u.%u gpu_submit=%u.%u gpu_wait=%u.%u calls=%u.%u/f "
-               "rejected=%u full=%u/%u policy=%u dirty_avg=%u last=%u regions=%u%s\n",
+               "switches=%u rejected=%u full=%u/%u policy=%u dirty_avg=%u last=%u regions=%u%s\n",
                cpu_ms_tenths / 10u, cpu_ms_tenths % 10u, gpu_submit_tenths / 10u,
                gpu_submit_tenths % 10u, gpu_wait_tenths / 10u, gpu_wait_tenths % 10u,
-               calls_tenths / 10u, calls_tenths % 10u, gpu.rejected, perf->full_frames,
-               elapsed_frames, perf->policy_full_frames, dirty_average, stats->damage_pixels,
-               stats->damage_regions, stats->full_redraw ? " full" : "");
+               calls_tenths / 10u, calls_tenths % 10u, gpu.engine_switches, gpu.rejected,
+               perf->full_frames, elapsed_frames, perf->policy_full_frames, dirty_average,
+               stats->damage_pixels, stats->damage_regions, stats->full_redraw ? " full" : "");
     rt_kprintf("[PocketJS] work words=%u gpu=%u/%u/%u/%u sw=%u/%u tiles=%u/%uKB fences=%u "
                "bands=%u miss=%u mem=%u/%uKB\n",
                stats->draw_words, stats->epic_fills, stats->epic_gradients, stats->epic_blends,
