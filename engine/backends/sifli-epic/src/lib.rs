@@ -26,7 +26,6 @@ use pocketjs_core::{spec, TexView, Ui};
 const MASK_ALIGNMENT: usize = 128;
 const MASK_BUFFER_COUNT: usize = 2;
 const CLIP_DEPTH: usize = 32;
-const TEXTURE_CLASS_CACHE_LEN: usize = 64;
 const MAX_DAMAGE_REGIONS: usize = DEFAULT_DAMAGE_REGIONS;
 const FULL_REDRAW_PERCENT: u8 = 75;
 const DAMAGE_TARGET_SIGNATURE: u64 = u32::from_be_bytes(*b"EPC5") as u64;
@@ -334,8 +333,6 @@ pub struct Renderer {
     mask_capacity: usize,
     mask_len: usize,
     fallback_words: Vec<u32>,
-    alpha_texture_cache: Vec<(i32, bool)>,
-    raster_revision: u64,
 }
 
 impl Renderer {
@@ -351,8 +348,6 @@ impl Renderer {
             mask_capacity: 0,
             mask_len: 0,
             fallback_words: Vec::with_capacity(16),
-            alpha_texture_cache: Vec::new(),
-            raster_revision: 0,
         })
     }
 
@@ -360,20 +355,11 @@ impl Renderer {
         self.config
     }
 
-    /// Drop classifications derived from texture bytes after resources are
-    /// changed in place. Framebuffer states must be invalidated separately.
-    pub fn invalidate_resources(&mut self) {
-        self.alpha_texture_cache.clear();
-        self.raster_revision = 0;
-    }
-
-    fn sync_resources(&mut self, ui: &Ui) {
-        let revision = ui.raster_revision();
-        if self.raster_revision != revision {
-            self.alpha_texture_cache.clear();
-            self.raster_revision = revision;
-        }
-    }
+    /// Kept for host compatibility. Texture classification now lives in the
+    /// core (`Ui::texture_coverage_only`), so the renderer holds no derived
+    /// resource state; framebuffer states must still be invalidated
+    /// separately after output-affecting changes performed outside `Ui`.
+    pub fn invalidate_resources(&mut self) {}
 
     /// Render a complete DrawList. `destination` dimensions must equal the
     /// UI viewport multiplied by `config.scale`.
@@ -386,7 +372,6 @@ impl Renderer {
         height: u32,
         epic: &mut O,
     ) -> Option<RenderStats> {
-        self.sync_resources(ui);
         let screen = self.target_screen(ui, destination, width, height)?;
         let damage = DamagePlan::<MAX_DAMAGE_REGIONS>::full(screen);
         self.render_damage(
@@ -423,7 +408,6 @@ impl Renderer {
         ui: &Ui,
         words: &[u32],
     ) -> Option<(RenderDamagePlan, bool)> {
-        self.sync_resources(ui);
         let damage_target = self.damage_target(ui)?;
         let raw = target.prepare(ui, words, damage_target).ok()?;
         let was_full = raw.is_full_redraw();
@@ -510,7 +494,6 @@ impl Renderer {
         region: Rect,
         epic: &mut O,
     ) -> Option<RenderStats> {
-        self.sync_resources(ui);
         if region.is_empty() {
             return None;
         }
@@ -1177,7 +1160,7 @@ impl Renderer {
             }
         }
 
-        if !self.is_white_alpha_texture(handle, &view) {
+        if !ui.texture_coverage_only(handle).unwrap_or(false) {
             return self
                 .try_texture_quad(
                     &view,
@@ -1612,27 +1595,6 @@ impl Renderer {
                 self.mask_len,
             )
         }
-    }
-
-    fn is_white_alpha_texture(&mut self, handle: i32, view: &TexView<'_>) -> bool {
-        // T8 video planes can replace their palette and indices in place, so
-        // their classification is intentionally never cached.
-        if view.psm == spec::psm::PSM_T8 {
-            return is_white_alpha_texture(view);
-        }
-        if let Some((_, result)) = self
-            .alpha_texture_cache
-            .iter()
-            .find(|(cached, _)| *cached == handle)
-        {
-            return *result;
-        }
-        let result = is_white_alpha_texture(view);
-        if self.alpha_texture_cache.len() == TEXTURE_CLASS_CACHE_LEN {
-            self.alpha_texture_cache.remove(0);
-        }
-        self.alpha_texture_cache.push((handle, result));
-        result
     }
 }
 
@@ -2070,31 +2032,6 @@ fn exact_texel_edge(uv: f32, extent: u32) -> Option<u32> {
     (rounded <= extent && difference <= 0.0001).then_some(rounded)
 }
 
-fn is_white_alpha_texture(view: &TexView<'_>) -> bool {
-    let count = view.w as usize * view.h as usize;
-    match view.psm {
-        spec::psm::PSM_8888 => view.pixels[..count * 4].chunks_exact(4).all(|p| {
-            let white = p[0] == 255 && p[1] == 255 && p[2] == 255;
-            white || (!view.linear && p[3] == 0)
-        }),
-        spec::psm::PSM_4444 => view.pixels[..count * 2].chunks_exact(2).all(|p| {
-            let pixel = u16::from_le_bytes([p[0], p[1]]);
-            pixel & 0x0fff == 0x0fff || (!view.linear && pixel >> 12 == 0)
-        }),
-        spec::psm::PSM_T8 => {
-            let Some(palette) = view.palette else {
-                return false;
-            };
-            view.pixels[..count].iter().all(|&index| {
-                let p = index as usize * 4;
-                let white = palette[p] == 255 && palette[p + 1] == 255 && palette[p + 2] == 255;
-                white || (!view.linear && palette[p + 3] == 0)
-            })
-        }
-        _ => false,
-    }
-}
-
 #[inline]
 fn texel_alpha(view: &TexView<'_>, x: i32, y: i32) -> u32 {
     let x = x.clamp(0, view.w as i32 - 1) as usize;
@@ -2510,19 +2447,41 @@ mod tests {
     }
 
     #[test]
-    fn core_resource_revision_invalidates_texture_classifications() {
+    fn in_place_t8_updates_follow_the_core_classification() {
         let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let mut data = vec![0u8; 1024 + 16];
+        data[0..4].copy_from_slice(&[255, 255, 255, 255]);
+        let handle = ui.upload_texture(&data, 4, 4, spec::psm::PSM_T8);
+        let words = [
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(1, 1),
+            wh_word(4, 4),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0xff00_80ff,
+        ];
+        let mut output = vec![0u16; 64];
         let mut renderer = renderer();
-        renderer.sync_resources(&ui);
-        renderer.alpha_texture_cache.push((7, true));
+        let stats = renderer
+            .render(&ui, &words, &mut output, 8, 8, &mut MockEpic::default())
+            .unwrap();
+        assert_eq!(stats.epic_blends, 1);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(output, full_reference(&ui, &words, 8, 8));
 
-        assert_eq!(
-            ui.upload_texture(&[0xff, 0xff], 1, 1, spec::psm::PSM_5650),
-            0
-        );
-        renderer.sync_resources(&ui);
-        assert!(renderer.alpha_texture_cache.is_empty());
-        assert_eq!(renderer.raster_revision, ui.raster_revision());
+        let mut palette = vec![0u8; 1024];
+        palette[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        assert!(ui.update_texture_t8(handle, &palette, &[0u8; 16]));
+        let stats = renderer
+            .render(&ui, &words, &mut output, 8, 8, &mut MockEpic::default())
+            .unwrap();
+        assert_eq!(stats.epic_blends, 0);
+        assert_eq!(stats.software_ops, 1);
+        assert_eq!(output, full_reference(&ui, &words, 8, 8));
     }
 
     fn full_reference(ui: &Ui, words: &[u32], width: usize, height: usize) -> Vec<u16> {
