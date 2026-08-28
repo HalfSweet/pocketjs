@@ -1,0 +1,5 @@
+menu "PocketJS host"
+
+rsource "components/pocketjs_gpu/Kconfig"
+
+endmenu

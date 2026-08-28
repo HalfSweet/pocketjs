@@ -1,0 +1,6 @@
+from building import *
+
+cwd = GetCurrentDir()
+group = DefineGroup('Applications', Glob('*.c'), depend=[''], CPPPATH=[cwd],
+                    LOCAL_CCFLAGS=' -Werror')
+Return('group')

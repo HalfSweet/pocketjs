@@ -1,0 +1,3 @@
+project/build_*/
+project/.sconsign.dblite
+project/__pycache__/
