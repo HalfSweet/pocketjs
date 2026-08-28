@@ -64,4 +64,6 @@ Export('pocketjs_rust_lib')
 objs = []
 objs.extend(SConscript(os.path.join(cwd, 'components', 'pocketjs_gpu', 'SConscript'),
                        variant_dir='pocketjs_gpu', duplicate=0))
+objs.extend(SConscript(os.path.join(cwd, 'components', 'pocketjs_host', 'SConscript'),
+                       variant_dir='pocketjs_host', duplicate=0))
 Return('objs')

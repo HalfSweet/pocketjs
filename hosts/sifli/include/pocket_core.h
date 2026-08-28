@@ -60,6 +60,11 @@ int32_t pocket_core_upload_texture(PocketCore *handle, const uint8_t *data,
                                    uint32_t psm);
 void pocket_core_free_texture(PocketCore *handle, int32_t texture);
 
+/* Content revision of a live texture, the key a native (.epic) copy is
+ * registered under with pocketjs_gpu_texture_register(); UINT64_MAX when
+ * `texture` is not live. */
+uint64_t pocket_core_texture_revision(PocketCore *handle, int32_t texture);
+
 int32_t pocket_core_create_node(PocketCore *handle, uint32_t node_type);
 void pocket_core_destroy_node(PocketCore *handle, int32_t id);
 void pocket_core_insert_before(PocketCore *handle, int32_t parent,

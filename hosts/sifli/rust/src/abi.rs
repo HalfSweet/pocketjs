@@ -190,6 +190,16 @@ pub unsafe extern "C" fn pocket_core_free_texture(handle: *mut PocketCore, textu
     }
 }
 
+/// Content revision of `texture`, the key the GPU queue pairs with the
+/// handle when the host registers a native copy; `u64::MAX` when the handle
+/// is not a live texture.
+#[no_mangle]
+pub unsafe extern "C" fn pocket_core_texture_revision(handle: *mut PocketCore, texture: i32) -> u64 {
+    core_mut(handle)
+        .and_then(|state| state.ui.texture_revision(texture))
+        .unwrap_or(u64::MAX)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pocket_core_create_node(handle: *mut PocketCore, node_type: u32) -> i32 {
     core_mut(handle)

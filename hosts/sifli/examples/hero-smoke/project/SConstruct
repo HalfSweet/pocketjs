@@ -25,6 +25,14 @@ PrepareEnv()
 AddBootLoader(SIFLI_SDK, rtconfig.CHIP)
 SifliEnv()
 
+# GCC 14 made several legacy C pointer conversions hard errors. SiFli's
+# bundled QuickJS still uses `int *` at a handful of int32_t call sites; keep
+# those SDK diagnostics as warnings without patching the SDK checkout.
+# PocketJS components and this example compile with -Werror separately.
+if rtconfig.PLATFORM == 'gcc':
+    rtconfig.CFLAGS += ' -fpermissive'
+    rtconfig.CCFLAGS += ' -fpermissive'
+
 TARGET = rtconfig.OUTPUT_DIR + rtconfig.TARGET_NAME + '.' + rtconfig.TARGET_EXT
 objs = PrepareBuilding(None)
 env = GetCurrentEnv()
