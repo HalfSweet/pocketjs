@@ -921,6 +921,21 @@ impl Renderer {
                     }
                     i += 12;
                 }
+                // Native-text runs are shaped by a host text system; this
+                // fixed-function backend renders baked GLYPH_RUNs instead and
+                // skips the op exactly like the core rasterizer does.
+                spec::draw_op::TEXT_RUN if i + 8 <= words.len() => {
+                    let payload = (words[i + 7] as usize).div_ceil(4);
+                    i = i.checked_add(8 + payload)?;
+                    if i > words.len() {
+                        return None;
+                    }
+                }
+                // Compositor surfaces have no application compositor on this
+                // target; the shell fallback stays visible.
+                spec::draw_op::SURFACE_QUAD if i + 9 <= words.len() => {
+                    i += 9;
+                }
                 _ => return None,
             }
         }
@@ -3777,5 +3792,63 @@ mod tests {
 
         assert_eq!(stats.software_ops, 0);
         assert!(output.iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn skips_native_text_runs_and_surface_quads_like_the_core() {
+        let mut ui = Ui::new();
+        ui.set_viewport(16.0, 8.0);
+        let words = vec![
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(16, 8),
+            0xff20_4060,
+            // TEXT_RUN: 8 header words + ceil(5 bytes / 4) payload words.
+            spec::draw_op::TEXT_RUN,
+            0,
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            8.0f32.to_bits(),
+            f32::NAN.to_bits(),
+            0xffff_ffff,
+            5,
+            u32::from_le_bytes(*b"Hell"),
+            u32::from_le_bytes([b'o', 0, 0, 0]),
+            // SURFACE_QUAD: nine words with the destination rect at words 6-7.
+            spec::draw_op::SURFACE_QUAD,
+            0,
+            0,
+            0,
+            0,
+            0,
+            xy_word(2, 2),
+            wh_word(4, 4),
+            0,
+            spec::draw_op::RECT,
+            xy_word(10, 1),
+            wh_word(4, 4),
+            0xffff_0000,
+        ];
+        let mut output = vec![0u16; 16 * 8];
+        let mut epic = MockEpic::default();
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 16, 8, &mut epic)
+            .unwrap();
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(output, full_reference(&ui, &words, 16, 8));
+
+        let mut state = RenderTargetState::new();
+        let mut incremental = vec![0u16; 16 * 8];
+        let mut renderer = renderer();
+        renderer
+            .render_incremental(&mut state, &ui, &words, &mut incremental, 16, 8, &mut epic)
+            .unwrap();
+        let mut moved = words.clone();
+        moved[words.len() - 3] = xy_word(6, 1);
+        let second = renderer
+            .render_incremental(&mut state, &ui, &moved, &mut incremental, 16, 8, &mut epic)
+            .unwrap();
+        assert!(!second.full_redraw);
+        assert_eq!(incremental, full_reference(&ui, &moved, 16, 8));
     }
 }
