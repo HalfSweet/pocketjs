@@ -1,0 +1,10 @@
+{
+  "$comment": "hosts/soft — the software framebuffer host. The QuickJS pin is the device lineage every C host links (hosts/psp/Cargo.toml, tools/cli/blackberry-qnx-toolchain.json); the Rust toolchain is the one engine/symbian/rust-toolchain.toml pins.",
+  "cachePath": "soft",
+  "rustToolchain": "nightly-2026-07-02",
+  "quickjs": {
+    "version": "2026-06-04",
+    "repository": "https://github.com/pocket-stack/quickjs-rs.git",
+    "revision": "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b"
+  }
+}

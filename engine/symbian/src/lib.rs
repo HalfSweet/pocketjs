@@ -37,8 +37,13 @@ pub mod extension;
 ))]
 mod gl;
 
+/// What the platform `malloc` guarantees (C11 `max_align_t`): 16 bytes on the
+/// 64-bit ABIs a host build links against, 8 on the 32-bit device targets.
+/// Texture uploads ask for 16-byte alignment, which is the natural alignment
+/// of `u128` on 64-bit targets and only 8 on 32-bit ARM, so a fixed 8 here
+/// refused every texture on a 64-bit host.
 #[cfg(any(target_os = "none", feature = "bare-platform", test))]
-const C_MALLOC_ALIGNMENT: usize = 8;
+const C_MALLOC_ALIGNMENT: usize = if cfg!(target_pointer_width = "64") { 16 } else { 8 };
 
 #[cfg(any(target_os = "none", feature = "bare-platform", test))]
 #[inline]
