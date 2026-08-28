@@ -1,6 +1,11 @@
 //! CPU construction of A8 coverage planes for glyph runs and alpha-only
 //! textures. The formulas match the core rasterizer's coverage and sampling
 //! so a hardware A8 blend reproduces the software result.
+//!
+//! A plane is addressed through a `window`: the target-local physical
+//! rectangle whose top-left corner is byte 0 of the plane, `stride` bytes per
+//! row. Executors may hand out planes smaller than the target, so callers
+//! split large runs into windows that fit.
 
 use pocketjs_core::raster::{coverage_index, linear_sample_coordinates};
 use pocketjs_core::text::Atlas;
@@ -8,13 +13,13 @@ use pocketjs_core::{spec, TexView};
 
 use crate::geom::{logical_rect, physical_rect, wh, xy, Clip, Rect};
 
-/// Set every mask byte under `rect` (target coordinates, `stride` bytes per
-/// row) to `value`.
+/// Set the first `window.w * window.h` bytes of a plane (stride `stride`)
+/// to `value`.
 #[inline]
-pub fn fill_mask_rect(mask: &mut [u8], stride: u32, rect: Rect, value: u8) {
-    for y in rect.y..rect.y + rect.h {
-        let start = y as usize * stride as usize + rect.x as usize;
-        mask[start..start + rect.w as usize].fill(value);
+pub fn fill_mask_window(mask: &mut [u8], stride: u32, window: Rect, value: u8) {
+    for y in 0..window.h {
+        let start = y as usize * stride as usize;
+        mask[start..start + window.w as usize].fill(value);
     }
 }
 
@@ -26,10 +31,12 @@ pub fn composite_mask(destination: &mut u8, source: u8) {
     *destination = (s + (d * (255 - s) + 127) / 255) as u8;
 }
 
-/// Composite one GLYPH_RUN's atlas coverage into `mask` over `global_rect`
-/// (the run's physical bounds in global target coordinates). `alpha` is the
-/// run color's alpha, folded into the coverage; `surface` is the target's
-/// logical origin (non-zero for strips).
+/// Composite one GLYPH_RUN's atlas coverage into the plane window.
+///
+/// `global_rect` bounds the composited pixels in global physical
+/// coordinates; `window` is the same area in target-local coordinates (they
+/// differ by the strip origin `surface`). `alpha` is the run color's alpha,
+/// folded into the coverage.
 #[allow(clippy::too_many_arguments)]
 pub fn composite_glyph_run(
     atlas: &Atlas,
@@ -40,6 +47,7 @@ pub fn composite_glyph_run(
     alpha: u32,
     mask: &mut [u8],
     stride: u32,
+    window: Rect,
 ) {
     let scale = scale as i32;
     let cell_w = atlas.cell_w as i32;
@@ -48,6 +56,8 @@ pub fn composite_glyph_run(
     let coverage_w = atlas.coverage_width() as i32;
     let coverage_h = atlas.coverage_height() as i32;
     let bpr = atlas.bytes_per_row();
+    let origin_x = surface.x0 * scale + window.x as i32;
+    let origin_y = surface.y0 * scale + window.y as i32;
     for glyph in op[3..].chunks_exact(2) {
         let (gx, gy) = xy(glyph[0]);
         let gid = (glyph[1] & 0xffff) as u16;
@@ -62,12 +72,11 @@ pub fn composite_glyph_run(
         for py in y0..y1 {
             let sy = coverage_index(py - gy * scale, scale, density, coverage_h);
             let row = &rows[sy * bpr..];
+            let mask_row = (py - origin_y) as usize * stride as usize;
             for px in x0..x1 {
                 let sx = coverage_index(px - gx * scale, scale, density, coverage_w);
-                let local_x = px - surface.x0 * scale;
-                let local_y = py - surface.y0 * scale;
                 composite_mask(
-                    &mut mask[local_y as usize * stride as usize + local_x as usize],
+                    &mut mask[mask_row + (px - origin_x) as usize],
                     ((row[sx] as u32 * alpha + 127) / 255) as u8,
                 );
             }
@@ -117,7 +126,8 @@ pub fn sample_alpha(view: &TexView<'_>, u: f32, v: f32) -> u8 {
     lerp(top, bottom, sample.fy) as u8
 }
 
-/// Composite one TEX_QUAD's alpha channel (times `global_alpha`) into `mask`.
+/// Composite one TEX_QUAD's alpha channel (times `global_alpha`) into the
+/// plane window, restricted to the logical `clip`.
 #[allow(clippy::too_many_arguments)]
 pub fn alpha_quad_into_mask(
     view: &TexView<'_>,
@@ -128,6 +138,7 @@ pub fn alpha_quad_into_mask(
     mask: &mut [u8],
     stride: u32,
     global_alpha: u8,
+    window: Rect,
 ) {
     let logical = logical_rect(op[2], op[3]).intersect(clip);
     if logical.is_empty() {
@@ -137,20 +148,21 @@ pub fn alpha_quad_into_mask(
     let (w, h) = wh(op[3]);
     let scale_i = scale as i32;
     let physical = physical_rect(logical, scale);
+    let origin_x = surface.x0 * scale_i + window.x as i32;
+    let origin_y = surface.y0 * scale_i + window.y as i32;
     let u0 = f32::from_bits(op[4]);
     let v0 = f32::from_bits(op[5]);
     let u1 = f32::from_bits(op[6]);
     let v1 = f32::from_bits(op[7]);
     for py in physical.y..physical.y + physical.h {
         let v = v0 + (v1 - v0) * ((py as i32 - y * scale_i) as f32 + 0.5) / (h * scale_i) as f32;
+        let mask_row = (py as i32 - origin_y) as usize * stride as usize;
         for px in physical.x..physical.x + physical.w {
             let u =
                 u0 + (u1 - u0) * ((px as i32 - x * scale_i) as f32 + 0.5) / (w * scale_i) as f32;
             let alpha = (sample_alpha(view, u, v) as u32 * global_alpha as u32 + 127) / 255;
-            let local_x = px as i32 - surface.x0 * scale_i;
-            let local_y = py as i32 - surface.y0 * scale_i;
             composite_mask(
-                &mut mask[local_y as usize * stride as usize + local_x as usize],
+                &mut mask[mask_row + (px as i32 - origin_x) as usize],
                 alpha as u8,
             );
         }

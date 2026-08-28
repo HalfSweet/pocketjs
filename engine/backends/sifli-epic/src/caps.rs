@@ -93,8 +93,17 @@ pub struct Capabilities {
     /// Largest transaction extent in physical pixels per axis (EPIC
     /// coordinate registers); `u32::MAX` when unlimited.
     pub coordinate_limit: u32,
-    /// The CPU may write the bound target directly after a fence.
+    /// The CPU may write the bound target directly after a fence. When
+    /// false, CPU fallback renders into executor-owned tiles that hardware
+    /// copies out of and back into the target.
     pub direct_cpu_writes: bool,
+    /// Bytes per executor-owned A8 plane. 0 means every plane covers the
+    /// whole target; otherwise A8 runs are split into row bands that fit.
+    pub mask_tile_bytes: u32,
+    /// Physical pixels per executor-owned RGB565 tile used for CPU fallback
+    /// when `direct_cpu_writes` is false. CPU batches are split into row
+    /// bands that fit.
+    pub cpu_tile_pixels: u32,
     pub thresholds: Thresholds,
 }
 
@@ -110,13 +119,16 @@ impl Capabilities {
         blit_quad: Formats::NONE,
         coordinate_limit: u32::MAX,
         direct_cpu_writes: true,
+        mask_tile_bytes: 0,
+        cpu_tile_pixels: 0,
         thresholds: Thresholds::ALWAYS,
     };
 
     /// SF32LB58 EPIC: fills, MONO-layer alpha fills, A8 blends, corner
     /// gradients, axis-aligned VL blits of natively formatted textures. No
     /// color matrix (portable PSM_5650/PSM_8888 need native copies) and no
-    /// 3x3 transform matrix.
+    /// 3x3 transform matrix. The framebuffer is GPU-only, so CPU fallback
+    /// round-trips through 64 KB SRAM tiles and A8 planes are 64 KB bands.
     pub const SF32LB58X: Capabilities = Capabilities {
         fill_opaque: true,
         fill_alpha: true,
@@ -126,7 +138,9 @@ impl Capabilities {
         blit: Formats::NONE,
         blit_quad: Formats::NONE,
         coordinate_limit: 1010,
-        direct_cpu_writes: true,
+        direct_cpu_writes: false,
+        mask_tile_bytes: 64 * 1024,
+        cpu_tile_pixels: 32 * 1024,
         thresholds: Thresholds {
             min_fill: 64,
             min_gradient: 64,

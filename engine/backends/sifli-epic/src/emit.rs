@@ -3,21 +3,25 @@
 //! Every item is clipped to the region, checked against the executor's
 //! capabilities and thresholds, and either submitted as a [`Cmd`] or
 //! appended to a CPU batch. Consecutive CPU items share one rasterizer
-//! dispatch; a fence separates hardware writes from CPU writes so painter
-//! order holds on both sides.
+//! dispatch. A fence separates hardware writes from CPU writes so painter
+//! order holds on both sides; when the executor forbids direct target
+//! writes, the CPU batch renders into a tile that hardware copies out of
+//! and back into the target.
 
 use alloc::vec::Vec;
 
 use pocketjs_core::raster::{render_scaled_rgb565_over, render_scaled_rgb565_window_over};
+use pocketjs_core::text::Atlas;
 use pocketjs_core::{spec, TexView, Ui};
 
 use crate::caps::Capabilities;
-use crate::cmd::{Cmd, Corners, Filter, MaskId, MaskRef, Mirror, PixelFormat, TexSrc, MODULATE_NONE};
-use crate::geom::{
-    channels, fill_rgb565_rect, local_physical_rect, pack_wh, pack_xy, physical_rect, Clip,
-    Point, Rect,
+use crate::cmd::{
+    Cmd, Corners, Filter, MaskId, MaskRef, Mirror, PixelFormat, TexSrc, TileId, MODULATE_NONE,
 };
-use crate::mask::{alpha_quad_into_mask, composite_glyph_run, fill_mask_rect};
+use crate::geom::{
+    channels, local_physical_rect, pack_wh, pack_xy, physical_rect, Clip, Point, Rect,
+};
+use crate::mask::{alpha_quad_into_mask, composite_glyph_run, fill_mask_window};
 use crate::plan::PlanItem;
 use crate::quad::{axis_aligned_texture_rect, texture_source_rect};
 use crate::renderer::RenderStats;
@@ -26,6 +30,9 @@ use crate::submit::Frame;
 /// Number of A8 planes the emitter alternates between so CPU mask
 /// construction can overlap an in-flight blend of the other plane.
 pub(crate) const MASK_PLANES: u8 = 2;
+
+/// Number of RGB565 tiles the emitter alternates between for CPU fallback.
+pub(crate) const CPU_TILES: u8 = 2;
 
 /// Per-frame state shared by every region.
 pub(crate) struct Context<'r> {
@@ -36,21 +43,62 @@ pub(crate) struct Context<'r> {
     pub surface: Clip,
     /// True when `surface` is the whole viewport (direct full-target replay).
     pub full_screen: bool,
-    pub width: u32,
     pub stats: &'r mut RenderStats,
     pub fallback: &'r mut Vec<u32>,
     pub mask_index: &'r mut u8,
+    /// Logical union of every op in the pending CPU batch.
+    pub cpu_bounds: Clip,
+    /// Planes referenced by a `BlendA8` submitted since the last fence.
+    pub mask_pending: [bool; MASK_PLANES as usize],
+    pub tile_index: u8,
 }
 
 impl Context<'_> {
-    fn next_mask(&mut self) -> MaskId {
-        let id = MaskId(*self.mask_index);
-        *self.mask_index = (*self.mask_index + 1) % MASK_PLANES;
-        id
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new<'r>(
+        caps: Capabilities,
+        scale: u32,
+        surface: Clip,
+        full_screen: bool,
+        stats: &'r mut RenderStats,
+        fallback: &'r mut Vec<u32>,
+        mask_index: &'r mut u8,
+    ) -> Context<'r> {
+        fallback.clear();
+        Context {
+            caps,
+            scale,
+            surface,
+            full_screen,
+            stats,
+            fallback,
+            mask_index,
+            cpu_bounds: Clip::empty(),
+            mask_pending: [false; MASK_PLANES as usize],
+            tile_index: 0,
+        }
     }
 
     fn local(&self, clip: Clip) -> Rect {
         local_physical_rect(clip, self.surface, self.scale)
+    }
+
+    fn fence<F: Frame>(&mut self, frame: &mut F) -> Option<()> {
+        frame.fence().ok()?;
+        self.stats.fences += 1;
+        self.mask_pending = [false; MASK_PLANES as usize];
+        Some(())
+    }
+
+    /// Reserve the next A8 plane, fencing first when a blend that reads it
+    /// may still be in flight.
+    fn next_mask<F: Frame>(&mut self, frame: &mut F) -> Option<MaskId> {
+        let id = MaskId(*self.mask_index);
+        *self.mask_index = (*self.mask_index + 1) % MASK_PLANES;
+        if self.mask_pending[id.0 as usize] {
+            self.fence(frame)?;
+        }
+        Some(id)
     }
 
     /// Append one DrawList op to the pending CPU batch under `clip`.
@@ -58,34 +106,89 @@ impl Context<'_> {
         if clip.is_empty() {
             return;
         }
-        self.fallback.push(spec::draw_op::SCISSOR);
-        self.fallback.push(pack_xy(clip.x0, clip.y0));
-        self.fallback
-            .push(pack_wh(clip.x1 - clip.x0, clip.y1 - clip.y0));
-        self.fallback.extend_from_slice(&words[at..at + len]);
-        self.fallback.push(spec::draw_op::SCISSOR_POP);
+        self.push_cpu_words(&words[at..at + len], clip);
         self.stats.software_ops += 1;
         self.stats.software_words += len as u32;
     }
 
-    /// Render the pending CPU batch into the target after a fence.
+    fn push_cpu_words(&mut self, op: &[u32], clip: Clip) {
+        self.fallback.push(spec::draw_op::SCISSOR);
+        self.fallback.push(pack_xy(clip.x0, clip.y0));
+        self.fallback
+            .push(pack_wh(clip.x1 - clip.x0, clip.y1 - clip.y0));
+        self.fallback.extend_from_slice(op);
+        self.fallback.push(spec::draw_op::SCISSOR_POP);
+        self.cpu_bounds = self.cpu_bounds.union(clip);
+    }
+
+    /// Render the pending CPU batch: directly into the target after a fence,
+    /// or through tile round-trips when the executor forbids direct writes.
     fn flush_cpu<F: Frame>(&mut self, ui: &Ui, frame: &mut F) -> Option<()> {
         if self.fallback.is_empty() {
             return Some(());
         }
-        frame.fence().ok()?;
-        let target = frame.target_mut()?;
-        if self.full_screen {
-            render_scaled_rgb565_over(ui, self.fallback, target, self.scale);
+        if self.caps.direct_cpu_writes {
+            self.fence(frame)?;
+            let target = frame.target_mut()?;
+            if self.full_screen {
+                render_scaled_rgb565_over(ui, self.fallback, target, self.scale);
+            } else {
+                render_scaled_rgb565_window_over(
+                    ui,
+                    self.fallback,
+                    target,
+                    self.scale,
+                    self.surface,
+                );
+            }
         } else {
-            render_scaled_rgb565_window_over(ui, self.fallback, target, self.scale, self.surface);
+            let bounds = self.cpu_bounds.intersect(self.surface);
+            if bounds.is_empty() || self.caps.cpu_tile_pixels == 0 {
+                return None;
+            }
+            let scale = self.scale;
+            let capacity = self.caps.cpu_tile_pixels;
+            let mut visit = |band: Clip| -> Option<()> {
+                let local = self.local(band);
+                let tile = TileId(self.tile_index);
+                self.tile_index = (self.tile_index + 1) % CPU_TILES;
+                frame
+                    .submit(&[Cmd::TileOut { tile, src: local }])
+                    .ok()?;
+                frame.fence().ok()?;
+                self.stats.fences += 1;
+                self.mask_pending = [false; MASK_PLANES as usize];
+                let pixels = local.area() as usize;
+                let plane = frame.tile_mut(tile);
+                if plane.len() < pixels {
+                    return None;
+                }
+                render_scaled_rgb565_window_over(
+                    ui,
+                    self.fallback,
+                    &mut plane[..pixels],
+                    scale,
+                    band,
+                );
+                frame
+                    .submit(&[Cmd::TileIn { tile, dst: local }])
+                    .ok()?;
+                self.stats.cpu_tiles += 1;
+                self.stats.cpu_tile_pixels += local.area();
+                Some(())
+            };
+            for_each_band(bounds, scale, Some(capacity), &mut visit)?;
         }
         self.fallback.clear();
+        self.cpu_bounds = Clip::empty();
         Some(())
     }
 
     fn submit<F: Frame>(&mut self, ui: &Ui, frame: &mut F, cmd: Cmd<'_>) -> Option<()> {
         self.flush_cpu(ui, frame)?;
+        if let Cmd::BlendA8 { mask, .. } = cmd {
+            self.mask_pending[mask.mask.0 as usize] = true;
+        }
         frame.submit(&[cmd]).ok()
     }
 
@@ -111,9 +214,13 @@ impl Context<'_> {
             )?;
             self.stats.epic_fills += 1;
         } else {
-            self.flush_cpu(ui, frame)?;
-            frame.fence().ok()?;
-            fill_rgb565_rect(frame.target_mut()?, self.width, physical, 0);
+            let clear = [
+                spec::draw_op::RECT,
+                pack_xy(region.x0, region.y0),
+                pack_wh(region.x1 - region.x0, region.y1 - region.y0),
+                0xff00_0000,
+            ];
+            self.push_cpu_words(&clear, region);
         }
         Some(())
     }
@@ -288,41 +395,76 @@ impl Context<'_> {
             return Some(());
         }
         if !opaque && self.caps.a8_blend && rect.area() >= self.caps.thresholds.min_blend {
-            let mask = self.next_mask();
-            let stride = self.width;
-            fill_mask_rect(frame.mask_mut(mask), stride, rect, a as u8);
-            self.submit(
-                ui,
-                frame,
-                Cmd::BlendA8 {
-                    dst: rect,
-                    mask: MaskRef {
-                        mask,
-                        offset: rect.y * stride + rect.x,
-                        stride,
-                    },
-                    color: rgb,
-                    alpha: 255,
-                },
-            )?;
-            self.stats.epic_blends += 1;
+            let alpha = a as u8;
+            self.blend_a8(ui, frame, logical, rgb, |plane, stride, window, _band| {
+                fill_mask_window(plane, stride, window, alpha);
+            })?;
             return Some(());
         }
         // Small or unsupported: replay the rectangle on the CPU with the
         // exact integer blend, batched with its neighbours.
-        self.fallback.push(spec::draw_op::SCISSOR);
-        self.fallback.push(pack_xy(logical.x0, logical.y0));
-        self.fallback
-            .push(pack_wh(logical.x1 - logical.x0, logical.y1 - logical.y0));
-        self.fallback.extend_from_slice(&[
+        let op = [
             spec::draw_op::RECT,
             pack_xy(logical.x0, logical.y0),
             pack_wh(logical.x1 - logical.x0, logical.y1 - logical.y0),
             color,
-        ]);
-        self.fallback.push(spec::draw_op::SCISSOR_POP);
+        ];
+        self.push_cpu_words(&op, logical);
         self.stats.software_ops += 1;
         self.stats.software_words += 4;
+        Some(())
+    }
+
+    /// Blend one A8 run covering the logical `bounds`, splitting it into row
+    /// bands that fit the executor's planes. `compose(plane, stride, window,
+    /// band)` fills the plane window for one band (`window` is the band in
+    /// target-local physical pixels, `band` in logical pixels).
+    fn blend_a8<F: Frame>(
+        &mut self,
+        ui: &Ui,
+        frame: &mut F,
+        bounds: Clip,
+        color: [u8; 3],
+        compose: impl Fn(&mut [u8], u32, Rect, Clip),
+    ) -> Option<()> {
+        let full = self.local(bounds);
+        if full.is_empty() {
+            return Some(());
+        }
+        let capacity = (self.caps.mask_tile_bytes != 0).then_some(self.caps.mask_tile_bytes);
+        let scale = self.scale;
+        let mut bands = 0u32;
+        let mut visit = |band: Clip| -> Option<()> {
+            let window = self.local(band);
+            let stride = window.w;
+            let mask = self.next_mask(frame)?;
+            let plane = frame.mask_mut(mask);
+            if plane.len() < (stride * window.h) as usize {
+                return None;
+            }
+            compose(plane, stride, window, band);
+            self.submit(
+                ui,
+                frame,
+                Cmd::BlendA8 {
+                    dst: window,
+                    mask: MaskRef {
+                        mask,
+                        offset: 0,
+                        stride,
+                    },
+                    color,
+                    alpha: 255,
+                },
+            )?;
+            self.stats.epic_blends += 1;
+            bands += 1;
+            Some(())
+        };
+        for_each_band(bounds, scale, capacity, &mut visit)?;
+        if bands > 1 {
+            self.stats.mask_bands += bands;
+        }
         Some(())
     }
 
@@ -403,31 +545,33 @@ impl Context<'_> {
         let Some(atlas) = ui.font_atlas(slot) else {
             return Some(true);
         };
-        let global_rect = physical_rect(bounds, self.scale);
         let rect = self.local(bounds);
         if !self.caps.a8_blend || rect.is_empty() || rect.area() < self.caps.thresholds.min_blend {
             return Some(false);
         }
-        let mask = self.next_mask();
-        let stride = self.width;
-        let plane = frame.mask_mut(mask);
-        fill_mask_rect(plane, stride, rect, 0);
-        composite_glyph_run(atlas, op, global_rect, self.surface, self.scale, a, plane, stride);
-        self.submit(
+        let atlas: &Atlas = atlas;
+        let scale = self.scale;
+        let surface = self.surface;
+        self.blend_a8(
             ui,
             frame,
-            Cmd::BlendA8 {
-                dst: rect,
-                mask: MaskRef {
-                    mask,
-                    offset: rect.y * stride + rect.x,
+            bounds,
+            [r as u8, g as u8, b as u8],
+            |plane, stride, window, band| {
+                fill_mask_window(plane, stride, window, 0);
+                composite_glyph_run(
+                    atlas,
+                    op,
+                    physical_rect(band, scale),
+                    surface,
+                    scale,
+                    a,
+                    plane,
                     stride,
-                },
-                color: [r as u8, g as u8, b as u8],
-                alpha: 255,
+                    window,
+                );
             },
         )?;
-        self.stats.epic_blends += 1;
         Some(true)
     }
 
@@ -455,31 +599,25 @@ impl Context<'_> {
         if !self.caps.a8_blend || rect.is_empty() || rect.area() < self.caps.thresholds.min_blend {
             return Some(false);
         }
-        let mask = self.next_mask();
-        let stride = self.width;
         let scale = self.scale;
         let surface = self.surface;
-        let plane = frame.mask_mut(mask);
-        fill_mask_rect(plane, stride, rect, 0);
-        for index in 0..count {
-            let op = &words[at + index * 9..at + index * 9 + 9];
-            alpha_quad_into_mask(&view, op, surface, clip, scale, plane, stride, a as u8);
-        }
-        self.submit(
+        let view: TexView<'_> = view;
+        self.blend_a8(
             ui,
             frame,
-            Cmd::BlendA8 {
-                dst: rect,
-                mask: MaskRef {
-                    mask,
-                    offset: rect.y * stride + rect.x,
-                    stride,
-                },
-                color: [r as u8, g as u8, b as u8],
-                alpha: 255,
+            bounds,
+            [r as u8, g as u8, b as u8],
+            |plane, stride, window, band| {
+                fill_mask_window(plane, stride, window, 0);
+                let band_clip = clip.intersect(band);
+                for index in 0..count {
+                    let op = &words[at + index * 9..at + index * 9 + 9];
+                    alpha_quad_into_mask(
+                        &view, op, surface, band_clip, scale, plane, stride, a as u8, window,
+                    );
+                }
             },
         )?;
-        self.stats.epic_blends += 1;
         Some(true)
     }
 
@@ -710,6 +848,47 @@ impl Context<'_> {
             y: (point.y - self.surface.y0) * scale,
         })
     }
+}
+
+/// Visit logical sub-rectangles of `bounds` whose physical area at `scale`
+/// fits `capacity` pixels (`None` capacity = unlimited): full-width row
+/// bands when a row fits, otherwise single rows split into column chunks.
+/// Fails when one logical pixel exceeds the capacity.
+fn for_each_band(
+    bounds: Clip,
+    scale: u32,
+    capacity: Option<u32>,
+    mut visit: impl FnMut(Clip) -> Option<()>,
+) -> Option<()> {
+    if bounds.is_empty() {
+        return Some(());
+    }
+    let Some(capacity) = capacity else {
+        return visit(bounds);
+    };
+    let pixel = scale * scale;
+    if pixel == 0 || capacity < pixel {
+        return None;
+    }
+    let width = (bounds.x1 - bounds.x0) as u32;
+    let height = (bounds.y1 - bounds.y0) as u32;
+    let (cols, rows) = if width * pixel <= capacity {
+        (width, (capacity / (width * pixel)).clamp(1, height))
+    } else {
+        ((capacity / pixel).clamp(1, width), 1)
+    };
+    let mut y = bounds.y0;
+    while y < bounds.y1 {
+        let y1 = (y + rows as i32).min(bounds.y1);
+        let mut x = bounds.x0;
+        while x < bounds.x1 {
+            let x1 = (x + cols as i32).min(bounds.x1);
+            visit(Clip::new(x, y, x1, y1))?;
+            x = x1;
+        }
+        y = y1;
+    }
+    Some(())
 }
 
 fn pixel_format(view: &TexView<'_>) -> Option<PixelFormat> {

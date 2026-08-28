@@ -21,14 +21,20 @@ the executor that actually programs EPIC and VG Lite lives in `hosts/sifli`.
   executor-registered native copies, or solid colors.
 - `submit` is the executor contract: `Submit::begin` binds a target for one
   frame, `Frame::submit` runs commands in order, `Frame::fence` completes
-  them, `Frame::mask_mut` exposes executor-owned A8 planes, and
-  `Frame::target_mut` allows direct CPU writes where the executor permits
-  them.
+  them, `Frame::mask_mut` and `Frame::tile_mut` expose executor-owned A8
+  planes and RGB565 tiles, and `Frame::target_mut` allows direct CPU writes
+  where the executor permits them. When it does not (a GPU-only
+  framebuffer), CPU batches round-trip through tiles: `TileOut`, a fence,
+  the core rasterizer into the tile, `TileIn`. A8 runs larger than a plane
+  are split into bands, and a plane is only rewritten after a fence
+  retired the blend that read it.
 - `caps` describes what an executor can run. The planner never builds a
   command the capabilities forbid, so executors do not decline work; on the
   SiFli host the values come from the chip's SDK feature gates.
 - `mock` (feature `mock`, always on for tests) is a recording software
-  executor that runs every command with the core's exact pixel formulas.
+  executor that runs every command with the core's exact pixel formulas;
+  `DeferredMockGpu` keeps commands in flight until a fence and panics when
+  the renderer touches a plane, tile, or the target too early.
 
 ## Routing
 

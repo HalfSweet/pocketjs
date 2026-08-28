@@ -89,14 +89,20 @@ impl Submit for MockGpu {
         self.last_surface_height = height;
         self.last_target_kind = Some(kind);
         let pixels = width as usize * height as usize;
+        let mask_bytes = if self.caps.mask_tile_bytes == 0 {
+            pixels
+        } else {
+            self.caps.mask_tile_bytes as usize
+        };
         for mask in &mut self.masks {
-            if mask.len() < pixels {
-                mask.resize(pixels, 0);
+            if mask.len() < mask_bytes {
+                mask.resize(mask_bytes, 0);
             }
         }
+        let tile_pixels = self.caps.cpu_tile_pixels as usize;
         for tile in &mut self.tiles {
-            if tile.len() < pixels {
-                tile.resize(pixels, 0);
+            if tile.len() < tile_pixels {
+                tile.resize(tile_pixels, 0);
             }
         }
         Ok(MockFrame {
@@ -132,7 +138,11 @@ impl Frame for MockFrame<'_> {
     }
 
     fn target_mut(&mut self) -> Option<&mut [u16]> {
-        Some(self.target)
+        if self.gpu.caps.direct_cpu_writes {
+            Some(self.target)
+        } else {
+            None
+        }
     }
 
     fn finish(self) -> Result<(), SubmitError> {
@@ -481,4 +491,293 @@ pub fn lerp_color(from: u32, to: u32, factor: f32) -> u32 {
     let (fr, fg, fb, fa) = channels(from);
     let (tr, tg, tb, ta) = channels(to);
     mix(fr, tr) | (mix(fg, tg) << 8) | (mix(fb, tb) << 16) | (mix(fa, ta) << 24)
+}
+
+// ---- deferred execution ------------------------------------------------------------
+
+/// Owned copy of a command so it can be executed after the frame's borrows
+/// ended.
+enum OwnedSrc {
+    Native(u32),
+    Portable {
+        pixels: Vec<u8>,
+        palette: Option<Vec<u8>>,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    },
+    Solid(u32),
+}
+
+impl OwnedSrc {
+    fn from(src: &TexSrc<'_>) -> OwnedSrc {
+        match *src {
+            TexSrc::Native { id } => OwnedSrc::Native(id),
+            TexSrc::Portable {
+                pixels,
+                palette,
+                width,
+                height,
+                format,
+            } => OwnedSrc::Portable {
+                pixels: pixels.to_vec(),
+                palette: palette.map(|p| p.to_vec()),
+                width,
+                height,
+                format,
+            },
+            TexSrc::Solid { abgr } => OwnedSrc::Solid(abgr),
+        }
+    }
+
+    fn borrow(&self) -> TexSrc<'_> {
+        match self {
+            OwnedSrc::Native(id) => TexSrc::Native { id: *id },
+            OwnedSrc::Portable {
+                pixels,
+                palette,
+                width,
+                height,
+                format,
+            } => TexSrc::Portable {
+                pixels,
+                palette: palette.as_deref(),
+                width: *width,
+                height: *height,
+                format: *format,
+            },
+            OwnedSrc::Solid(abgr) => TexSrc::Solid { abgr: *abgr },
+        }
+    }
+}
+
+enum OwnedCmd {
+    Plain(Cmd<'static>),
+    Blit {
+        src: OwnedSrc,
+        src_rect: Rect,
+        dst: Rect,
+        clip: Rect,
+        mirror: Mirror,
+        modulate: u32,
+        filter: Filter,
+    },
+    BlitQuad {
+        src: OwnedSrc,
+        src_rect: Rect,
+        quad: [Point; 4],
+        clip: Rect,
+        modulate: u32,
+        filter: Filter,
+    },
+}
+
+impl OwnedCmd {
+    fn from(cmd: &Cmd<'_>) -> OwnedCmd {
+        match *cmd {
+            Cmd::Blit {
+                src,
+                src_rect,
+                dst,
+                clip,
+                mirror,
+                modulate,
+                filter,
+            } => OwnedCmd::Blit {
+                src: OwnedSrc::from(&src),
+                src_rect,
+                dst,
+                clip,
+                mirror,
+                modulate,
+                filter,
+            },
+            Cmd::BlitQuad {
+                src,
+                src_rect,
+                quad,
+                clip,
+                modulate,
+                filter,
+            } => OwnedCmd::BlitQuad {
+                src: OwnedSrc::from(&src),
+                src_rect,
+                quad,
+                clip,
+                modulate,
+                filter,
+            },
+            Cmd::Fill { dst, color } => OwnedCmd::Plain(Cmd::Fill { dst, color }),
+            Cmd::FillAlpha { dst, color, alpha } => {
+                OwnedCmd::Plain(Cmd::FillAlpha { dst, color, alpha })
+            }
+            Cmd::BlendA8 {
+                dst,
+                mask,
+                color,
+                alpha,
+            } => OwnedCmd::Plain(Cmd::BlendA8 {
+                dst,
+                mask,
+                color,
+                alpha,
+            }),
+            Cmd::Gradient { dst, corners } => OwnedCmd::Plain(Cmd::Gradient { dst, corners }),
+            Cmd::TileOut { tile, src } => OwnedCmd::Plain(Cmd::TileOut { tile, src }),
+            Cmd::TileIn { tile, dst } => OwnedCmd::Plain(Cmd::TileIn { tile, dst }),
+            Cmd::Fence => OwnedCmd::Plain(Cmd::Fence),
+        }
+    }
+
+    fn borrow(&self) -> Cmd<'_> {
+        match self {
+            OwnedCmd::Plain(cmd) => *cmd,
+            OwnedCmd::Blit {
+                src,
+                src_rect,
+                dst,
+                clip,
+                mirror,
+                modulate,
+                filter,
+            } => Cmd::Blit {
+                src: src.borrow(),
+                src_rect: *src_rect,
+                dst: *dst,
+                clip: *clip,
+                mirror: *mirror,
+                modulate: *modulate,
+                filter: *filter,
+            },
+            OwnedCmd::BlitQuad {
+                src,
+                src_rect,
+                quad,
+                clip,
+                modulate,
+                filter,
+            } => Cmd::BlitQuad {
+                src: src.borrow(),
+                src_rect: *src_rect,
+                quad: *quad,
+                clip: *clip,
+                modulate: *modulate,
+                filter: *filter,
+            },
+        }
+    }
+
+    fn touches_mask(&self, mask: MaskId) -> bool {
+        matches!(self, OwnedCmd::Plain(Cmd::BlendA8 { mask: m, .. }) if m.mask == mask)
+    }
+
+    fn touches_tile(&self, tile: TileId) -> bool {
+        matches!(
+            self,
+            OwnedCmd::Plain(Cmd::TileOut { tile: t, .. }) | OwnedCmd::Plain(Cmd::TileIn { tile: t, .. })
+                if *t == tile
+        )
+    }
+}
+
+/// A [`MockGpu`] that keeps every submitted command in flight until the next
+/// fence or `finish`, proving that the renderer never touches a plane, tile,
+/// or the target while hardware may still be using it. Those accesses panic
+/// when commands are pending.
+#[derive(Default)]
+pub struct DeferredMockGpu {
+    pub inner: MockGpu,
+}
+
+impl DeferredMockGpu {
+    pub fn new(caps: Capabilities) -> Self {
+        DeferredMockGpu {
+            inner: MockGpu::new(caps),
+        }
+    }
+}
+
+/// One bound target of a [`DeferredMockGpu`].
+pub struct DeferredFrame<'f> {
+    inner: MockFrame<'f>,
+    queue: Vec<OwnedCmd>,
+}
+
+impl Submit for DeferredMockGpu {
+    type Frame<'f>
+        = DeferredFrame<'f>
+    where
+        Self: 'f;
+
+    fn caps(&self) -> &Capabilities {
+        &self.inner.caps
+    }
+
+    fn begin<'f>(
+        &'f mut self,
+        target: &'f mut [u16],
+        width: u32,
+        height: u32,
+        kind: TargetKind,
+    ) -> Result<Self::Frame<'f>, SubmitError> {
+        Ok(DeferredFrame {
+            inner: self.inner.begin(target, width, height, kind)?,
+            queue: Vec::new(),
+        })
+    }
+}
+
+impl DeferredFrame<'_> {
+    fn drain(&mut self) -> Result<(), SubmitError> {
+        let queue = core::mem::take(&mut self.queue);
+        for (index, owned) in queue.iter().enumerate() {
+            if !self.inner.execute(&owned.borrow()) {
+                return Err(SubmitError::Unsupported { index });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Frame for DeferredFrame<'_> {
+    fn submit(&mut self, cmds: &[Cmd<'_>]) -> Result<(), SubmitError> {
+        self.queue.extend(cmds.iter().map(OwnedCmd::from));
+        Ok(())
+    }
+
+    fn fence(&mut self) -> Result<(), SubmitError> {
+        self.drain()?;
+        self.inner.fence()
+    }
+
+    fn mask_mut(&mut self, mask: MaskId) -> &mut [u8] {
+        assert!(
+            !self.queue.iter().any(|cmd| cmd.touches_mask(mask)),
+            "mask {} rewritten while a BlendA8 reading it is in flight",
+            mask.0
+        );
+        self.inner.mask_mut(mask)
+    }
+
+    fn tile_mut(&mut self, tile: TileId) -> &mut [u16] {
+        assert!(
+            !self.queue.iter().any(|cmd| cmd.touches_tile(tile)),
+            "tile {} accessed while a tile copy using it is in flight",
+            tile.0
+        );
+        self.inner.tile_mut(tile)
+    }
+
+    fn target_mut(&mut self) -> Option<&mut [u16]> {
+        assert!(
+            self.queue.is_empty(),
+            "target written while {} hardware commands are in flight",
+            self.queue.len()
+        );
+        self.inner.target_mut()
+    }
+
+    fn finish(mut self) -> Result<(), SubmitError> {
+        self.drain()
+    }
 }

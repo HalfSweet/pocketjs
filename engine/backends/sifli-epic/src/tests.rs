@@ -24,6 +24,8 @@ fn caps() -> Capabilities {
         blit_quad: Formats::NONE,
         coordinate_limit: u32::MAX,
         direct_cpu_writes: true,
+        mask_tile_bytes: 0,
+        cpu_tile_pixels: 0,
         thresholds: Thresholds::ALWAYS,
     }
 }
@@ -1480,4 +1482,263 @@ fn software_only_capabilities_reproduce_the_core_exactly() {
     assert_eq!(epic.fills + epic.gradients + epic.blends + epic.copies, 0);
     assert_eq!(stats.software_ops, 5);
     assert_eq!(output, full_reference(&ui, &words, 12, 8));
+}
+
+// ---- deferred execution, tiles, bands, and strips ----------------------------------
+
+use crate::mock::DeferredMockGpu;
+
+/// A scene touching every routing decision: fills, translucent fills,
+/// gradients, glyph-free A8 runs, blits, quads, and CPU fallbacks.
+fn matrix_scene(ui: &mut Ui) -> Vec<u32> {
+    let mut corner = vec![0u8; 4 * 4 * 4];
+    for (i, pixel) in corner.chunks_exact_mut(4).enumerate() {
+        pixel.copy_from_slice(&[255, 255, 255, (i * 17) as u8]);
+    }
+    let mask = ui.upload_texture(&corner, 4, 4, spec::psm::PSM_8888);
+    let mut colour = vec![0u8; 4 * 4 * 4];
+    for (i, pixel) in colour.chunks_exact_mut(4).enumerate() {
+        pixel.copy_from_slice(&[(i * 16) as u8, 255 - (i * 16) as u8, 90, 200]);
+    }
+    let image = ui.upload_texture(&colour, 4, 4, spec::psm::PSM_8888);
+    let opaque = ui.upload_texture(&vec![0x1f, 0x00].repeat(16), 4, 4, spec::psm::PSM_5650);
+    let vertex = |x: i16, y: i16, u: f32, v: f32| [xy_word(x, y), u.to_bits(), v.to_bits()];
+    let mut words = vec![
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(40, 24),
+        0xff30_2010,
+        spec::draw_op::GRAD_RECT,
+        xy_word(2, 2),
+        wh_word(36, 6),
+        0xff00_0040,
+        0xffc0_8000,
+        spec::GradDir::ToRight as u32,
+        spec::draw_op::GRAD_RECT,
+        xy_word(4, 10),
+        wh_word(8, 8),
+        0x8000_00ff,
+        0xffff_8000,
+        spec::GradDir::ToBottom as u32,
+        spec::draw_op::RECT,
+        xy_word(6, 6),
+        wh_word(10, 10),
+        0x8000_ff00,
+        spec::draw_op::TEX_QUAD,
+        mask as u32,
+        xy_word(14, 12),
+        wh_word(4, 4),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0xffff_00ff,
+        spec::draw_op::TEX_QUAD,
+        mask as u32,
+        xy_word(18, 12),
+        wh_word(4, 4),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0xffff_00ff,
+        spec::draw_op::TEX_QUAD,
+        image as u32,
+        xy_word(22, 2),
+        wh_word(8, 12),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0xc0ff_ffff,
+        spec::draw_op::TEX_QUAD,
+        opaque as u32,
+        xy_word(32, 16),
+        wh_word(4, 4),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0xffff_ffff,
+        spec::draw_op::TRI,
+        xy_word(24, 16),
+        xy_word(20, 22),
+        xy_word(30, 23),
+        0xff00_ff00,
+        0xffff_0000,
+        0xff00_00ff,
+    ];
+    let solid = 0x8000_80ff;
+    words.extend_from_slice(&[
+        spec::draw_op::TRI,
+        xy_word(34, 2),
+        xy_word(32, 6),
+        xy_word(36, 8),
+        solid,
+        solid,
+        solid,
+        spec::draw_op::TRI,
+        xy_word(34, 2),
+        xy_word(36, 8),
+        xy_word(38, 4),
+        solid,
+        solid,
+        solid,
+    ]);
+    words.extend_from_slice(&[spec::draw_op::TEX_TRI, image as u32]);
+    words.extend_from_slice(&vertex(2, 18, 0.0, 0.0));
+    words.extend_from_slice(&vertex(1, 23, 0.0, 1.0));
+    words.extend_from_slice(&vertex(8, 22, 1.0, 1.0));
+    words.push(0xffff_ffff);
+    words.extend_from_slice(&[spec::draw_op::TEX_TRI, image as u32]);
+    words.extend_from_slice(&vertex(2, 18, 0.0, 0.0));
+    words.extend_from_slice(&vertex(8, 22, 1.0, 1.0));
+    words.extend_from_slice(&vertex(9, 17, 1.0, 0.0));
+    words.push(0xffff_ffff);
+    words.extend_from_slice(&[
+        spec::draw_op::SCISSOR,
+        xy_word(10, 18),
+        wh_word(8, 5),
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(40, 24),
+        0x40ff_ffff,
+        spec::draw_op::SCISSOR_POP,
+    ]);
+    words
+}
+
+fn tile_caps() -> Capabilities {
+    Capabilities {
+        direct_cpu_writes: false,
+        cpu_tile_pixels: 40 * 3,
+        mask_tile_bytes: 24,
+        ..caps()
+    }
+}
+
+#[test]
+fn cpu_fallback_round_trips_through_tiles_when_direct_writes_are_forbidden() {
+    let mut ui = Ui::new();
+    ui.set_viewport(40.0, 24.0);
+    let words = matrix_scene(&mut ui);
+    let expected = full_reference(&ui, &words, 40, 24);
+
+    let mut output = vec![0u16; 40 * 24];
+    let mut epic = MockGpu::new(tile_caps());
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 40, 24, &mut epic)
+        .unwrap();
+    assert!(stats.software_ops > 0);
+    assert!(stats.cpu_tiles >= 2, "batches are split into 40x3 tiles");
+    assert_eq!(stats.cpu_tile_pixels % (40 * 3), 0);
+    assert!(stats.mask_bands > 1, "the 10x10 translucent rect needs bands");
+    assert_eq!(output, expected);
+
+    let mut deferred = vec![0u16; 40 * 24];
+    let deferred_stats = renderer()
+        .render(&ui, &words, &mut deferred, 40, 24, &mut DeferredMockGpu::new(tile_caps()))
+        .unwrap();
+    assert_eq!(deferred_stats, stats);
+    assert_eq!(deferred, expected);
+}
+
+#[test]
+fn deferred_execution_matches_immediate_execution_for_every_preset() {
+    let mut ui = Ui::new();
+    ui.set_viewport(40.0, 24.0);
+    let words = matrix_scene(&mut ui);
+    let expected = full_reference(&ui, &words, 40, 24);
+    let presets = [
+        ("software", Capabilities::NONE),
+        ("default", caps()),
+        ("texture blits", caps_with_texture_blits()),
+        ("alpha fills", Capabilities { fill_alpha: true, ..caps() }),
+        ("tiles", tile_caps()),
+        ("tiles and blits", Capabilities { ..caps_with_texture_blits() }),
+    ];
+    for (name, preset) in presets {
+        let mut immediate = vec![0u16; 40 * 24];
+        let stats = renderer()
+            .render(&ui, &words, &mut immediate, 40, 24, &mut MockGpu::new(preset))
+            .unwrap();
+        let mut deferred = vec![0u16; 40 * 24];
+        let deferred_stats = renderer()
+            .render(&ui, &words, &mut deferred, 40, 24, &mut DeferredMockGpu::new(preset))
+            .unwrap();
+        assert_eq!(stats, deferred_stats, "{name}");
+        assert_eq!(immediate, deferred, "{name}");
+        if preset.blit_quad == Formats::NONE {
+            assert_eq!(immediate, expected, "{name}: exact paths only");
+        }
+    }
+}
+
+#[test]
+fn a8_runs_fence_before_reusing_an_in_flight_plane() {
+    let mut ui = Ui::new();
+    ui.set_viewport(8.0, 8.0);
+    let words = vec![
+        spec::draw_op::RECT,
+        xy_word(0, 0),
+        wh_word(8, 8),
+        0x8000_00ff,
+        spec::draw_op::RECT,
+        xy_word(1, 1),
+        wh_word(6, 6),
+        0x80ff_0000,
+        spec::draw_op::RECT,
+        xy_word(2, 2),
+        wh_word(4, 4),
+        0x8000_ff00,
+    ];
+    let mut output = vec![0u16; 64];
+    let mut epic = DeferredMockGpu::new(caps());
+    let stats = renderer()
+        .render(&ui, &words, &mut output, 8, 8, &mut epic)
+        .unwrap();
+    assert_eq!(stats.epic_blends, 3);
+    assert_eq!(stats.fences, 1, "third blend reuses the first plane");
+    assert_eq!(output, full_reference(&ui, &words, 8, 8));
+}
+
+#[test]
+fn strips_assemble_into_the_full_render_at_every_scale() {
+    let mut ui = Ui::new_with_raster_density(2);
+    ui.set_viewport(40.0, 24.0);
+    let words = matrix_scene(&mut ui);
+    for scale in [1u32, 2] {
+        let width = 40 * scale as usize;
+        let height = 24 * scale as usize;
+        let mut full = vec![0u16; width * height];
+        pocketjs_core::raster::render_scaled_rgb565(&ui, &words, &mut full, scale);
+        for (name, preset) in [
+            ("software", Capabilities::NONE),
+            ("default", caps()),
+            ("tiles", tile_caps()),
+        ] {
+            for rows in [1u32, 5, 24] {
+                let mut assembled = vec![0u16; width * height];
+                let mut y = 0u32;
+                while y < 24 {
+                    let region = Rect {
+                        x: 0,
+                        y,
+                        w: 40,
+                        h: rows.min(24 - y),
+                    };
+                    let strip_len = width * region.h as usize * scale as usize;
+                    let mut strip = vec![0u16; strip_len];
+                    let mut renderer = Renderer::new(RendererConfig { scale }).unwrap();
+                    renderer
+                        .render_strip(&ui, &words, &mut strip, region, &mut MockGpu::new(preset))
+                        .unwrap_or_else(|| panic!("{name} scale {scale} rows {rows} y {y}"));
+                    let start = y as usize * scale as usize * width;
+                    assembled[start..start + strip_len].copy_from_slice(&strip);
+                    y += region.h;
+                }
+                assert_eq!(assembled, full, "{name} scale {scale} rows {rows}");
+            }
+        }
+    }
 }

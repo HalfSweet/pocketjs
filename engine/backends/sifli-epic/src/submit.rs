@@ -60,13 +60,15 @@ pub trait Frame {
     /// Complete every submitted command.
     fn fence(&mut self) -> Result<(), SubmitError>;
 
-    /// The A8 plane `mask`, at least `width * height` bytes for the bound
-    /// target, writable by the CPU. Must not be rewritten while a submitted
-    /// `BlendA8` referencing it may still be in flight.
+    /// The A8 plane `mask`, writable by the CPU: at least
+    /// `Capabilities::mask_tile_bytes` bytes, or `width * height` bytes when
+    /// that is 0. The renderer fences before rewriting a plane a submitted
+    /// `BlendA8` may still be reading.
     fn mask_mut(&mut self, mask: MaskId) -> &mut [u8];
 
-    /// The RGB565 tile `tile`, writable by the CPU after the `TileOut` that
-    /// filled it was fenced.
+    /// The RGB565 tile `tile`, at least `Capabilities::cpu_tile_pixels`
+    /// pixels, writable by the CPU after the `TileOut` that filled it was
+    /// fenced.
     fn tile_mut(&mut self, tile: TileId) -> &mut [u16];
 
     /// The target pixels for direct CPU writes, `None` when the executor

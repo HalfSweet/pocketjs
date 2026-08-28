@@ -53,6 +53,13 @@ pub struct RenderStats {
     pub full_redraw: bool,
     /// True only when the 75% damage policy promoted a partial plan to full.
     pub full_redraw_promoted: bool,
+    /// Fences issued before CPU work or plane reuse.
+    pub fences: u32,
+    /// CPU fallback tile round-trips and the physical pixels they copied.
+    pub cpu_tiles: u32,
+    pub cpu_tile_pixels: u32,
+    /// A8 runs split across more than one plane band (bands counted).
+    pub mask_bands: u32,
 }
 
 /// Core damage snapshot describing the pixels stored in one framebuffer.
@@ -271,16 +278,15 @@ impl Renderer {
             .begin(destination, width, height, TargetKind::Strip)
             .ok()?;
         let rendered = {
-            let mut context = Context {
+            let mut context = Context::new(
                 caps,
                 scale,
                 surface,
-                full_screen: surface == screen,
-                width,
-                stats: &mut stats,
-                fallback: &mut self.fallback_words,
-                mask_index: &mut self.mask_index,
-            };
+                surface == screen,
+                &mut stats,
+                &mut self.fallback_words,
+                &mut self.mask_index,
+            );
             context
                 .clear_region(ui, &mut frame, clip)
                 .and_then(|()| context.emit_region(ui, words, &self.plan, &mut frame, clip))
@@ -364,16 +370,15 @@ impl Renderer {
             .begin(destination, width, height, TargetKind::Framebuffer)
             .ok()?;
         let rendered = {
-            let mut context = Context {
+            let mut context = Context::new(
                 caps,
                 scale,
                 surface,
-                full_screen: true,
-                width,
-                stats: &mut stats,
-                fallback: &mut self.fallback_words,
-                mask_index: &mut self.mask_index,
-            };
+                true,
+                &mut stats,
+                &mut self.fallback_words,
+                &mut self.mask_index,
+            );
             let mut rendered = Some(());
             for &region in damage.regions() {
                 if local_physical_rect(region, surface, scale).is_empty() {
