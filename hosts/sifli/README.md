@@ -131,8 +131,9 @@ constants come from the generated
 ```
 
 `bun tools/sifli.ts assets <project>` compiles each guest with
-`tools/build.ts` (a project entry with the project as its root, or one of
-this repository's demo outputs), writes `<project>/assets/<output>.js|.pak`,
+`tools/build.ts` (a project entry with the project as its root and the
+`pocket.config.ts` next to the entry when one exists, or one of this
+repository's demo outputs), writes `<project>/assets/<output>.js|.pak`,
 bakes an optional `.epic` native texture pak, and generates
 `src/pocket_assets.S` (`.incbin` of every file, `../assets/` relative to
 `project/`) and `src/pocket_catalog.generated.c` (the `PocketjsCatalog`

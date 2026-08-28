@@ -28,7 +28,8 @@
 //       { "output": "hero-main", "title": "Hero" }
 //     ]
 //   }
-// A guest with `entry` is compiled from the project; without it the output is
+// A guest with `entry` is compiled from the project (with the pocket.config.ts
+// next to the entry when one exists, or `config`); without it the output is
 // one of this repository's demo apps. `native: true` bakes a .epic pak with
 // every image; `native: { opaque }` precomposites PSM_8888 alpha over that
 // color into opaque RGB565.
@@ -47,6 +48,9 @@ interface GuestSpec {
   readonly output: string;
   readonly title?: string;
   readonly entry?: string;
+  /** Pocket config for a project entry: a project-relative path, `false` for
+   *  none; omitted = the pocket.config.ts next to the entry when it exists. */
+  readonly config?: string | false;
   readonly native?: boolean | { readonly opaque?: string };
 }
 
@@ -96,12 +100,24 @@ function buildGuest(projectDir: string, manifest: SifliManifest, guest: GuestSpe
   if (guest.entry) {
     const entry = resolve(projectDir, guest.entry);
     if (!existsSync(entry)) throw new Error(`${guest.output}: entry ${entry} not found`);
+    const configPath = guest.config === false
+      ? undefined
+      : guest.config
+        ? resolve(projectDir, guest.config)
+        : join(dirname(entry), "pocket.config.ts");
+    const configArgs = configPath && existsSync(configPath)
+      ? [`--config=${configPath}`]
+      : ["--no-config"];
+    if (guest.config && !existsSync(configPath ?? "")) {
+      throw new Error(`${guest.output}: config ${configPath} not found`);
+    }
     // The project is the working directory so Bun's generated source comments
     // stay relative and the output is deterministic across checkouts.
     mustRunCommand(
       guest.output,
       process.execPath,
-      [join(ROOT, "tools", "build.ts"), entry, `--project-root=${projectDir}`, ...common],
+      [join(ROOT, "tools", "build.ts"), entry, `--project-root=${projectDir}`,
+        ...common.filter((arg) => arg !== "--no-config"), ...configArgs],
       projectDir,
     );
   } else {
