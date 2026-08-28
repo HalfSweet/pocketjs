@@ -1,72 +1,63 @@
-# PocketJS SiFli EPIC backend
+# PocketJS SiFli render backend
 
-This `no_std` crate interprets PocketJS DrawLists into a persistent RGB565
-surface and submits compatible operations through the narrow `EpicOps` trait.
-The trait deliberately contains no RT-Thread, LVGL, or SiFli driver types. A
-board host can implement it directly with the SiFli HAL.
+This `no_std` crate renders PocketJS DrawLists into a persistent RGB565 target
+through a hardware executor. It is the Rust half of the SiFli SF32LB5x host;
+the executor that actually programs EPIC and VG Lite lives in `hosts/sifli`.
 
-Accelerated paths are:
+## Structure
 
-- opaque and translucent RGB565 rectangle fills;
-- opaque horizontal and vertical two-stop gradients when the operation is not
-  clipped;
-- A8 coverage blended with a fixed color, used for translucent rectangles,
-  glyph runs, and PocketJS rounded-corner masks;
-- PSM 5650, PSM 8888, and CLUT8 texture blending with format conversion,
-  color/alpha modulation, scaling, mirroring, and destination clipping;
-- pairs of textured triangles reconstructed as affine or projective quads for
-  rotated, scaled, and 2.5D/3D image transforms;
-- pairs of flat-color triangles reconstructed as transformed solid quads.
+- `plan` decodes the DrawList once per frame with
+  `pocketjs_core::drawlist`, recovers the rectangles and quads the core
+  flattened into triangles, and groups consecutive alpha-only texture quads
+  into one A8 run.
+- `emit` walks that plan once per damage region, clips every item to the
+  region, checks the executor's `Capabilities` and thresholds, and either
+  submits a `Cmd` or appends the operation to a CPU batch. Consecutive CPU
+  operations share one `pocketjs_core::raster` dispatch; a fence separates
+  hardware writes from CPU writes so painter order holds on both sides.
+- `cmd` is the command set: `Fill`, `FillAlpha`, `BlendA8`, `Gradient`,
+  `Blit`, `BlitQuad`, `TileOut`, `TileIn`, `Fence`. Every rectangle is in
+  physical target pixels; textures are referenced as portable core bytes,
+  executor-registered native copies, or solid colors.
+- `submit` is the executor contract: `Submit::begin` binds a target for one
+  frame, `Frame::submit` runs commands in order, `Frame::fence` completes
+  them, `Frame::mask_mut` exposes executor-owned A8 planes, and
+  `Frame::target_mut` allows direct CPU writes where the executor permits
+  them.
+- `caps` describes what an executor can run. The planner never builds a
+  command the capabilities forbid, so executors do not decline work; on the
+  SiFli host the values come from the chip's SDK feature gates.
+- `mock` (feature `mock`, always on for tests) is a recording software
+  executor that runs every command with the core's exact pixel formulas.
 
-Gouraud triangles, clipped or translucent gradients, PSM 4444 textures,
-linear-filtered textures on hosts without matching sampling, unmatched or
-clipped triangle fans, and unsupported copies are replayed in order through
-`pocketjs_core::raster::render_scaled_rgb565_over`. Hardware and software
-operations therefore share one RGB565 target without a 32-bit intermediate.
+## Routing
 
-Small solid rectangles below the hardware submission threshold use an inline
-RGB565 fill/src-over path with the core's exact integer blend formula, avoiding
-a temporary DrawList and a second generic-rasterizer dispatch per rectangle.
+| DrawList operation | Hardware path | CPU path |
+| --- | --- | --- |
+| RECT, opaque | `Fill` | below `min_fill` |
+| RECT, translucent | `FillAlpha`, else an A8 plane filled with the alpha | below `min_blend` |
+| GRAD_RECT | `Gradient` for unclipped opaque two-stop gradients | clipped, translucent, or below `min_gradient` |
+| GLYPH_RUN | atlas coverage composited into an A8 plane, one `BlendA8` per run | below `min_blend` |
+| TEX_QUAD, coverage-only texture | consecutive quads composited into one A8 plane | below `min_blend` |
+| TEX_QUAD, PSM_5650 opaque | `Blit` copy at 1:1 or hardware scaling when the texture is linear | fractional texel edges |
+| TEX_QUAD, other formats | `Blit` with scaling, mirroring, and modulation | format or capability missing |
+| TEX_TRI pair | `Blit` when the quad is upright, else `BlitQuad` | unmatched pairs, missing capability |
+| TRI pair, flat color | `Fill`/`FillAlpha` when upright, else a solid `BlitQuad` | unmatched pairs, Gouraud colors |
+| SCISSOR, TEXT_RUN, SURFACE_QUAD | skipped | skipped |
 
-Texture transforms use four physical edge coordinates ordered TL, BL, BR,
-TR. A HAL adapter may map them to EPIC's 3×3 transform matrix. PocketJS stores
-PSM 8888 and CLUT entries as RGBA bytes and PSM 5650 with red in the low bits;
-the SF32LB58 adapter uses the EPIC color matrix to swap red/blue while applying
-DrawList modulation in the same transaction.
-
-`blend_texture_rgb565` also receives the generation-tagged texture handle. A
-target can use it to select a separately baked native texture while retaining
-the portable source bytes for ordered software fallback.
-
-## Ordered deferred contract
-
-`EpicOps` implementations may leave one accepted transaction in flight.
-Returning `true` means the operation was accepted in painter order; `sync`
-makes its destination pixels visible before CPU fallback, transient source
-reuse, or return from the renderer. Returning `false` means the destination
-was not changed and requests software fallback.
-
-For a write-back cached framebuffer, a HAL implementation must:
-
-1. clean source, mask, and destination ranges before EPIC reads them;
-2. preserve every source until the next `sync`;
-3. invalidate the destination range when `sync` completes.
-
-The renderer ping-pongs two A8 scratch planes, allowing CPU mask construction
-to overlap the preceding hardware transaction without modifying its source.
-
-The SF32LB58 EPIC coordinate limit is 1010 pixels per transaction. Opaque
-fills may be split because a later software retry overwrites them. Blend and
-gradient implementations should reject oversized operations before writing
-unless they can guarantee an all-or-nothing tiled transaction.
+Coverage-only textures are classified by the core at upload
+(`Ui::texture_coverage_only`); baked rounded-corner discs qualify by
+construction.
 
 ## Damage tracking
 
 Keep one `RenderTargetState` for every persistent framebuffer. This is
 required for RAM-less multi-buffered displays because alternating targets
-contain different older frames. Structural DrawList changes resynchronize at
-exact nearby operations and damage every unmatched old/new bound instead of
-discarding the complete target.
+contain different older frames. Inserted, removed, or type-changed operations
+are resynchronized at exact nearby anchors and only the unmatched bounds are
+repainted; damage covering at least 75 percent of the viewport is promoted to
+a full redraw. `render_strip` renders one dirty rectangle into a compact
+full-width strip for hosts that present through their own pipeline.
 
 ## Test
 
@@ -76,5 +67,5 @@ cargo test --locked --manifest-path engine/backends/sifli-epic/Cargo.toml \
 ```
 
 The tests compare the hybrid output against the core RGB565 software
-rasterizer, including incremental damage, A8 batching, fallback ordering, and
-texture sampling.
+rasterizer for every routing decision, including incremental damage, A8
+batching, texture blits, quad reconstruction, and CPU fallback ordering.

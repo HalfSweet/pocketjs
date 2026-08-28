@@ -14,5 +14,7 @@ pocketjs-core = { path = "../../core", features = ["std"] }
 [features]
 default = []
 std = ["pocketjs-core/std"]
+# Expose the recording software executor to hosts and integration tests.
+mock = []
 
 [workspace]
