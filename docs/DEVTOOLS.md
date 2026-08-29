@@ -71,8 +71,11 @@ poll transport → flush outbox → (paused? maybe step : record + run frame)
 - **Flight recorder (always on, even with no transport):** every frame's mask
   goes into a `Uint16Array` ring (36 000 frames ≈ 10 min ≈ 72 KB). Any crash
   or "what just happened?" moment can be exported after the fact.
-- **Component tree:** serialized from the existing JS mirror tree
-  (`NodeMirror`), so reads never cross FFI. Semantic names come from
+- **Component tree:** serialized from the existing JS mirror roots
+  (`NodeMirror`), so reads never cross FFI. **A multi-display host reports the
+  primary and auxiliary roots together under one DevTools-only `Displays`
+  group; the native roots remain independent and node statistics cover both.**
+  Semantic names come from
   (a) a `debugName` prop on any host component and (b) the `<Named
   name="MessageCard">` wrapper (tags the mirror nodes it renders) — both
   first-class framework API, exported from `@pocketjs/framework`.
@@ -104,6 +107,27 @@ The shim needs only `{ send(line), recv() -> line | null }`:
   every 10 frames on PSP (~166 ms hover latency; each poll is a few USB
   round-trips). `tools/devtools-psp.ts` bridges the mailbox to the WS hub.
   The same mailbox works under the PPSSPP GUI via the `ms0:` fallback path.
+- **Nintendo 3DS over Wi-Fi:** Pocket Runtime listens on a paired TCP
+  connection. `bun run 3ds:dev pair --host <ip>` installs the one-time 32-byte
+  key through ftpd. After that, `bun run 3ds:dev dev --app <app>` discovers the
+  paired Runtime over UDP and bridges the existing JSON-line control protocol
+  directly to the panel. `--host <ip>` remains available when LAN broadcast is
+  unavailable. **`L+R+SELECT` opens a Runtime-owned menu on the 3DS bottom
+  screen with its IP, pairing and connection state, generation, package hash,
+  and counters.** The host replaces the bottom guest DrawList with its own menu
+  DrawList and blocks guest input until the menu keys are released; it is not
+  an application capability. **The desktop `dev` command waits for a paired
+  Runtime, reconnects after a Wi-Fi interruption, and rediscovers the same
+  pairing-derived device ID if its DHCP address changed. `.pocket` updates and
+  dual-screen RGB8 captures use bounded binary frames on the same
+  ordered TCP connection and never enter QuickJS. A missing PONG closes a
+  half-open desktop socket after eight seconds.** The TCP and UDP listeners
+  are absent when `sdmc:/pocketjs/runtime/dev.key` is absent. Package updates
+  reuse the Runtime's target/ABI admission, immutable storage,
+  retired-frame acceptance and rollback path. **The pairing key authenticates
+  but does not encrypt the LAN connection. The channel updates `.pocket`
+  guests; native `.3dsx` or CIA host changes still require deployment and
+  restart.**
 - **Native desktop (macOS et al., `pocket-ui-wgpu`):** the same file mailbox,
   minus the USB cable — `engine/crates/pocket-ui-wgpu/src/dbg.rs` is the
   std twin of the PSP transport. Probed once at `UiSurface::mount`: root =
@@ -111,8 +135,7 @@ The shim needs only `{ send(line), recv() -> line | null }`:
   `pocketjs-dbg/enable` exists. Arm it with `bun run devtools --dir <root>`
   (an explicit `--dir` always beats a detected PSPLINK session), then launch
   the host from that cwd. Tree, highlight, pause/step, eval, and tapes work
-  identically; `__dbgShot` is PSP-only for now (the panel's 📷 degrades to a
-  warning).
+  identically. Hosts without a native screenshot path return a warning.
 - **Headless (tests, `tools/tape.ts`):** an in-process queue pair. The CLI
   and the test suite are just DevTools clients — the whole protocol is
   drivable without a screen.
@@ -152,10 +175,11 @@ screen**, PSP included; click → pin + details: type, `debugName`, classes,
 world rect) · pause/step/resume · tape strip (input activity per frame, click
 → seek on browser hosts) · record/export/import-replay · REPL with log/error
 stream · 📷 on-demand screenshot (`{t:"screenshot"}` → browser hosts answer
-with a canvas PNG; the PSP dumps raw VRAM to `pocketjs-dbg/shot.raw` +
-`{t:"screenshotRaw"}`, and the bridge converts to the `{t:"screenshot",
-frame, data}` the panel expects — pixels ride usbhostfs, not the JSON
-channel). Served at `http://127.0.0.1:8130/devtools`.
+with a canvas PNG; the PSP dumps raw VRAM to `pocketjs-dbg/shot.raw`, while the
+3DS sends both PICA targets as binary RGB8 chunks. Each bridge converts its
+bulk representation to the `{t:"screenshot", frame, data}` PNG the panel
+expects. Pixels do not travel in the JSON channel). Served at
+`http://127.0.0.1:8130/devtools`.
 
 ### 6. One command (`bun run devtools [app]`)
 

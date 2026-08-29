@@ -4,13 +4,14 @@
  * layout, and the PICA200 backend draws the DrawList.
  *
  * Frame order (docs/DESIGN.md, the shape hosts/psp/src/main.rs drives):
- * hidScanInput -> globalThis.frame(buttons, analog) -> drain jobs ->
- * ui_tick (fixed 1/60) -> ui_draw -> C3D_FrameBegin/Clear/FrameDrawOn/
- * SetViewport -> gfx_render -> C3D_FrameEnd.
+ * hidScanInput -> resolve bottom-screen touch -> globalThis.frame -> drain
+ * jobs -> ui_tick (fixed 1/60) -> build both DrawLists -> one C3D frame that
+ * draws the top and bottom targets.
  *
- * The app owns the whole 400x240 top screen (form "takeover"). The render
- * target is created ROTATED — 240 wide by 400 tall — and Mtx_OrthoTilt in
- * gfx.c keeps the guest's coordinates landscape.
+ * The app owns a 400x240 primary surface and a simultaneous 320x240 auxiliary
+ * surface. Both render targets are ROTATED, and Mtx_OrthoTilt in gfx.c keeps
+ * each surface's guest coordinates landscape. Touch belongs only to the
+ * auxiliary surface.
  *
  * Building with -DPOCKETJS_CAPTURE turns this into the deterministic e2e
  * binary: input comes from a baked tape instead of the hardware, the listed
@@ -31,6 +32,9 @@
 #include "input.h"
 #include "pocket_core.h"
 #include "qjs.h"
+#include "devserver.h"
+#include "devmenu.h"
+#include "runtime.h"
 
 /* The guest viewport comes from the resolved build plan, never a literal. */
 #ifndef POCKETJS_VIEW_W
@@ -42,8 +46,16 @@
 #ifndef POCKETJS_RASTER_DENSITY
 #error "POCKETJS_RASTER_DENSITY must come from the verified ResolvedBuildPlan"
 #endif
+#ifndef POCKETJS_AUX_VIEW_W
+#error "POCKETJS_AUX_VIEW_W must come from the verified ResolvedBuildPlan"
+#endif
+#ifndef POCKETJS_AUX_VIEW_H
+#error "POCKETJS_AUX_VIEW_H must come from the verified ResolvedBuildPlan"
+#endif
 #define VIEW_W POCKETJS_VIEW_W
 #define VIEW_H POCKETJS_VIEW_H
+#define AUX_VIEW_W POCKETJS_AUX_VIEW_W
+#define AUX_VIEW_H POCKETJS_AUX_VIEW_H
 #define CAPTURE_BYTES ((size_t)VIEW_W * VIEW_H * 4)
 
 /* contracts/spec/spec.ts ANALOG_CENTER. */
@@ -57,7 +69,8 @@
  */
 unsigned int __stacksize__ = 1024 * 1024;
 
-static C3D_RenderTarget *target;
+static C3D_RenderTarget *primary_target;
+static C3D_RenderTarget *auxiliary_target;
 
 static const u32 DISPLAY_TRANSFER_FLAGS =
   GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -65,38 +78,26 @@ static const u32 DISPLAY_TRANSFER_FLAGS =
   GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
   GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
-// ---------------------------------------------------------------------------
-// romfs assets
-// ---------------------------------------------------------------------------
-
-/* Read a whole romfs file, NUL-terminating it: JS_Eval requires
- * `source[length] == '\0'`, and one extra byte costs nothing for the pak. */
-static uint8_t *read_file(const char *path, size_t *length) {
-  FILE *file = fopen(path, "rb");
-  if (file == NULL) return NULL;
-  if (fseek(file, 0, SEEK_END) != 0) {
-    fclose(file);
-    return NULL;
-  }
-  long size = ftell(file);
-  if (size < 0 || fseek(file, 0, SEEK_SET) != 0) {
-    fclose(file);
-    return NULL;
-  }
-  uint8_t *bytes = malloc((size_t)size + 1);
-  if (bytes == NULL) {
-    fclose(file);
-    return NULL;
-  }
-  size_t read = fread(bytes, 1, (size_t)size, file);
-  fclose(file);
-  if (read != (size_t)size) {
-    free(bytes);
-    return NULL;
-  }
-  bytes[size] = '\0';
-  *length = (size_t)size;
-  return bytes;
+/* Read one completed rotated PICA target as tightly packed RGB8. `width` and
+ * `height` are the guest landscape dimensions; the returned bytes retain the
+ * target's rotated column-major order for host-side decoding. */
+static void read_surface_rgb8(
+  C3D_RenderTarget *surface_target,
+  uint32_t width,
+  uint32_t height,
+  uint8_t *out
+) {
+  C3D_SyncDisplayTransfer(
+    (u32 *)surface_target->frameBuf.colorBuf,
+    GX_BUFFER_DIM(height, width),
+    (u32 *)out,
+    GX_BUFFER_DIM(height, width),
+    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+      GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO)
+  );
+  GSPGPU_InvalidateDataCache(out, (s32)((size_t)width * height * 3));
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,9 @@ static uint8_t *read_file(const char *path, size_t *length) {
 
 #ifndef POCKETJS_CAPTURE_INPUT
 #define POCKETJS_CAPTURE_INPUT ""
+#endif
+#ifndef POCKETJS_CAPTURE_TOUCH
+#define POCKETJS_CAPTURE_TOUCH ""
 #endif
 #ifndef POCKETJS_CAP_START
 #define POCKETJS_CAP_START 0
@@ -125,6 +129,7 @@ static uint8_t *read_file(const char *path, size_t *length) {
 static u32 *capture_buffer;
 static u8 *capture_rgb;
 static const char CAPTURE_INPUT[] = POCKETJS_CAPTURE_INPUT;
+static const char CAPTURE_TOUCH[] = POCKETJS_CAPTURE_TOUCH;
 
 /* Read one unsigned value, decimal or 0x-prefixed hex, from [start, end). */
 static bool parse_uint(const char *text, size_t start, size_t end, uint32_t *out) {
@@ -198,6 +203,59 @@ static int32_t scripted_buttons(uint32_t frame) {
 }
 
 /*
+ * One resistive-panel contact, `frame:id,x,y@frame:-`, using the same
+ * threshold semantics as the button tape. The build tool bounds x/y to the
+ * physical 320x240 auxiliary panel before this text reaches C.
+ */
+static size_t scripted_touch(uint32_t frame, uint32_t *out) {
+  size_t length = sizeof CAPTURE_TOUCH - 1;
+  size_t index = 0;
+  bool found = false;
+  bool active = false;
+  uint32_t best_frame = 0;
+  uint32_t best_contact = 0;
+  while (index < length) {
+    size_t frame_start = index;
+    while (index < length && CAPTURE_TOUCH[index] != ':') index += 1;
+    if (index >= length) break;
+    size_t frame_end = index++;
+    size_t payload_start = index;
+    while (index < length && CAPTURE_TOUCH[index] != '@') index += 1;
+    size_t payload_end = index;
+    if (index < length) index += 1;
+
+    uint32_t at = 0;
+    if (!parse_uint(CAPTURE_TOUCH, frame_start, frame_end, &at) || at > frame ||
+        (found && at < best_frame)) {
+      continue;
+    }
+    found = true;
+    best_frame = at;
+    active = payload_end > payload_start && CAPTURE_TOUCH[payload_start] != '-';
+    if (!active) continue;
+
+    size_t first_comma = payload_start;
+    while (first_comma < payload_end && CAPTURE_TOUCH[first_comma] != ',') first_comma += 1;
+    size_t second_comma = first_comma + 1;
+    while (second_comma < payload_end && CAPTURE_TOUCH[second_comma] != ',') second_comma += 1;
+    uint32_t id = 0;
+    uint32_t x = 0;
+    uint32_t y = 0;
+    if (first_comma >= payload_end || second_comma >= payload_end ||
+        !parse_uint(CAPTURE_TOUCH, payload_start, first_comma, &id) ||
+        !parse_uint(CAPTURE_TOUCH, first_comma + 1, second_comma, &x) ||
+        !parse_uint(CAPTURE_TOUCH, second_comma + 1, payload_end, &y)) {
+      active = false;
+      continue;
+    }
+    best_contact = ((id & 0xffu) << 18) | ((y & 0x1ffu) << 9) | (x & 0x1ffu);
+  }
+  if (!found || !active) return 0;
+  *out = best_contact;
+  return 1;
+}
+
+/*
  * Read the render target back.
  *
  * NOT gfxGetFramebuffer after C3D_FrameEnd: that buffer has already been
@@ -221,26 +279,22 @@ static int32_t scripted_buttons(uint32_t frame) {
  * column-major — and each capture word is byte order A, B, G, R. The e2e
  * driver decodes with src[(x * 240 + (239 - y)) * 4] -> dst[y * 400 + x].
  */
-static bool capture_write(uint32_t frame) {
+static bool capture_write_surface(
+  C3D_RenderTarget *surface_target,
+  uint32_t width,
+  uint32_t height,
+  const char *prefix,
+  uint32_t frame
+) {
   /* C3D_FrameEnd only queues the frame. The colour buffer is not finished
    * until the GPU is, so wait before transferring it out. */
   gspWaitForVBlank();
-  C3D_SyncDisplayTransfer(
-    (u32 *)target->frameBuf.colorBuf,
-    GX_BUFFER_DIM(VIEW_H, VIEW_W),
-    (u32 *)capture_rgb,
-    GX_BUFFER_DIM(VIEW_H, VIEW_W),
-    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-      GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO)
-  );
-  GSPGPU_InvalidateDataCache(capture_rgb, (s32)CAPTURE_RGB_BYTES);
+  read_surface_rgb8(surface_target, width, height, capture_rgb);
 
   /* Widen B, G, R back into the A, B, G, R word the golden format states, so
    * the on-device format change costs the driver nothing. */
   uint8_t *out = (uint8_t *)capture_buffer;
-  for (size_t i = 0; i < (size_t)VIEW_W * VIEW_H; i += 1) {
+  for (size_t i = 0; i < (size_t)width * height; i += 1) {
     out[i * 4 + 0] = 0xff;
     out[i * 4 + 1] = capture_rgb[i * 3 + 0];
     out[i * 4 + 2] = capture_rgb[i * 3 + 1];
@@ -248,13 +302,14 @@ static bool capture_write(uint32_t frame) {
   }
 
   /* Named by the process-global frame counter, which is also what indexes the
-   * baked input tape: input at frame N and file fN are the same frame. */
+   * baked input tapes: input at frame N and both surface files are frame N. */
   char path[64];
-  snprintf(path, sizeof path, CAPTURE_DIR "/f%04lu.raw", (unsigned long)frame);
+  snprintf(path, sizeof path, CAPTURE_DIR "/%sf%04lu.raw", prefix, (unsigned long)frame);
   FILE *file = fopen(path, "wb");
   if (file == NULL) return false;
-  size_t written = fwrite(capture_buffer, 1, CAPTURE_BYTES, file);
-  return fclose(file) == 0 && written == CAPTURE_BYTES;
+  size_t bytes = (size_t)width * height * 4;
+  size_t written = fwrite(capture_buffer, 1, bytes, file);
+  return fclose(file) == 0 && written == bytes;
 }
 
 /* The sentinel the driver waits for. Written only after every requested frame
@@ -308,6 +363,302 @@ static void fail(const char *message) {
 }
 
 // ---------------------------------------------------------------------------
+// reusable guest runtime
+// ---------------------------------------------------------------------------
+
+typedef struct {
+  PocketRuntimePackage *package;
+  /* 0 names the ROMFS recovery package; stored packages use their footer hash. */
+  uint64_t state_hash;
+  bool commit_on_accept;
+  uint64_t next_active_hash;
+  uint64_t next_last_good_hash;
+  uint32_t submitted_frames;
+} GuestChoice;
+
+static bool boot_guest(
+  PocketRuntimePackage *package,
+  char *error,
+  size_t error_length
+) {
+  if (package == NULL || package->guest.javascript_length == 0) {
+    snprintf(error, error_length, "guest package has no JavaScript");
+    return false;
+  }
+  ui_init(POCKETJS_RASTER_DENSITY);
+  ui_set_viewport((float)VIEW_W, (float)VIEW_H);
+  if (ui_create_auxiliary_surface((float)AUX_VIEW_W, (float)AUX_VIEW_H) == 0) {
+    snprintf(error, error_length, "auxiliary UI root allocation failed");
+    ui_shutdown();
+    return false;
+  }
+  if (package->guest.pak_length > 0) {
+    ui_feed_pak(package->guest.pak, package->guest.pak_length);
+  }
+  if (!qjs_boot(
+        (const char *)package->guest.javascript,
+        package->guest.javascript_length - 1,
+        package->guest.pak,
+        package->guest.pak_length
+      )) {
+    snprintf(error, error_length, "%s", qjs_last_error());
+    qjs_shutdown();
+    gfx_reset_resources();
+    ui_shutdown();
+    return false;
+  }
+  return true;
+}
+
+/* Call only after C3D_FrameBegin has retired the previous GPU command list. */
+static void teardown_guest(void) {
+  qjs_shutdown();
+  gfx_reset_resources();
+  ui_shutdown();
+}
+
+static void release_choice(GuestChoice *choice, PocketRuntimePackage *embedded) {
+  if (choice->package != NULL && choice->package != embedded) {
+    runtime_package_free(choice->package);
+  }
+  memset(choice, 0, sizeof *choice);
+}
+
+static GuestChoice package_choice(
+  PocketRuntimePackage *package,
+  uint64_t state_hash,
+  const PocketRuntimeState *state
+) {
+  GuestChoice choice = {
+    .package = package,
+    .state_hash = state_hash,
+    .commit_on_accept = state_hash != state->active_hash,
+    .next_active_hash = state_hash,
+    .next_last_good_hash = state_hash == state->active_hash ? state->last_good_hash : state->active_hash,
+    .submitted_frames = 0,
+  };
+  return choice;
+}
+
+static GuestChoice recovery_choice(
+  const PocketRuntimeState *state,
+  PocketRuntimePackage *embedded,
+  PocketRuntimeFailureLineage *failures
+) {
+  for (;;) {
+    uint64_t hash = runtime_recovery_hash(state, failures);
+    if (hash == 0) break;
+    char error[256] = {0};
+    PocketRuntimePackage *package = runtime_package_load_hash(hash, error, sizeof error);
+    if (package != NULL) {
+      GuestChoice choice = package_choice(package, hash, state);
+      /* A rollback never keeps the rejected artifact as last-good. */
+      if (choice.commit_on_accept) choice.next_last_good_hash = 0;
+      return choice;
+    }
+    runtime_write_error("load-recovery", error);
+    if (!runtime_failure_lineage_add(failures, hash)) {
+      runtime_write_error("load-recovery", "recovery failure lineage exhausted");
+      break;
+    }
+  }
+  GuestChoice choice = package_choice(embedded, 0, state);
+  if (choice.commit_on_accept) choice.next_last_good_hash = 0;
+  return choice;
+}
+
+static GuestChoice startup_choice(
+  PocketRuntimeState *state,
+  PocketRuntimePackage *embedded,
+  PocketRuntimeFailureLineage *failures
+) {
+#ifdef POCKETJS_CAPTURE
+  (void)failures;
+  return package_choice(embedded, 0, state);
+#else
+  char error[256] = {0};
+  PocketRuntimePackage *pending = NULL;
+  RuntimePendingResult pending_result = runtime_prepare_pending(
+    &pending,
+    error,
+    sizeof error
+  );
+  if (pending_result == RUNTIME_PENDING_READY) {
+    return package_choice(pending, pending->guest.package_hash, state);
+  }
+  if (pending_result == RUNTIME_PENDING_ERROR) {
+    runtime_write_error("prepare-pending", error);
+  }
+  if (state->active_hash != 0) {
+    PocketRuntimePackage *active = runtime_package_load_hash(
+      state->active_hash,
+      error,
+      sizeof error
+    );
+    if (active != NULL) return package_choice(active, state->active_hash, state);
+    runtime_write_error("load-active", error);
+    if (!runtime_failure_lineage_add(failures, state->active_hash)) {
+      return package_choice(embedded, 0, state);
+    }
+    return recovery_choice(state, embedded, failures);
+  }
+  return package_choice(embedded, 0, state);
+#endif
+}
+
+static bool boot_with_recovery(
+  GuestChoice *choice,
+  PocketRuntimeState *state,
+  PocketRuntimePackage *embedded,
+  PocketRuntimeFailureLineage *failures,
+  char *fatal,
+  size_t fatal_length
+) {
+  /* pending + active + last-good + embedded recovery are four distinct
+   * artifacts in the longest failure chain. */
+  for (uint32_t attempt = 0; attempt < 4; attempt += 1) {
+    char error[256] = {0};
+    if (boot_guest(choice->package, error, sizeof error)) {
+      runtime_write_status(state, choice->package, choice->commit_on_accept ? "candidate" : "booted");
+      return true;
+    }
+    runtime_write_error("boot-guest", error);
+    snprintf(fatal, fatal_length, "%s", error);
+    uint64_t rejected = choice->state_hash;
+    bool embedded_failed = choice->package == embedded;
+    release_choice(choice, embedded);
+    if (embedded_failed) return false;
+    if (!runtime_failure_lineage_add(failures, rejected)) {
+      snprintf(fatal, fatal_length, "recovery failure lineage exhausted");
+      return false;
+    }
+    *choice = recovery_choice(state, embedded, failures);
+  }
+  snprintf(fatal, fatal_length, "guest recovery attempts exhausted");
+  return false;
+}
+
+static void accept_guest(
+  GuestChoice *choice,
+  PocketRuntimeState *state,
+  PocketRuntimeFailureLineage *failures,
+  uint32_t frame
+) {
+  if (!choice->commit_on_accept || choice->submitted_frames == 0) return;
+  uint64_t accepted_hash = choice->next_active_hash;
+  char error[256] = {0};
+  if (!runtime_commit(
+        state,
+        choice->next_active_hash,
+        choice->next_last_good_hash,
+        error,
+        sizeof error
+      )) {
+    runtime_write_error("accept-guest", error);
+    fail(error);
+  }
+  choice->commit_on_accept = false;
+  runtime_failure_lineage_reset(failures);
+  runtime_write_status(state, choice->package, "accepted");
+  devserver_set_runtime(state, choice->package, "accepted", frame);
+  devserver_report_install("accepted", accepted_hash, "first PICA command list retired");
+}
+
+static void begin_frame_wait(uint32_t run_frame) {
+#ifdef POCKETJS_CAPTURE
+  (void)run_frame;
+  C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+#else
+  /* A bounded wait keeps HOME alive when the prior command list hangs. */
+  gspWaitForVBlank();
+  uint32_t waited = 0;
+  while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+    gspWaitForVBlank();
+    waited += 1;
+    if (waited == 180) {
+      char verdict[96];
+      snprintf(
+        verdict,
+        sizeof verdict,
+        "GPU HUNG executing frame %lu (%lu cmds, %lu verts)",
+        (unsigned long)(run_frame == 0 ? 0 : run_frame - 1),
+        (unsigned long)gfx_frame_commands(),
+        (unsigned long)gfx_frame_vertices()
+      );
+      fail(verdict);
+    }
+  }
+#endif
+}
+
+static void recover_running_guest(
+  GuestChoice *choice,
+  PocketRuntimeState *state,
+  PocketRuntimePackage *embedded,
+  PocketRuntimeFailureLineage *failures,
+  uint32_t run_frame,
+  const char *phase,
+  const char *message
+) {
+  runtime_write_error(phase, message);
+  if (choice->package == embedded) fail(message);
+  uint64_t rejected = choice->state_hash;
+  bool candidate = choice->commit_on_accept;
+  if (!runtime_failure_lineage_add(failures, rejected)) {
+    fail("recovery failure lineage exhausted");
+  }
+  begin_frame_wait(run_frame);
+  teardown_guest();
+  release_choice(choice, embedded);
+  *choice = recovery_choice(state, embedded, failures);
+  char fatal[256] = {0};
+  if (!boot_with_recovery(choice, state, embedded, failures, fatal, sizeof fatal)) fail(fatal);
+  devserver_set_runtime(state, choice->package, "recovered", run_frame);
+  devserver_report_install(
+    candidate ? "rejected" : "recovered",
+    rejected,
+    message
+  );
+  C3D_FrameEnd(0);
+}
+
+/* Swap a fully admitted candidate inside a GPU-idle C3D frame. This is the
+ * one path used by the boot-time FTP chord and the in-process TCP transport. */
+static void install_candidate(
+  GuestChoice *choice,
+  PocketRuntimeState *state,
+  PocketRuntimePackage *embedded,
+  PocketRuntimeFailureLineage *failures,
+  PocketRuntimePackage *candidate,
+  uint32_t *run_frame,
+  char *error,
+  size_t error_length
+) {
+  uint64_t candidate_hash = candidate->guest.package_hash;
+  begin_frame_wait(*run_frame);
+  accept_guest(choice, state, failures, *run_frame);
+  teardown_guest();
+  release_choice(choice, embedded);
+  runtime_failure_lineage_reset(failures);
+  *choice = package_choice(candidate, candidate_hash, state);
+  if (!boot_with_recovery(choice, state, embedded, failures, error, error_length)) fail(error);
+  if (choice->state_hash == candidate_hash) {
+    if (choice->commit_on_accept) {
+      devserver_set_runtime(state, choice->package, "candidate", *run_frame);
+      devserver_report_install("staged", candidate_hash, "guest booted; waiting for retired frame");
+    } else {
+      devserver_set_runtime(state, choice->package, "booted", *run_frame);
+      devserver_report_install("accepted", candidate_hash, "package already active; guest restarted");
+    }
+  } else {
+    devserver_set_runtime(state, choice->package, "recovered", *run_frame);
+    devserver_report_install("rejected", candidate_hash, error);
+  }
+  C3D_FrameEnd(0);
+  *run_frame += 1;
+}
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 
@@ -317,27 +668,77 @@ int main(void) {
    * extra cache, which the QuickJS guest feels directly. */
   osSetSpeedupEnable(true);
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+#ifndef POCKETJS_CAPTURE
+  /* Debug UI must never make an otherwise admissible guest unbootable. */
+  (void)devmenu_init();
+#endif
 
-  target = C3D_RenderTargetCreate(VIEW_H, VIEW_W, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-  if (target == NULL) fail("C3D_RenderTargetCreate failed");
-  C3D_RenderTargetSetOutput(target, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+  primary_target = C3D_RenderTargetCreate(
+    VIEW_H,
+    VIEW_W,
+    GPU_RB_RGBA8,
+    GPU_RB_DEPTH24_STENCIL8
+  );
+  auxiliary_target = C3D_RenderTargetCreate(
+    AUX_VIEW_H,
+    AUX_VIEW_W,
+    GPU_RB_RGBA8,
+    GPU_RB_DEPTH24_STENCIL8
+  );
+  if (primary_target == NULL || auxiliary_target == NULL) {
+    fail("C3D_RenderTargetCreate failed");
+  }
+  C3D_RenderTargetSetOutput(primary_target, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+  C3D_RenderTargetSetOutput(auxiliary_target, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
   if (R_FAILED(romfsInit())) fail("romfsInit failed: the .3dsx has no romfs");
-
-  size_t source_length = 0;
-  uint8_t *source = read_file("romfs:/app.js", &source_length);
-  if (source == NULL) fail("romfs:/app.js is missing or unreadable");
-  size_t pack_length = 0;
-  uint8_t *pack = read_file("romfs:/app.pak", &pack_length);
-
-  /* The core is fed from the pak natively, before any JS runs: styles.bin,
-   * font atlases and images never transit the QuickJS heap. */
-  ui_init(POCKETJS_RASTER_DENSITY);
-  ui_set_viewport((float)VIEW_W, (float)VIEW_H);
-  if (pack != NULL) ui_feed_pak(pack, pack_length);
-
   if (!gfx_init(VIEW_W, VIEW_H)) fail("PICA200 backend failed to initialize");
-  if (!qjs_boot((const char *)source, source_length, pack, pack_length)) fail(qjs_last_error());
+
+  char runtime_error[256] = {0};
+  PocketRuntimePackage *embedded = runtime_package_load(
+    "romfs:/app.pocket",
+    runtime_error,
+    sizeof runtime_error
+  );
+  if (embedded == NULL) fail(runtime_error);
+  snprintf(embedded->origin, sizeof embedded->origin, "romfs:/app.pocket (recovery)");
+
+  PocketRuntimeState runtime_state = {0};
+#ifndef POCKETJS_CAPTURE
+  if (!runtime_storage_init(&runtime_state, runtime_error, sizeof runtime_error)) {
+    fail(runtime_error);
+  }
+  DevserverInitResult devserver_result = devserver_init(
+    &runtime_state,
+    runtime_error,
+    sizeof runtime_error
+  );
+  if (devserver_result == DEVSERVER_ERROR) {
+    /* Pairing/network failure must not make the accepted guest unbootable.
+     * Persist it for the next FTP inspection and continue without DevTools. */
+    runtime_write_error("devserver-init", runtime_error);
+  }
+#endif
+  PocketRuntimeFailureLineage failures = {0};
+  GuestChoice guest = startup_choice(&runtime_state, embedded, &failures);
+  if (!boot_with_recovery(
+        &guest,
+        &runtime_state,
+        embedded,
+        &failures,
+        runtime_error,
+        sizeof runtime_error
+      )) {
+    fail(runtime_error);
+  }
+#ifndef POCKETJS_CAPTURE
+  devserver_set_runtime(
+    &runtime_state,
+    guest.package,
+    guest.commit_on_accept ? "candidate" : "booted",
+    0
+  );
+#endif
 
 #ifdef POCKETJS_CAPTURE
   mkdir(CAPTURE_DIR, 0777);
@@ -353,57 +754,211 @@ int main(void) {
   while (aptMainLoop()) {
     hidScanInput();
 #ifdef POCKETJS_CAPTURE
-    /* The tape has no analog track: pin the stick to centre so scripted runs
-     * stay deterministic. */
+    /* The tapes have no analog track: pin the stick to centre so scripted
+     * runs stay deterministic. */
     int32_t buttons = scripted_buttons(frame);
     int32_t analog = ANALOG_CENTER;
+    uint32_t touch = 0;
+    size_t touch_count = scripted_touch(frame, &touch);
 #else
-    int32_t buttons = input_buttons();
-    int32_t analog = input_analog();
+    devserver_poll();
+    if (input_devmenu_toggle_requested()) devmenu_toggle();
+    if (devmenu_visible() && input_devmenu_close_requested()) devmenu_hide();
+    if (devmenu_visible() && input_devmenu_screenshot_requested()) {
+      devmenu_set_notice(
+        devserver_request_screenshot() ? "SHOT QUEUED" : "NO DEV CLIENT"
+      );
+    }
+    bool devmenu_blocks_guest = input_devmenu_blocks_guest(devmenu_visible());
+    uint64_t upload_hash = 0;
+    if (devserver_take_upload(&upload_hash)) {
+      PocketRuntimePackage *uploaded = NULL;
+      RuntimePendingResult result = runtime_prepare_file(
+        POCKET_RUNTIME_UPLOAD,
+        upload_hash,
+        &uploaded,
+        runtime_error,
+        sizeof runtime_error
+      );
+      if (result != RUNTIME_PENDING_READY) {
+        if (result == RUNTIME_PENDING_NONE) {
+          snprintf(
+            runtime_error,
+            sizeof runtime_error,
+            "%s disappeared before package admission",
+            POCKET_RUNTIME_UPLOAD
+          );
+        }
+        runtime_write_error("network-package", runtime_error);
+        devserver_report_install("rejected", upload_hash, runtime_error);
+      } else {
+        install_candidate(
+          &guest,
+          &runtime_state,
+          embedded,
+          &failures,
+          uploaded,
+          &run_frame,
+          runtime_error,
+          sizeof runtime_error
+        );
+        continue;
+      }
+    }
+    if (!devmenu_blocks_guest && input_reload_requested()) {
+      PocketRuntimePackage *pending = NULL;
+      RuntimePendingResult result = runtime_prepare_pending(
+        &pending,
+        runtime_error,
+        sizeof runtime_error
+      );
+      if (result == RUNTIME_PENDING_ERROR) {
+        runtime_write_error("manual-reload", runtime_error);
+      } else if (result == RUNTIME_PENDING_READY) {
+        install_candidate(
+          &guest,
+          &runtime_state,
+          embedded,
+          &failures,
+          pending,
+          &run_frame,
+          runtime_error,
+          sizeof runtime_error
+        );
+        continue;
+      }
+    }
+    int32_t buttons = devmenu_blocks_guest ? 0 : input_buttons();
+    int32_t analog = devmenu_blocks_guest ? ANALOG_CENTER : input_analog();
+    uint32_t touch = 0;
+    size_t touch_count = devmenu_blocks_guest ? 0 : input_touch(&touch);
 #endif
 
-    if (!qjs_frame(buttons, analog)) fail(qjs_last_error());
+    int32_t touch_hit = 0;
+    size_t hit_count = ui_touch_hits_auxiliary(
+      touch_count > 0 ? &touch : NULL,
+      touch_count,
+      &touch_hit,
+      1
+    );
+    if (hit_count != touch_count) fail("auxiliary touch hit resolution failed");
+    if (!qjs_frame(buttons, analog, &touch, &touch_hit, touch_count)) {
+#ifdef POCKETJS_CAPTURE
+      fail(qjs_last_error());
+#else
+      snprintf(runtime_error, sizeof runtime_error, "%s", qjs_last_error());
+      recover_running_guest(
+        &guest,
+        &runtime_state,
+        embedded,
+        &failures,
+        run_frame,
+        "guest-frame",
+        runtime_error
+      );
+      run_frame += 1;
+      continue;
+#endif
+    }
     /* Animations always advance at the fixed 1/60 timestep; this host
      * presents at the same rate, so it is one tick per frame. */
     ui_tick();
     size_t words = ui_draw();
-
-#ifdef POCKETJS_CAPTURE
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-#else
-    /*
-     * Watchdog in place of C3D_FRAME_SYNCDRAW's unbounded wait: SYNCDRAW never
-     * returns when the GPU hangs on the previous frame's command list, which
-     * reads as a dead console — HOME included — and ends in a forced power-off.
-     * Poll instead, and after three seconds report the hang as itself, with
-     * HOME kept alive by fail()'s park loop.
-     */
-    gspWaitForVBlank();
-    uint32_t waited = 0;
-    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
-      gspWaitForVBlank();
-      waited += 1;
-      if (waited == 180) {
-        char verdict[96];
-        snprintf(
-          verdict,
-          sizeof verdict,
-          "GPU HUNG executing frame %lu (%lu cmds, %lu verts)",
-          (unsigned long)(run_frame == 0 ? 0 : run_frame - 1),
-          (unsigned long)gfx_frame_commands(),
-          (unsigned long)gfx_frame_vertices()
-        );
-        fail(verdict);
-      }
+    size_t auxiliary_words = ui_draw_auxiliary();
+    const uint32_t *auxiliary_list = ui_draw_auxiliary_list_ptr();
+#ifndef POCKETJS_CAPTURE
+    if (devmenu_visible()) {
+      auxiliary_list = devmenu_draw_list(&auxiliary_words);
     }
 #endif
-    C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000ff, 0);
-    C3D_FrameDrawOn(target);
+
+    begin_frame_wait(
+#ifdef POCKETJS_CAPTURE
+      frame
+#else
+      run_frame
+#endif
+    );
+#ifndef POCKETJS_CAPTURE
+    /* Reaching the next FrameBegin proves the candidate's first submitted list
+     * retired without tripping the GPU watchdog. Only now does it become the
+     * active generation on SD. */
+    accept_guest(&guest, &runtime_state, &failures, run_frame);
+#endif
+    gfx_begin_frame();
+    if (!gfx_prepare_surface(0, ui_draw_list_ptr(), words, VIEW_W, VIEW_H) ||
+        !gfx_prepare_surface(
+          1,
+          auxiliary_list,
+          auxiliary_words,
+          AUX_VIEW_W,
+          AUX_VIEW_H
+        )) {
+#ifdef POCKETJS_CAPTURE
+      fail("PICA200 surface preparation failed");
+#else
+      C3D_FrameEnd(0);
+      recover_running_guest(
+        &guest,
+        &runtime_state,
+        embedded,
+        &failures,
+        run_frame + 1,
+        "guest-render",
+        "PICA200 surface preparation failed"
+      );
+      run_frame += 2;
+      continue;
+#endif
+    }
+    gfx_finish_frame();
+
+    C3D_RenderTargetClear(primary_target, C3D_CLEAR_ALL, 0x000000ff, 0);
+    C3D_FrameDrawOn(primary_target);
     /* C3D_FrameDrawOn resets the viewport, so this comes after it. */
     C3D_SetViewport(0, 0, VIEW_H, VIEW_W);
-    gfx_render(ui_draw_list_ptr(), words);
+    gfx_draw_surface(0);
+
+    C3D_RenderTargetClear(auxiliary_target, C3D_CLEAR_ALL, 0x000000ff, 0);
+    C3D_FrameDrawOn(auxiliary_target);
+    C3D_SetViewport(0, 0, AUX_VIEW_H, AUX_VIEW_W);
+    gfx_draw_surface(1);
     C3D_FrameEnd(0);
 #ifndef POCKETJS_CAPTURE
+    guest.submitted_frames += 1;
+    devserver_set_frame_stats(
+      run_frame,
+      gfx_frame_commands(),
+      gfx_frame_vertices(),
+      gfx_dropped_vertices()
+    );
+    if (devserver_take_screenshot_request()) {
+      uint8_t *top_rgb = NULL;
+      uint8_t *auxiliary_rgb = NULL;
+      if (devserver_screenshot_begin(
+            run_frame,
+            VIEW_W,
+            VIEW_H,
+            AUX_VIEW_W,
+            AUX_VIEW_H,
+            &top_rgb,
+            &auxiliary_rgb
+          )) {
+        /* FrameEnd queued both surfaces. Retire them once, then copy both
+         * targets before the next command list can overwrite either. */
+        gspWaitForVBlank();
+        read_surface_rgb8(primary_target, VIEW_W, VIEW_H, top_rgb);
+        read_surface_rgb8(
+          auxiliary_target,
+          AUX_VIEW_W,
+          AUX_VIEW_H,
+          auxiliary_rgb
+        );
+        devserver_screenshot_ready();
+      } else {
+        devserver_report_log("error", "screenshot: linear buffer allocation failed");
+      }
+    }
     run_frame += 1;
 #endif
 
@@ -412,7 +967,16 @@ int main(void) {
       /* A frame that overflowed the vertex arena is missing geometry, which
        * must never become a golden. */
       if (gfx_dropped_vertices() > 0) fail("vertex arena overflowed during capture");
-      if (!capture_write(frame)) fail("capture write failed");
+      if (!capture_write_surface(primary_target, VIEW_W, VIEW_H, "", frame) ||
+          !capture_write_surface(
+            auxiliary_target,
+            AUX_VIEW_W,
+            AUX_VIEW_H,
+            "aux-",
+            frame
+          )) {
+        fail("capture write failed");
+      }
       if (frame + 1 >= (uint32_t)POCKETJS_CAP_START + POCKETJS_CAP_N) {
         capture_done();
         /* Park: Azahar does not stop when the app returns from main, and a
@@ -424,9 +988,23 @@ int main(void) {
 #endif
   }
 
-  qjs_shutdown();
+  begin_frame_wait(
+#ifdef POCKETJS_CAPTURE
+    frame
+#else
+    run_frame
+#endif
+  );
+  teardown_guest();
+  C3D_FrameEnd(0);
+  release_choice(&guest, embedded);
+  runtime_package_free(embedded);
+#ifndef POCKETJS_CAPTURE
+  devserver_shutdown();
+  devmenu_shutdown();
+#endif
   gfx_shutdown();
-  ui_shutdown();
+  romfsExit();
   C3D_Fini();
   gfxExit();
   return 0;

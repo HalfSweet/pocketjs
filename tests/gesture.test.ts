@@ -76,6 +76,27 @@ describe("contact lifecycle", () => {
     pump(Array.from({ length: 12 }, (_, i) => [i, i, i] as Contact));
     expect(downs).toBe(8);
   });
+
+  test("routes equal contact ids independently on primary and auxiliary surfaces", () => {
+    const log: string[] = [];
+    attachGesture({
+      onDown: (contact) => log.push(`primary:${contact.surface}:${contact.x}`),
+    });
+    attachGesture({
+      surface: "auxiliary",
+      onDown: (contact) => log.push(`auxiliary:${contact.surface}:${contact.x}`),
+    });
+
+    __advanceClock();
+    __setTouches(
+      [__packTouch(1, 10, 20), __packTouch(1, 200, 30)],
+      undefined,
+      [0, 1],
+    );
+    __runGestures();
+
+    expect(log).toEqual(["primary:primary:10", "auxiliary:auxiliary:200"]);
+  });
 });
 
 describe("tap", () => {

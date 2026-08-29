@@ -1,10 +1,12 @@
 # Nintendo 3DS host
 
-PocketJS on the 3DS top screen: QuickJS runs the guest bundle, the Rust core
+PocketJS on the 3DS: QuickJS runs the guest bundle, the Rust core
 owns the retained tree, layout, animation and DrawList emission, and a C
 backend walks that DrawList into **PICA200 draw calls through citro3d**. The
-app owns the whole panel — **400x240, rasterDensity 1, presentation `native`**
-— under the out-of-registry `3ds-dev` profile in `tools/3ds-profile.ts`.
+app owns the **400x240 top screen** and a simultaneous **320x240 auxiliary
+bottom screen**, both at rasterDensity 1 and presentation `native`, under the
+out-of-registry `3ds-dev` profile in `tools/3ds-profile.ts`. The resistive
+panel reports contacts through `input.touch.auxiliary`.
 
 **The CIA boots and renders the calibration app on a New 3DS LL.** The profile
 remains out of the production registry because the current hardware and golden
@@ -24,7 +26,11 @@ core/                 pocketjs-3ds-core: the ui_* C ABI over pocketjs-core
   src/lib.rs          lifecycle, HostOps, DrawList handoff, pak feed
   src/alloc.rs        #[global_allocator] over newlib + panic handler
 include/pocket_core.h the C header for the above
-src/main.c            libctru/citro3d boot, the frame loop, frame capture
+src/main.c            process boot, reusable guest lifecycle, frame loop
+src/runtime.c         .pocket admission, immutable storage, active/rollback state
+src/devserver.c       discovery, paired TCP pump, uploads, screenshots, receipts
+src/dev_protocol.c    byte-order-safe development wire encoding and admission
+src/devmenu.c         Runtime-owned bottom-screen development menu
 src/gfx.c             the DrawList -> citro3d walker
 src/qjs.c             QuickJS embedding: globalThis.ui -> ui_* calls
 src/input.c           3DS keys and circle pad -> the PSP BTN bitmask
@@ -53,7 +59,143 @@ reaches outside `hosts/3ds` except through them.
 bun tools/3ds.ts 3ds-demo              # dist/3ds/<output>.3dsx
 bun tools/3ds.ts 3ds-demo --capture    # the deterministic e2e binary
 bun tools/3ds.ts 3ds-demo --cia        # also dist/3ds/<output>.cia
+bun tools/3ds.ts 3ds-demo --pocket-only # rebuild only dist/3ds/<output>.pocket
 ```
+
+Every build writes a target-thinned `.pocket` next to the native artifact.
+**The `.pocket` contains the admitted manifest, resolved plan, compiled JS and
+target-flavoured PAK.** The native runtime embeds the same file as its immutable
+recovery guest; it no longer embeds independent `app.js` and `app.pak` files.
+
+## Updating the guest from SD
+
+The runtime checks one staging path at boot:
+
+```text
+sdmc:/pocketjs/runtime/pending.pocket
+```
+
+With an FTP server running as a separate homebrew application, build and upload
+the guest package, then exit the FTP server and start Pocket Runtime:
+
+```sh
+bun tools/3ds.ts 3ds-demo --pocket-only
+curl --ftp-create-dirs -T dist/3ds/pocket3ds-demo-main.pocket \
+  ftp://<device>/pocketjs/runtime/pending.pocket
+```
+
+The runtime verifies the package footer, exact `3ds-dev` target, host ABI,
+identity, resolved plan and NUL-terminated JS section before it can boot. A
+complete pending package is renamed to
+`sdmc:/pocketjs/runtime/packages/<hash>.pocket`; package blobs are immutable.
+An incomplete FTP upload stays at `pending.pocket` and does not replace the
+running or accepted guest.
+
+**A package becomes active only after its first submitted PICA command list has
+retired successfully.** State is committed by appending a generation marker
+under `sdmc:/pocketjs/runtime/state/`. Eval, frame or first-render failure loads
+the previous active package, then last-good, then the embedded ROMFS recovery
+package. Power loss before the generation marker leaves the previous generation
+active.
+
+`L+R+X` requests the same package check at a GPU-idle frame boundary. The full
+chord is removed from the application's button mask. This supports an emulator
+or direct SD writer; a separate 3DS ftpd cannot run concurrently with Pocket
+Runtime.
+
+Runtime receipts are written to:
+
+```text
+sdmc:/pocketjs/runtime/status.txt
+sdmc:/pocketjs/runtime/last-error.txt
+```
+
+`status.txt` records the current generation, active hash, last-good hash,
+running package hash and source path. `last-error.txt` records the failed phase
+without deleting the rejected package blob.
+
+## In-process development connection
+
+`L+R+SELECT` opens the **3DS host's native development menu** on the bottom
+screen. It shows the current IP and port, pairing or connection state, active
+generation, running package hash, update and screenshot counts, and transport
+errors. `X` requests a dual-screen screenshot from a connected client; `B` or
+`START` closes the menu.
+
+**While visible, the menu replaces the guest's bottom-screen DrawList with a
+host-owned DrawList and consumes all guest input.** It uses the same verified
+PICA200 backend as the guest and reads a fixed native Runtime snapshot; it is
+not part of `globalThis.ui`, the guest input contract, or a published PocketJS
+capability. The input latch stays active until the keys used to close the menu
+have been released.
+
+Pocket Runtime listens on TCP and UDP port 8131 when this file exists:
+
+```text
+sdmc:/pocketjs/runtime/dev.key
+```
+
+Pair once while ftpd is running, then restart Pocket Runtime:
+
+```sh
+bun run 3ds:dev pair --host <device-ip> --ftp-port 5000
+```
+
+**The pairing command generates a random 32-byte key, stores the local copy
+under `.pocket/3ds/devices/`, uploads the device copy, and verifies the FTP
+readback byte for byte.** The Runtime does not open a listener without the key,
+and a client must prove the complete key before any command or package byte is
+accepted.
+
+**The key authenticates a client but does not encrypt the TCP stream.** Use the
+listener on a trusted LAN, and pass `--rotate` to `pair` after a key is exposed.
+
+After pairing, ftpd is not part of the development loop:
+
+```sh
+bun run 3ds:dev discover
+bun run 3ds:dev push  --app 3ds-demo
+bun run 3ds:dev probe
+bun run 3ds:dev dev   --app 3ds-demo
+```
+
+**`discover`, `push`, `probe`, and `dev` do not require the 3DS IP.** The
+Runtime answers one fixed-size UDP discovery request with its target, ABI,
+TCP port, generation, active hash, and a stable ID derived from the pairing
+key. The reply never contains the key. The desktop tool matches that ID to a
+local key and then authenticates the TCP connection with the complete 32-byte
+key. This keeps the pairing valid when DHCP changes the console's address.
+Pass `--host <device-ip>` when broadcast discovery is unavailable; the native
+menu supplies that address.
+
+**`dev` waits when no paired Runtime is present, replaces a disconnected TCP
+client, and rediscovers the same paired device ID until it reconnects.** Panel
+commands and keyboard shortcuts are routed only to the current authenticated
+client. A client that receives no PONG for eight seconds is replaced even when
+the operating system has not reported the half-open TCP socket as closed. The
+Runtime reserves the latest PONG until the bounded output queue can send it;
+bulk screenshot traffic cannot discard the heartbeat response.
+
+`push` builds and transfers the target-thinned `.pocket`, then waits for the
+device's **accepted-after-retired-frame** receipt. `probe` requests runtime
+status, native counters, the component tree, a live REPL evaluation, a console
+message, and a combined top/bottom PNG. `dev` keeps the DevTools panel attached;
+`r` rebuilds and pushes, `s` captures both screens, and `o` opens the panel.
+
+**One authenticated, ordered TCP connection carries every development
+message.** JSON frames contain only Pocket DevTools control and logs. Package
+and rotated RGB8 screenshot bytes use bounded binary frames, so bulk data never
+enters QuickJS or the application's capability surface. Uploads stream to
+`network-upload.pocket`; the existing package admission, immutable blob,
+GPU-idle cold-swap, acceptance, and rollback path remains the only route to an
+active guest.
+
+**The connection updates the guest `.pocket`, not the running `.3dsx` or CIA
+host binary.** A native host or ABI change still requires deploying a new
+`.3dsx`/CIA and restarting it; the embedded `.pocket` remains its final recovery
+guest. Keeping that boundary lets ordinary app, asset and resolved-plan changes
+use the in-process loop without letting a guest replace the process that admits
+and rolls it back.
 
 Two build-time facts are load-bearing:
 
@@ -227,8 +369,7 @@ part of it, so a run gets its own config and SD card by getting its own `$HOME`.
 
 ## Not advertised
 
-`input.touch` is deliberately absent from the profile. The touchscreen is the
-**bottom** screen at 320x240 while the UI renders on the **top** at 400x240;
-reporting bottom-screen contacts as logical coordinates inside the top screen's
-space would be a lie, and a second surface needs a design, not a capability id.
-`audio.pcm` is not implemented in v1.
+`input.touch` is deliberately absent from the profile. The touchscreen belongs
+to the **bottom auxiliary surface**, so it is exposed only as
+`input.touch.auxiliary`; contacts are never remapped into the top screen's
+coordinate space. `audio.pcm` is not implemented in v1.

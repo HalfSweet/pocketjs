@@ -106,6 +106,10 @@ export interface HostOps {
    *  their box — the touch hit fact resolver's query form. The gesture layer
    *  only calls it when the host delivers no per-contact fact (frame() arg 4). */
   hitTestBounds?(x: number, y: number): number;
+  /** Auxiliary-surface twins (spec ops 45–46). Present with
+   * display.auxiliary; coordinates belong to its logical viewport. */
+  hitTestAuxiliary?(x: number, y: number): number;
+  hitTestBoundsAuxiliary?(x: number, y: number): number;
   /** Bind the cursor sprite: an uploaded texture drawn topmost every frame,
    *  offset by its hotspot; never laid out, never hit-tested. tex < 0 hides
    *  it; w/h <= 0 draw at the texture's own pixel size. */
@@ -189,18 +193,18 @@ export interface HostOps {
   debugPause?(on: boolean | number): void;
   /** Arm exactly one tick while paused. */
   debugStep?(): void;
-  /** PSP mailbox transport (hosts/psp/src/dbg.rs); absent elsewhere. */
+  /** Native DevTools transport (PSP mailbox or paired 3DS TCP connection). */
   __dbgActive?(): boolean;
   __dbgPoll?(): string | undefined;
   __dbgSend?(line: string): void;
-  /** PSP on-demand screenshot: dump the displayed framebuffer to
-   *  pocketjs-dbg/shot.raw (bridge converts to PNG). → success. */
+  /** On-demand native screenshot. The host transports bulk pixels outside
+   *  the JSON control channel and its bridge converts them to PNG. */
+  __dbgShot?(): boolean;
   /** OP.debugStats — one JSON snapshot of device diagnostic counters
    *  (audio/vid/svc) plus build identity (app output name + FNV-1a64 of the
    *  embedded js+pak). Hosts without counters omit the op; the devtools
    *  "stats" message replies with data: null then. */
   debugStats?(): string;
-  __dbgShot?(): boolean;
 
   // -- app switching (spec ops 39..41, docs/LAUNCHER.md). Optional: only
   //    multi-app hosts (the launcher EBOOT, hosts/sim's launcher runner)
@@ -231,6 +235,10 @@ export interface HostOps {
   /** Pocket System package id -> compositor surface handle. Separate from the
    *  texture namespace: compositor surfaces are not images. */
   __surfaces?: Record<string, number>;
+  /** Host-created auxiliary UI root and target-owned logical viewport. This
+   * is separate from __surfaces, which names Pocket System app compositor
+   * handles rather than outputs of the current AppInstance. */
+  __auxiliarySurface?: { readonly root: number; readonly w: number; readonly h: number };
 }
 
 /** Desktop hosts publish their logical UI size as `ui.__viewport` (the core
@@ -397,7 +405,8 @@ export function reportAppAction(name: string, value: number): void {
 // Frame hookup
 // ---------------------------------------------------------------------------
 // Every host drives frames the same way: once per vblank/rAF tick it calls
-// `globalThis.frame(buttons, analog?, touches?)` with the PSP button bitmask (spec BTN)
+// `globalThis.frame(buttons, analog?, touches?, hits?, touchSurfaces?)` with the
+// PSP button bitmask (spec BTN)
 // and, when the host has an analog stick, the packed nub value
 // (x << 8 | y, each axis 0..255, 128 = center — spec ANALOG_CENTER). Hosts
 // without a stick pass one argument; the runtime defaults to center, so every
@@ -406,7 +415,13 @@ export function reportAppAction(name: string, value: number): void {
 // via installFrameHandler.
 
 export function installFrameHandler(
-  fn: (buttons: number, analog?: number, touches?: readonly number[]) => void,
+  fn: (
+    buttons: number,
+    analog?: number,
+    touches?: readonly number[],
+    hits?: readonly number[],
+    touchSurfaces?: readonly number[],
+  ) => void,
 ): void {
   (
     globalThis as {
@@ -414,6 +429,8 @@ export function installFrameHandler(
         buttons: number,
         analog?: number,
         touches?: readonly number[],
+        hits?: readonly number[],
+        touchSurfaces?: readonly number[],
       ) => void;
     }
   ).frame = fn;

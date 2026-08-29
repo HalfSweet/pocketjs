@@ -15,7 +15,13 @@ if (Bun.resolveSync("solid-js", import.meta.dir).endsWith("server.js")) {
 
 import { installHost, type Host, type HostOps } from "../framework/src/host.ts";
 import { render as publicRender } from "../framework/src/index.ts";
-import { expandTape, expandTapeTouch, fmt, type Tape } from "../framework/src/devtools.ts";
+import {
+  expandTape,
+  expandTapeTouch,
+  expandTapeTouchSurfaces,
+  fmt,
+  type Tape,
+} from "../framework/src/devtools.ts";
 import { touches, __packTouch } from "../framework/src/touch.ts";
 import { onFrame } from "../framework/src/lifecycle.ts";
 import {
@@ -29,7 +35,7 @@ import {
 import { resetStyles } from "../framework/src/styles.ts";
 import { resetInput } from "../framework/src/input.ts";
 import { resetPack } from "../framework/src/pak.ts";
-import { Named, View } from "../framework/src/components.ts";
+import { AuxiliarySurface, Named, Text, View } from "../framework/src/components.ts";
 import { BTN, ROOT_ID } from "../contracts/spec/spec.ts";
 
 // ---------------------------------------------------------------------------
@@ -142,6 +148,66 @@ function mountApp(app: () => unknown): void {
 // ---------------------------------------------------------------------------
 
 describe("tree + semantic names", () => {
+  test("tree and node stats include independent primary and auxiliary roots", () => {
+    host.ops.__auxiliarySurface = { root: 90, w: 320, h: 240 };
+    mountApp(() =>
+      View({
+        debugName: "Primary content",
+        children: AuxiliarySurface({
+          children: () => Text({ debugName: "Auxiliary content", children: "BOTTOM" }),
+        }),
+      }),
+    );
+    push({ t: "getTree" });
+    frame();
+
+    const trees = sent("tree");
+    const root = trees[trees.length - 1].root as {
+      i: number;
+      t: string;
+      v?: number;
+      k?: Array<{ n?: string; k?: unknown[] }>;
+    };
+    expect(root).toMatchObject({ i: 0, t: "surfaces", v: 1, n: "Displays" });
+    expect(root.k).toHaveLength(2);
+    expect(root.k?.[0]?.n).toBe("Primary display");
+    expect(root.k?.[1]?.n).toBe("Auxiliary display");
+    expect(JSON.stringify(root.k?.[0])).toContain("Primary content");
+    expect(JSON.stringify(root.k?.[1])).toContain("Auxiliary content");
+    expect(JSON.stringify(root.k?.[1])).toContain("BOTTOM");
+
+    const findNamed = (
+      node: unknown,
+      name: string,
+    ): { i: number; n?: string; k?: unknown[] } | null => {
+      if (!node || typeof node !== "object") return null;
+      const current = node as { i?: unknown; n?: string; k?: unknown[] };
+      if (current.n === name && typeof current.i === "number") {
+        return current as { i: number; n?: string; k?: unknown[] };
+      }
+      for (const child of current.k ?? []) {
+        const found = findNamed(child, name);
+        if (found) return found;
+      }
+      return null;
+    };
+    const auxiliaryContent = findNamed(root.k?.[1], "Auxiliary content");
+    expect(auxiliaryContent).not.toBeNull();
+    push({ t: "inspect", id: auxiliaryContent!.i });
+    frame();
+    expect(host.of("debugInspect")).toContainEqual(["debugInspect", auxiliaryContent!.i]);
+
+    const count = (node: unknown): number => {
+      if (!node || typeof node !== "object") return 0;
+      const children = (node as { k?: unknown[] }).k ?? [];
+      return 1 + children.reduce<number>((total, child) => total + count(child), 0);
+    };
+    const mountedNodes = count(root.k?.[0]) + count(root.k?.[1]);
+    push({ t: "pause" });
+    frame();
+    expect(sent("stats").at(-1)?.nodes).toBe(mountedNodes);
+  });
+
   test("getTree returns the mirror tree with debugName and <Named> tags", () => {
     // Same type erasure as renderer.test.ts: runtime-identical, DOM-typed JSX.
     const comp = createComponent as (fn: unknown, props: unknown) => NodeMirror;
@@ -420,6 +486,29 @@ describe("tape v2 touch track", () => {
   test("expandTapeTouch on a v1 tape is all undefined", () => {
     const tape: Tape = { v: 1, frames: 3, masks: [[0, 3]] };
     expect(expandTapeTouch(tape)).toEqual([undefined, undefined, undefined]);
+  });
+
+  test("v3 records and expands the parallel auxiliary-surface lane", () => {
+    mountApp(() => View({}));
+    const packed = __packTouch(3, 120, 80);
+    const frameWithSurface = (globalThis as {
+      frame?: (
+        buttons: number,
+        analog?: number,
+        touches?: readonly number[],
+        hits?: readonly number[],
+        surfaces?: readonly number[],
+      ) => void;
+    }).frame!;
+    frameWithSurface(0, undefined, [packed], [7], [1]);
+    frameWithSurface(0);
+    push({ t: "dumpTape" });
+    frame(0);
+    const tape = sent("tape")[0].tape as Tape;
+    expect(tape.v).toBe(3);
+    expect(tape.touch).toEqual([[0, [packed]]]);
+    expect(tape.touchSurfaces).toEqual([[0, [1]]]);
+    expect(expandTapeTouchSurfaces(tape)).toEqual([[1], undefined, undefined]);
   });
 });
 

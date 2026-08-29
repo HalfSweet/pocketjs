@@ -26,8 +26,9 @@ import {
   type NodeMirror,
 } from "./renderer-vue-vapor.ts";
 import { setOverlayRoot } from "./overlay.ts";
+import { mountAuxiliarySurface, unmountAuxiliarySurface } from "./display.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
-import { handleFrame, setHitRoot, setInputRoot } from "./input.ts";
+import { handleFrame, setAuxiliaryHitRoot, setHitRoot, setInputRoot } from "./input.ts";
 import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame-vue-vapor.ts";
 import { __runGestures, resetGestures } from "./gesture.ts";
 import { installTouchActivation } from "./touch-activation.ts";
@@ -175,6 +176,7 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
     }
   }
 
+  const auxiliary = mountAuxiliarySurface(host.ops);
   const viewport = hostViewport(host.ops);
   const layerW = viewport?.w ?? SCREEN_W;
   const layerH = viewport?.h ?? SCREEN_H;
@@ -205,6 +207,7 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
 
   setInputRoot(appRoot);
   setHitRoot(rootMirror); // hit tests see the overlay layer too
+  setAuxiliaryHitRoot(auxiliary?.native ?? null);
   resetFrameHooks();
   resetGestures();
   // The default tap->press recognizer registers FIRST: every component
@@ -214,10 +217,16 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
   resetEffects();
   initDevtools(host.ops); // DevTools shim (docs/DEVTOOLS.md), same as the Solid path.
   installFrameHandler(
-    wrapFrameHandler((buttons: number, analog: number, touches?: readonly number[], hits?: readonly number[]) => {
+    wrapFrameHandler((
+      buttons: number,
+      analog: number,
+      touches?: readonly number[],
+      hits?: readonly number[],
+      touchSurfaces?: readonly number[],
+    ) => {
       __advanceClock();
       __setAnalog(analog);
-      __setTouches(touches, hits); // latch contacts + their host-resolved hit facts
+      __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
       runServicePumps();
       __drainEffects();
       __runGestures(); // contact lifecycles resolve before app hooks read them
@@ -236,6 +245,7 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
     dispose();
     setInputRoot(null);
     setHitRoot(null);
+    setAuxiliaryHitRoot(null);
     setOverlayRoot(null);
     appLayer = null;
     overlayLayer = null;
@@ -243,6 +253,7 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
       child.parent = null;
       host.ops.destroyNode(child.id);
     }
+    unmountAuxiliarySurface(host.ops);
     runSweep();
   };
 }

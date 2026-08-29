@@ -27,6 +27,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use pocketjs_core::package::{select_guest, GuestError, PackageError};
 use pocketjs_core::spec;
 use pocketjs_core::Ui;
 
@@ -42,12 +43,28 @@ static mut UI: Option<Ui> = None;
 /// cached by the caller across frames.
 static mut DRAW_PTR: *const u32 = core::ptr::null();
 static mut DRAW_LEN: usize = 0;
+static mut AUX_DRAW_PTR: *const u32 = core::ptr::null();
+static mut AUX_DRAW_LEN: usize = 0;
 
 /// `ui:img.<name>` and `ui:sprite.<name>` registrations from the last
 /// `ui_feed_pak`, in pak order. The host publishes them as `ui.__textures` /
 /// `ui.__sprites` (hosts/psp/src/pak.rs feeds the same two tables).
 static mut PAK_TEXTURES: Vec<(String, i32)> = Vec::new();
 static mut PAK_SPRITES: Vec<PakSprite> = Vec::new();
+
+/// Borrowed sections of one verified filesystem `.pocket`. The C runtime owns
+/// the package allocation and keeps it alive until the guest is torn down.
+#[repr(C)]
+pub struct PocketGuestPackage {
+    pub javascript: *const u8,
+    pub javascript_length: usize,
+    pub pak: *const u8,
+    pub pak_length: usize,
+    pub plan: *const u8,
+    pub plan_length: usize,
+    pub package_hash: u64,
+    pub variant_hash: u64,
+}
 
 struct PakSprite {
     name: String,
@@ -112,6 +129,59 @@ unsafe fn text<'a>(ptr: *const u8, len: usize) -> &'a str {
     core::str::from_utf8(bytes(ptr, len)).unwrap_or("")
 }
 
+fn package_error_code(error: GuestError) -> i32 {
+    match error {
+        GuestError::Package(PackageError::Truncated) => 1,
+        GuestError::Package(PackageError::BadMagic) => 2,
+        GuestError::Package(PackageError::BadVersion) => 3,
+        GuestError::Package(PackageError::HashMismatch) => 4,
+        GuestError::Package(PackageError::BadUtf8) => 5,
+        GuestError::MissingVariant => 6,
+        GuestError::HostAbiMismatch => 7,
+        GuestError::MissingIdentity => 8,
+        GuestError::MissingPlan => 9,
+        GuestError::MissingJavaScript => 10,
+        GuestError::JavaScriptNotTerminated => 11,
+    }
+}
+
+/// Verify a complete `.pocket` and select one exact target/ABI variant.
+/// Returns 0 on success; non-zero codes are stable for the C runtime's status
+/// and recovery files (12 is a bad pointer or non-UTF-8 target argument).
+#[no_mangle]
+pub unsafe extern "C" fn pocket_package_open(
+    ptr: *const u8,
+    len: usize,
+    target_ptr: *const u8,
+    target_len: usize,
+    host_abi: u32,
+    out: *mut PocketGuestPackage,
+) -> i32 {
+    if ptr.is_null() || len == 0 || target_ptr.is_null() || target_len == 0 || out.is_null() {
+        return 12;
+    }
+    let target = match core::str::from_utf8(bytes(target_ptr, target_len)) {
+        Ok(value) if !value.is_empty() => value,
+        _ => return 12,
+    };
+    match select_guest(bytes(ptr, len), target, host_abi, false) {
+        Ok(guest) => {
+            out.write(PocketGuestPackage {
+                javascript: guest.js.as_ptr(),
+                javascript_length: guest.js.len(),
+                pak: guest.pak.as_ptr(),
+                pak_length: guest.pak.len(),
+                plan: guest.plan.as_ptr(),
+                plan_length: guest.plan.len(),
+                package_hash: guest.package_hash,
+                variant_hash: guest.variant_hash,
+            });
+            0
+        }
+        Err(error) => package_error_code(error),
+    }
+}
+
 /// QuickJS encodes lone UTF-16 surrogates (a string sliced mid-emoji) as WTF-8
 /// bytes that are not valid UTF-8. They become U+FFFD, matching the web host,
 /// instead of silently dropping the whole update. Valid input borrows.
@@ -131,6 +201,8 @@ fn clear_draw_snapshot() {
     unsafe {
         DRAW_PTR = core::ptr::null();
         DRAW_LEN = 0;
+        AUX_DRAW_PTR = core::ptr::null();
+        AUX_DRAW_LEN = 0;
     }
 }
 
@@ -174,6 +246,28 @@ pub extern "C" fn ui_viewport_width() -> u32 {
 #[no_mangle]
 pub extern "C" fn ui_viewport_height() -> u32 {
     ui().viewport().1 as u32
+}
+
+#[no_mangle]
+pub extern "C" fn ui_create_auxiliary_surface(width: f32, height: f32) -> i32 {
+    let root = ui().create_auxiliary_surface(width, height);
+    clear_draw_snapshot();
+    root
+}
+
+#[no_mangle]
+pub extern "C" fn ui_auxiliary_surface_root() -> i32 {
+    ui().auxiliary_surface_root()
+}
+
+#[no_mangle]
+pub extern "C" fn ui_auxiliary_viewport_width() -> u32 {
+    ui().auxiliary_viewport().map_or(0, |viewport| viewport.0 as u32)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_auxiliary_viewport_height() -> u32 {
+    ui().auxiliary_viewport().map_or(0, |viewport| viewport.1 as u32)
 }
 
 /// Optional C-side scratch allocation out of the Rust heap. The caller must
@@ -328,6 +422,37 @@ pub extern "C" fn ui_hit_test_bounds(x: f32, y: f32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn ui_hit_test_auxiliary(x: f32, y: f32) -> i32 {
+    ui().hit_test_auxiliary(x, y)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_hit_test_bounds_auxiliary(x: f32, y: f32) -> i32 {
+    ui().hit_test_bounds_auxiliary(x, y)
+}
+
+#[no_mangle]
+pub extern "C" fn ui_touch_hits_auxiliary(
+    packed: *const u32,
+    length: usize,
+    out: *mut i32,
+    out_length: usize,
+) -> usize {
+    let contacts = if packed.is_null() || length == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(packed, length.min(8)) }
+    };
+    let mut hits = [0i32; 8];
+    let count = ui().touch_hits_auxiliary(contacts, &mut hits);
+    let written = count.min(out_length);
+    if !out.is_null() && written > 0 {
+        unsafe { core::ptr::copy_nonoverlapping(hits.as_ptr(), out, written) };
+    }
+    written
+}
+
+#[no_mangle]
 pub extern "C" fn ui_set_cursor(texture: i32, hot_x: f32, hot_y: f32, width: f32, height: f32) {
     ui().set_cursor(texture, hot_x, hot_y, width, height);
 }
@@ -384,6 +509,32 @@ pub extern "C" fn ui_draw_list_ptr() -> *const u32 {
 #[no_mangle]
 pub extern "C" fn ui_draw_list_len() -> usize {
     unsafe { DRAW_LEN }
+}
+
+#[no_mangle]
+pub extern "C" fn ui_draw_auxiliary() -> usize {
+    let Some(draw_list) = ui().draw_auxiliary() else {
+        unsafe {
+            AUX_DRAW_PTR = core::ptr::null();
+            AUX_DRAW_LEN = 0;
+        }
+        return 0;
+    };
+    unsafe {
+        AUX_DRAW_PTR = draw_list.words.as_ptr();
+        AUX_DRAW_LEN = draw_list.words.len();
+        AUX_DRAW_LEN
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ui_draw_auxiliary_list_ptr() -> *const u32 {
+    unsafe { AUX_DRAW_PTR }
+}
+
+#[no_mangle]
+pub extern "C" fn ui_draw_auxiliary_list_len() -> usize {
+    unsafe { AUX_DRAW_LEN }
 }
 
 /// FNV-1a64 over the last built word stream — the cheap frame identity the

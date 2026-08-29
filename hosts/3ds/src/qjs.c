@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "devserver.h"
 #include "pocket_core.h"
 #include "quickjs.h"
 
@@ -58,6 +59,8 @@ typedef enum {
   HostSetActive,
   HostHitTest,
   HostHitTestBounds,
+  HostHitTestAuxiliary,
+  HostHitTestBoundsAuxiliary,
   HostSetCursor,
   HostSetCursorPos,
   HostLoadStyles,
@@ -71,6 +74,11 @@ typedef enum {
   HostDebugRectWH,
   HostDebugPause,
   HostDebugStep,
+  HostDebugStats,
+  HostDbgActive,
+  HostDbgPoll,
+  HostDbgSend,
+  HostDbgShot,
 } HostOperation;
 
 static JSRuntime *runtime;
@@ -80,6 +88,7 @@ static JSValue frame_function;
 static const uint8_t *installed_pack;
 static size_t installed_pack_length;
 static char last_error[512];
+static char debug_poll_buffer[32 * 1024];
 
 static void set_error(const char *message) {
   size_t length = message == NULL ? 0 : strlen(message);
@@ -295,6 +304,22 @@ static JSValue host_operation(
           (float)argument_float(ctx, argc, argv, 1)
         )
       );
+    case HostHitTestAuxiliary:
+      return JS_NewInt32(
+        ctx,
+        ui_hit_test_auxiliary(
+          (float)argument_float(ctx, argc, argv, 0),
+          (float)argument_float(ctx, argc, argv, 1)
+        )
+      );
+    case HostHitTestBoundsAuxiliary:
+      return JS_NewInt32(
+        ctx,
+        ui_hit_test_bounds_auxiliary(
+          (float)argument_float(ctx, argc, argv, 0),
+          (float)argument_float(ctx, argc, argv, 1)
+        )
+      );
     case HostSetCursor:
       ui_set_cursor(
         argument_int(ctx, argc, argv, 0),
@@ -376,6 +401,26 @@ static JSValue host_operation(
     case HostDebugStep:
       ui_debug_step();
       return JS_UNDEFINED;
+    case HostDebugStats:
+      return JS_NewString(ctx, devserver_debug_stats());
+    case HostDbgActive:
+      return JS_NewBool(ctx, devserver_active());
+    case HostDbgPoll: {
+      size_t length = devserver_recv_ctrl(debug_poll_buffer, sizeof debug_poll_buffer);
+      return length == 0
+        ? JS_UNDEFINED
+        : JS_NewStringLen(ctx, debug_poll_buffer, length);
+    }
+    case HostDbgSend:
+      if (argc < 1) return JS_UNDEFINED;
+      text = JS_ToCStringLen2(ctx, &text_length, argv[0], 0);
+      if (text != NULL) {
+        devserver_send_ctrl(text, text_length);
+        JS_FreeCString(ctx, text);
+      }
+      return JS_UNDEFINED;
+    case HostDbgShot:
+      return JS_NewBool(ctx, devserver_request_screenshot());
   }
   return JS_UNDEFINED;
 }
@@ -437,6 +482,8 @@ static void install_host(void) {
   /* Virtual cursor ops (spec ops 27..29, 42; input.cursor). */
   add_operation(ui, "hitTest", 2, HostHitTest);
   add_operation(ui, "hitTestBounds", 2, HostHitTestBounds);
+  add_operation(ui, "hitTestAuxiliary", 2, HostHitTestAuxiliary);
+  add_operation(ui, "hitTestBoundsAuxiliary", 2, HostHitTestBoundsAuxiliary);
   add_operation(ui, "setCursor", 5, HostSetCursor);
   add_operation(ui, "setCursorPos", 2, HostSetCursorPos);
   add_operation(ui, "loadStyles", 1, HostLoadStyles);
@@ -452,6 +499,11 @@ static void install_host(void) {
   add_operation(ui, "debugRectWH", 0, HostDebugRectWH);
   add_operation(ui, "debugPause", 1, HostDebugPause);
   add_operation(ui, "debugStep", 0, HostDebugStep);
+  add_operation(ui, "debugStats", 0, HostDebugStats);
+  add_operation(ui, "__dbgActive", 0, HostDbgActive);
+  add_operation(ui, "__dbgPoll", 0, HostDbgPoll);
+  add_operation(ui, "__dbgSend", 1, HostDbgSend);
+  add_operation(ui, "__dbgShot", 0, HostDbgShot);
 
   /* Framework-owned host identity, from the build's -D defines rather than
    * literals that can drift. Bundles refuse to mount when they disagree. */
@@ -471,6 +523,27 @@ static void install_host(void) {
   JS_SetPropertyStr(context, viewport, "w", JS_NewInt32(context, (int32_t)ui_viewport_width()));
   JS_SetPropertyStr(context, viewport, "h", JS_NewInt32(context, (int32_t)ui_viewport_height()));
   JS_SetPropertyStr(context, ui, "__viewport", viewport);
+
+  JSValue auxiliary = JS_NewObject(context);
+  JS_SetPropertyStr(
+    context,
+    auxiliary,
+    "root",
+    JS_NewInt32(context, ui_auxiliary_surface_root())
+  );
+  JS_SetPropertyStr(
+    context,
+    auxiliary,
+    "w",
+    JS_NewInt32(context, (int32_t)ui_auxiliary_viewport_width())
+  );
+  JS_SetPropertyStr(
+    context,
+    auxiliary,
+    "h",
+    JS_NewInt32(context, (int32_t)ui_auxiliary_viewport_height())
+  );
+  JS_SetPropertyStr(context, ui, "__auxiliarySurface", auxiliary);
 
   JSValue textures = JS_NewObject(context);
   for (size_t index = 0; index < ui_pak_texture_count(); index += 1) {
@@ -587,15 +660,39 @@ bool qjs_boot(
   return drain_jobs();
 }
 
-bool qjs_frame(int32_t buttons, int32_t analog) {
+bool qjs_frame(
+  int32_t buttons,
+  int32_t analog,
+  const uint32_t *touches,
+  const int32_t *hits,
+  size_t touch_count
+) {
   if (context == NULL) return false;
-  JSValue arguments[2] = {
+  JSValue arguments[5] = {
     JS_NewInt32(context, buttons),
     JS_NewInt32(context, analog),
+    JS_NewArray(context),
+    JS_NewArray(context),
+    JS_NewArray(context),
   };
-  JSValue result = JS_Call(context, frame_function, global, 2, arguments);
-  JS_FreeValue(context, arguments[0]);
-  JS_FreeValue(context, arguments[1]);
+  for (size_t index = 0; index < touch_count && index < 8; index += 1) {
+    JS_SetPropertyUint32(
+      context,
+      arguments[2],
+      (uint32_t)index,
+      JS_NewUint32(context, touches[index])
+    );
+    JS_SetPropertyUint32(
+      context,
+      arguments[3],
+      (uint32_t)index,
+      JS_NewInt32(context, hits[index])
+    );
+    /* 1 = auxiliary output; the 3DS touch panel is the bottom screen. */
+    JS_SetPropertyUint32(context, arguments[4], (uint32_t)index, JS_NewInt32(context, 1));
+  }
+  JSValue result = JS_Call(context, frame_function, global, 5, arguments);
+  for (size_t index = 0; index < 5; index += 1) JS_FreeValue(context, arguments[index]);
   if (JS_IsException(result)) {
     take_exception();
     JS_FreeValue(context, result);
