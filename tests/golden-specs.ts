@@ -256,17 +256,32 @@ export const GOLDEN_SPECS: GoldenSpec[] = [
 export const THREE_DS_GOLDEN_SPECS: GoldenSpec[] = [
   {
     name: "3ds-demo",
-    frames: 50,
-    capture: [2, 10, 20, 44],
+    frames: 70,
+    capture: [2, 10, 20, 44, 56, 64],
     input: () => 0,
     // Drag upward across the bottom screen. Frame 10 captures finger-follow;
     // release on frame 12 starts inertia, and later captures prove that the
     // auxiliary VirtualList keeps re-windowing through the shared gesture and
-    // scroller contracts.
-    touch: (frame) =>
-      frame >= 5 && frame <= 11
-        ? [{ id: 0, x: 160, y: 210 - (frame - 5) * 30 }]
-        : [],
+    // scroller contracts — and that the search header has scrolled away while
+    // the section header pins to the top of the table. A tap on frames 30-31
+    // selects the row under the finger, which is the only thing that writes
+    // the primary display's detail card. A third contact drags the right-edge
+    // A-Z index (which starts below the 36 px navigation bar) from the first
+    // section to the last: frame 56 captures a mid-alphabet section, frame 64
+    // proves the virtual window settled at section Z, and both prove the card
+    // holds the tapped contact while the list scrubs away underneath it.
+    touch: (frame) => {
+      if (frame >= 5 && frame <= 11) {
+        return [{ id: 0, x: 160, y: 210 - (frame - 5) * 30 }];
+      }
+      if (frame >= 30 && frame <= 31) {
+        return [{ id: 1, x: 160, y: 120 }];
+      }
+      if (frame >= 52 && frame <= 58) {
+        return [{ id: 2, x: 310, y: 40 + (frame - 52) * 33 }];
+      }
+      return [];
+    },
   },
 ];
 
