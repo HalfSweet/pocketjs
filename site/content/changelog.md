@@ -3,6 +3,101 @@
 Engine and site milestones, newest first. Versions track the
 `@pocketjs/framework` npm package.
 
+## 0.11.0 — August 30, 2026
+
+**Two more device families run PocketJS, a second backend class paints through gpui and measures text on the host, and a paired Nintendo 3DS takes new guests over Wi-Fi.**
+0.11.0 adds the Nintendo 3DS and the BlackBerry Classic to the host set, a
+backend class that hands text measurement to the platform instead of a baked
+atlas, and a System that supervises several guests behind one compositor on
+macOS, Linux and the browser. Both new device profiles remain private
+development targets: each records an exact hardware and firmware tuple, and
+neither advertises a production capability from a build alone.
+
+- **The Nintendo 3DS runs a QuickJS guest on both screens.** The split follows
+  `hosts/iphone2g` rather than `hosts/psp`: citro3d is mostly `static inline`,
+  so C owns the GPU while a `no_std` Rust staticlib built for the built-in
+  `armv6k-nintendo-3ds` target owns the core and exports the DrawList. The top
+  screen is a fixed 400×240 viewport and the touch screen a 320×240 auxiliary
+  surface; touch arrives on the auxiliary surface alone. `3ds-dev` is host ABI
+  8. The demo splits one classic iPhone Contacts app across the two: a
+  10,000-row virtual list, its section index and its scrubber below, and the
+  detail card the phone had to push a navigation level to reach above. Goldens
+  run the same PICA200 code path under Azahar and match hardware.
+- **Pocket Runtime accepts a new guest over Wi-Fi.** `bun run 3ds:dev pair`
+  installs a 32-byte key once through ftpd; after that a paired TCP connection
+  carries `.pocket` updates and dual-screen RGB8 captures as bounded binary
+  frames that never enter QuickJS, and `bun run 3ds:dev dev` bridges the
+  existing DevTools protocol to the panel. Updates reuse the Runtime's target
+  and ABI admission, immutable package storage, retired-frame acceptance and
+  rollback path. `L+R+SELECT` opens a Runtime-owned menu on the bottom screen
+  with the device's IP, pairing and connection state, generation and package
+  hash. The pairing key authenticates but does not encrypt the LAN connection,
+  and the channel updates guests only: a new `.3dsx` or CIA still requires
+  deployment and a restart.
+- **The BlackBerry Classic runs two hosts over one shared contract.**
+  `hosts/blackberry-qnx` is a BB10 Core Native host (libscreen, BPS,
+  EGL/GLES2) built and packaged as an unsigned development BAR inside the
+  digest-pinned BBNDK image and installed on a rooted Classic;
+  `hosts/blackberry-android` is an Android Runtime (API 18) host whose
+  v1-signed APK drives the same QuickJS bridge and Rust core through a JNI
+  `armeabi-v7a` library. Both register at 720×720 physical, 360×360 logical at
+  density 2, host ABI 9. First device run recorded on an SQC100-4 at
+  10.3.3.3216; the [port](/blog/blackberry-classic/) follows both routes onto
+  the same square screen.
+- **A second backend class paints through gpui and measures text on the
+  host.** The portable family (wgpu, software raster, PPA, GLES2) keeps
+  executing the DrawList against compile-time baked font atlases.
+  `engine/backends/gpui` paints through Zed's gpui/Metal renderer instead, and
+  `text::MeasureFn` plus `DRAW_OP.TEXT_RUN` route measurement and shaping to
+  CoreText when an app opts in — a `styleHash` word keeps identical word
+  streams pixel-identical, so demand-render hashes stay truthful. The
+  `macos-app` target ships with it, together with a `wrapText` host op and a
+  Notepad whose word wrap, hit-testing, caret movement, selection and
+  undo/redo all read one visual-segment layout, so reflow on resize falls out
+  of the reactive width.
+- **A System supervises several guests behind one compositor.** Pocket System
+  resolution, role-scoped compositor surfaces and isolated `AppInstance`
+  supervision arrive with a product-neutral macOS compositor host, and Linux
+  and browser System hosts run the same resolved plan.
+- **The manifest and the resolved plan carry companion adapters and viewport
+  policy.** `app.companions` names the exact `svcOpen` service names an app's
+  adapters speak, and the plan carries `companions` and `viewport.policy`, so
+  a host derives every boot flag from one artifact instead of re-reading the
+  raw manifest and matching on the application's name.
+- **The gesture layer is framework-neutral and recognizes pinch.** The
+  recognizer machinery and the kinetic scroller move into `gesture-core.ts`
+  and `kinetics-core.ts` behind per-framework shims, so the Vue Vapor entry
+  runs the same touch pipeline as Solid: contacts latch with their
+  host-resolved hit facts, the gesture pump runs before app frame hooks, and
+  the tap-to-press recognizer installs at mount. A two-contact pinch
+  recognizer measures span on the locked axis and claims both contacts when
+  the span change beats `pinchSlop` and the centroid travel. The legacy UIKit
+  runtime replaces its single-contact globals with an eight-slot touch table.
+  Pocket Clear on the iPod touch 4 is the demo the layer was built against.
+- **`via-*` adds a middle gradient stop, and vertical gradients point the
+  right way on the 3DS.** The core draws a three-stop gradient as two ordinary
+  two-stop boxes, so every backend still sees `GRAD_RECT` and clipping stays
+  where it was. `hosts/3ds/src/gfx.c` copies the spec's `GradDir` ordinals
+  into C by hand and had `ToTop` and `ToBottom` swapped, which inverted every
+  vertical gradient on the one backend that does not read the generated Rust
+  enum. The gpui raster fallback renders the full viewport and composites
+  transparently, and the compiler's path handling is portable on Windows
+  again.
+- **PocketJS 98 and a desktop benchmark measure the gpui host.** `apps/desk98`
+  is a Windows 98 desktop as one guest — draggable, resizable, z-ordered
+  windows, taskbar, Start menu, Notepad, Minesweeper and the classic
+  shortcuts — with window moves riding paint-only transform props so a drag
+  never relayouts and the idle desktop holds the demand-render governor at a
+  few frames a second. `tools/bench-desktop.ts` measures byte-identical web
+  editors shelled by Tauri v2 and Electron against the Pocket note on the same
+  host; the numbers and their fairness caveats ship with the report.
+- **The site is one design system across a nine-chapter homepage.** Shared
+  tokens, chrome and base stylesheets replace the per-page CSS, the landing
+  carries compatibility receipts, and an icon family covers every surface from
+  the favicon to the Safari bookmark and the iOS home screen. A new post
+  derives the [agent-native runtime for embedded
+  systems](/blog/agent-native-runtime-embedded-systems/).
+
 ## 0.10.1 — August 16, 2026
 
 **Three more physical phones run PocketJS, Pocket Vapor compiles a smaller reactive graph, and Pocket3D gains a deterministic systemic world.**
