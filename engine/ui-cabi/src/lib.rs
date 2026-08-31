@@ -1,12 +1,12 @@
-//! Symbian C ABI for PocketJS's retained UI core, GLES2 DrawList backend, and
-//! deterministic capture rasterizer.
+//! Native C ABI for PocketJS's retained UI core, GLES1/GLES2 DrawList backend,
+//! and deterministic software rasterizer.
 //!
-//! The Qt host owns QuickJS and calls this library synchronously from its UI
-//! thread. There is exactly one `Ui` instance. Strings and blobs are borrowed
+//! The platform host owns QuickJS and calls this library synchronously from its
+//! UI thread. There is exactly one `Ui` instance. Strings and blobs are borrowed
 //! as `(ptr, len)` for the duration of a call and copied by the core whenever
 //! they must outlive it.
 //!
-//! QGLWidget owns the graphics context and calls the GLES2 entry points only
+//! The host owns the graphics context and calls the GLES entry points only
 //! while it is current. The software capture entry points return tightly
 //! packed, top-left-origin ARGB32 pixels; those pointers remain valid until
 //! the next capture, viewport change, init, or shutdown call.
@@ -244,8 +244,8 @@ pub extern "C" fn ui_shutdown() {
     clear_framebuffer();
 }
 
-/// Set the logical viewport. The E7 host follows the current full-screen Qt
-/// client size, including 640x360 landscape and 360x640 portrait.
+/// Set the host's logical viewport. Dynamic-window hosts update it whenever
+/// their client area changes; fixed-screen hosts set it once during boot.
 #[no_mangle]
 pub extern "C" fn ui_set_viewport(width: f32, height: f32) {
     ui().set_viewport(width, height);
@@ -654,7 +654,7 @@ pub extern "C" fn ui_debug_step() {
     ui().debug_step();
 }
 
-// ---- Qt-compatible ARGB32 framebuffer -------------------------------------
+// ---- top-left BGRA bytes / ARGB32 words framebuffer -----------------------
 
 fn framebuffer_geometry(instance: &Ui, scale: u32) -> Option<(usize, usize, usize)> {
     if !(1..=raster::MAX_RENDER_SCALE).contains(&scale) {
@@ -838,7 +838,7 @@ mod tests {
     use pocketjs_core::spec;
 
     #[test]
-    fn c_allocator_rejects_alignments_above_symbian_malloc_guarantee() {
+    fn c_allocator_rejects_alignments_above_c_malloc_guarantee() {
         assert!(c_allocator_supports_alignment(1));
         assert!(c_allocator_supports_alignment(C_MALLOC_ALIGNMENT));
         assert!(!c_allocator_supports_alignment(C_MALLOC_ALIGNMENT * 2));

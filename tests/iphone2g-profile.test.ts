@@ -21,8 +21,8 @@ const ENTRY_PATH = join(REPOSITORY, "apps/iphone2g-demo/main.tsx");
 const APP_PATH = join(REPOSITORY, "apps/iphone2g-demo/app.tsx");
 const INFO_PLIST_PATH = join(REPOSITORY, "hosts/iphone2g/Info.plist");
 const ICON_PATH = join(REPOSITORY, "hosts/iphone2g/Icon.png");
-const RUNTIME_PATH = join(REPOSITORY, "hosts/iphone2g/runtime.c");
-const POCKET_RUNTIME_PATH = join(REPOSITORY, "hosts/iphone2g/pocket_runtime.c");
+const RUNTIME_PATH = join(REPOSITORY, "hosts/ios-legacy/runtime.c");
+const POCKET_RUNTIME_PATH = join(REPOSITORY, "engine/quickjs-c/pocket_runtime.c");
 const ROOT_TSCONFIG = join(REPOSITORY, "tsconfig.json");
 const JSX_DECLARATIONS = join(REPOSITORY, "framework/src/jsx.d.ts");
 
@@ -42,7 +42,7 @@ describe("private iPhone 2G build profile", () => {
     expect(POCKET_TARGETS).not.toHaveProperty(IPHONE2G_DEV_TARGET_ID);
     expect(IPHONE2G_DEV_CONTRACTS.targets[IPHONE2G_DEV_TARGET_ID]).toEqual({
       hostAbi: IPHONE2G_DEV_HOST_ABI,
-      platform: "iphoneos",
+      platform: "ios",
       form: "takeover",
       display: {
         physicalViewport: IPHONE2G_VIEWPORT,
@@ -137,7 +137,7 @@ describe("private iPhone 2G build profile", () => {
 
   test("the ES 1.1 pipeline enables the fixed-function state ES 2 gets from its shader", () => {
     const es1 = readFileSync(
-      join(REPOSITORY, "engine/symbian/src/gl/es1.rs"),
+      join(REPOSITORY, "engine/ui-cabi/src/gl/es1.rs"),
       "utf8",
     );
     // Texturing is a per-unit enable in ES 1.1 and has no ES 2 equivalent, so

@@ -1,13 +1,13 @@
 #!/bin/bash
 # Builds PocketApple.xcframework: the pocket-apple Rust staticlib plus the
 # compiled PocketSurfaceView, packaged as a dynamic framework per slice
-# (device arm64 + simulator arm64). Output: engine/apple/dist/.
+# (device arm64 + simulator arm64). Output: engine/ios/dist/.
 set -euo pipefail
 
 cd "$(dirname "$0")"
-APPLE_DIR="$PWD"
+IOS_DIR="$PWD"
 ENGINE_DIR="$(cd .. && pwd)"
-DIST="$APPLE_DIR/dist"
+DIST="$IOS_DIR/dist"
 MIN_IOS="16.0"
 
 rm -rf "$DIST"
@@ -21,8 +21,8 @@ build_slice() {
   local fw="$DIST/$slice/PocketApple.framework"
   mkdir -p "$fw/Headers" "$fw/Modules"
 
-  cp "$APPLE_DIR/include/pocket_apple.h" "$fw/Headers/"
-  cp "$APPLE_DIR/apple/PocketSurfaceView.h" "$fw/Headers/"
+  cp "$IOS_DIR/include/pocket_apple.h" "$fw/Headers/"
+  cp "$IOS_DIR/uikit/PocketSurfaceView.h" "$fw/Headers/"
   cat > "$fw/Headers/PocketApple.h" <<'EOF'
 #import <PocketApple/PocketSurfaceView.h>
 #include <PocketApple/pocket_apple.h>
@@ -57,8 +57,8 @@ EOF
     -fobjc-arc -fapplication-extension \
     -dynamiclib \
     -install_name "@rpath/PocketApple.framework/PocketApple" \
-    -I "$APPLE_DIR/include" \
-    "$APPLE_DIR/apple/PocketSurfaceView.m" \
+    -I "$IOS_DIR/include" \
+    "$IOS_DIR/uikit/PocketSurfaceView.m" \
     "$ENGINE_DIR/target/$rust_target/release/libpocket_apple.a" \
     -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
     -dead_strip \

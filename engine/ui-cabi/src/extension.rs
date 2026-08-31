@@ -1,4 +1,4 @@
-//! Rust projection of the versioned native-extension ABI owned by the
+//! Compatibility projection of the versioned native-extension ABI owned by the
 //! Symbian Qt host. Application-specific static libraries depend on this
 //! module instead of repeating the C table or key assignments.
 

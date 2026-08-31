@@ -1,4 +1,4 @@
-# pocket-apple — the PocketJS Apple host core: one pocket-mod guest realm,
+# pocket-apple — the PocketJS iOS host core: one pocket-mod guest realm,
 # the pocket-ui-surface `ui` mount, and pocketjs-core's software rasterizer
 # behind a small C ABI consumed by PocketSurfaceView (UIKit).
 
@@ -8,7 +8,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The PocketJS `ui` surface for Apple platforms: pocket-mod guest, pak feeding, software raster DrawList behind a C ABI"
+description = "The PocketJS `ui` surface for iOS: pocket-mod guest, pak feeding, software raster DrawList behind a C ABI"
 
 [lib]
 crate-type = ["staticlib", "rlib"]

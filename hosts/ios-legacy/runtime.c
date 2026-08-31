@@ -9,7 +9,7 @@
 #include <unistd.h>
 
 /*
- * iPhone OS 1.1.4-3.1.3 UIKit host for PocketJS.
+ * Legacy UIKit host for PocketJS on iPhone OS 1.1.4 through iOS 6.
  *
  * This translation unit intentionally contains no Objective-C metadata.  The
  * delegate and view classes are registered at runtime so ld-classic never has
@@ -212,7 +212,7 @@ static int32_t g_drawable_height;
 
 /*
  * Touch contacts, one slot per finger, mirroring the modern host's slot table
- * (engine/apple/apple/PocketSurfaceView.m). The slot index is the wire
+ * (engine/ios/uikit/PocketSurfaceView.m). The slot index is the wire
  * contact id; a released slot stays latched until it has been delivered in at
  * least one guest frame, so a sub-frame tap still produces a down/up pair;
  * and the bounds hit is resolved once at the down edge and carried for the

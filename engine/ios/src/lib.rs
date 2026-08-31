@@ -1,4 +1,4 @@
-//! pocket-apple — the PocketJS Apple host core behind a C ABI.
+//! pocket-apple — the PocketJS iOS host core behind a C ABI.
 //!
 //! Composition mirrors `hosts/pocketbook`: one `pocket_mod::Guest` (QuickJS
 //! realm), one `pocket_ui_surface::UiSurface` (`globalThis.ui` + pak feeding),

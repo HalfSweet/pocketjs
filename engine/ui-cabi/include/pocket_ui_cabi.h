@@ -1,5 +1,5 @@
-#ifndef POCKETJS_IPHONE2G_CORE_H
-#define POCKETJS_IPHONE2G_CORE_H
+#ifndef POCKETJS_UI_CABI_H
+#define POCKETJS_UI_CABI_H
 
 #include <stddef.h>
 #include <stdint.h>

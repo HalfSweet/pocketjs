@@ -1,5 +1,5 @@
 // pocket-apple C ABI — the PocketJS guest + ui surface + software rasterizer
-// (engine/apple/src/lib.rs). Single-threaded: create, drive, and destroy a
+// (engine/ios/src/lib.rs). Single-threaded: create, drive, and destroy a
 // handle from one thread (in practice the main thread, with CADisplayLink).
 //
 // Call order per handle:
