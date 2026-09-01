@@ -280,6 +280,54 @@ describe("basic mount", () => {
 });
 
 describe("<For> reorder — DOM move semantics [R]", () => {
+  test("pure reverse never anchors a node on itself (DOM pre-insertion)", () => {
+    interface Row {
+      id: number;
+    }
+    const first: Row[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1 }));
+    const [rows, setRows] = createSignal(first);
+    const byId = new Map<number, NodeMirror>();
+    const dispose = render(
+      () =>
+        comp(For, {
+          get each() {
+            return rows();
+          },
+          children: (row: Row) => {
+            const el = createElement("view");
+            byId.set(row.id, el);
+            return el;
+          },
+        }),
+      root,
+    );
+    runSweep();
+    host.clear();
+
+    // Solid's reconcileArrays swaps outer pairs inward; the innermost
+    // adjacent swap asks to insert a node before ITSELF, which the DOM
+    // defines as a positional no-op (pre-insertion re-anchors on the next
+    // sibling). The mirror must neither throw nor forward that op — the
+    // core would unlink the node first and then resolve a detached anchor.
+    setRows([...first].reverse());
+    runSweep();
+    expect(childIds(root)).toEqual([6, 5, 4, 3, 2, 1].map((n) => byId.get(n)!.id));
+    for (const call of host.of("insertBefore")) {
+      expect(call[2]).not.toBe(call[3]); // a child is never its own anchor
+    }
+    expect(host.of("createNode")).toEqual([]);
+    expect(host.of("destroyNode")).toEqual([]);
+
+    // The update→reverse shape the benchmark's list-ops case trips over.
+    const second = first.map((row, i) => (i === 2 ? { id: 99 } : row));
+    setRows(second);
+    runSweep();
+    setRows([...second].reverse());
+    runSweep();
+    expect(childIds(root)).toEqual([...second].reverse().map((row) => byId.get(row.id)!.id));
+    dispose();
+  });
+
   test("reorder moves nodes without duplicates and without destroys", () => {
     const [items, setItems] = createSignal(["a", "b", "c"]);
     const byLabel = new Map<string, NodeMirror>();

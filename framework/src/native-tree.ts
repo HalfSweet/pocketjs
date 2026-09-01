@@ -484,6 +484,17 @@ function unlink(node: NodeMirror): void {
 
 export function insertNode(parent: NodeMirror, node: NodeMirror, anchor?: NodeMirror | null): void {
   const ops = getOps();
+  if (anchor === node && node.parent === parent) {
+    // DOM pre-insertion semantics: inserting a node before ITSELF re-anchors
+    // on its next sibling, which lands it back in the same position — a
+    // positional no-op. Solid's reconcileArrays emits exactly this on an
+    // adjacent swap (a=[x,y] → b=[y,x]: the first move's anchor is the node
+    // being moved next). Unlinking first would strand the anchor and the
+    // native op would have the core resolve a detached anchor, so neither
+    // the mirror nor the host may see this call.
+    sweepSet.delete(node);
+    return;
+  }
   unlink(node);
   sweepSet.delete(node);
   ops.insertBefore(parent.id, node.id, anchor ? anchor.id : 0);
