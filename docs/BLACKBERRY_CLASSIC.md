@@ -52,8 +52,8 @@ snapshot; no Android or QNX concept crosses the boundary. **The mask constants
 come from `contracts/generated/pocket_spec.h`, generated from
 `contracts/spec/spec.ts` by `contracts/spec/gen-c.ts` and byte-compared by
 `tests/contract.ts`**, and both hosts feed their platform events into the same
-state machine, `framework/native/pocket_input.c` (unit-tested with the host
-compiler in `tests/pocket-input.test.ts`):
+state machine, `hosts/blackberry-classic/pocket_input.c` (unit-tested with the
+host compiler in `tests/pocket-input.test.ts`):
 
 | Physical input | Portable input |
 | --- | --- |

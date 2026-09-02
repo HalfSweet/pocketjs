@@ -1,15 +1,14 @@
-#ifndef POCKET_INPUT_H
-#define POCKET_INPUT_H
+#ifndef POCKET_BLACKBERRY_CLASSIC_INPUT_H
+#define POCKET_BLACKBERRY_CLASSIC_INPUT_H
 
 #include <stdint.h>
 
 /*
- * Host-side input state for native hosts with a keyboard, a relative pointing
- * device (trackpad, trackball), and one tracked touch contact. Platform event
- * callbacks feed it through the functions below; the frame loop samples it
- * exactly once per guest turn. The module is plain C with no platform headers
- * so it compiles with the host compiler for the unit test in
- * tests/fixtures/pocket-input-test.c.
+ * Host-side input state shared by the QNX and Android BlackBerry Classic
+ * hosts. Platform event callbacks feed it through the functions below; the
+ * frame loop samples it exactly once per guest turn. The module is plain C
+ * with no platform headers, so the unit test in
+ * tests/fixtures/pocket-input-test.c compiles with the host compiler.
  *
  * Semantics the two BlackBerry Classic hosts share:
  *  - a key down produces one press edge (platform key repeats do not) and

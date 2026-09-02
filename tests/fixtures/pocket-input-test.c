@@ -1,7 +1,7 @@
-/* Behavioural test for framework/native/pocket_input.c, compiled and run by
- * tests/pocket-input.test.ts with the host compiler. Every scenario is one
- * host event sequence followed by the frame samples the guest would see. */
-#include "../../framework/native/pocket_input.h"
+/* Behavioural test for hosts/blackberry-classic/pocket_input.c, compiled and
+ * run by tests/pocket-input.test.ts with the host compiler. Every scenario is
+ * one host event sequence followed by the frame samples the guest would see. */
+#include "../../hosts/blackberry-classic/pocket_input.h"
 #include "../../contracts/generated/pocket_spec.h"
 
 #include <stdio.h>

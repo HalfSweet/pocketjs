@@ -22,7 +22,6 @@
   "files": [
     "framework/src",
     "framework/compiler",
-    "framework/native",
     "contracts/schema",
     "contracts/spec",
     "contracts/generated",
@@ -41,6 +40,7 @@
     "hosts/iphone4s",
     "hosts/ipodtouch6",
     "hosts/meizu-m8",
+    "hosts/blackberry-classic",
     "hosts/blackberry-classic-android",
     "hosts/blackberry-classic-qnx",
     "hosts/web",

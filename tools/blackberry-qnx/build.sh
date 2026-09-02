@@ -75,9 +75,9 @@ first_party_flags=(
   -o "$objects/pocket_runtime.o"
 
 "$qcc" "${first_party_flags[@]}" \
-  -I/repo/framework/native \
+  -I/repo/hosts/blackberry-classic \
   -I/repo/contracts/generated \
-  -c /repo/framework/native/pocket_input.c \
+  -c /repo/hosts/blackberry-classic/pocket_input.c \
   -o "$objects/pocket_input.o"
 
 "$qcc" "${first_party_flags[@]}" \
@@ -89,7 +89,7 @@ first_party_flags=(
   -DPOCKET_LOGICAL_WIDTH="$POCKET_LOGICAL_WIDTH" \
   -DPOCKET_LOGICAL_HEIGHT="$POCKET_LOGICAL_HEIGHT" \
   -I/repo/engine/quickjs-c \
-  -I/repo/framework/native \
+  -I/repo/hosts/blackberry-classic \
   -I/repo/contracts/generated \
   -c /repo/hosts/blackberry-classic-qnx/main.c \
   -o "$objects/main.o"

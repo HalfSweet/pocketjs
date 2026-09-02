@@ -29,12 +29,14 @@ pocketjs/
 │  ├─ nokia-e7/   Nokia E7 Qt/QuickJS host + visible toolchain probe
 │  ├─ ios-legacy/ UIKit host shared by the iPhone 2G and iPhone 4S ports
 │  ├─ ios-nativescript/ NativeScript iOS shell over engine/ios + @nativescript/pocketjs
+│  ├─ blackberry-classic/ input sampling shared by both BlackBerry Classic hosts
+│  ├─ blackberry-classic-qnx/ BlackBerry 10 Core Native embedding
+│  ├─ blackberry-classic-android/ BlackBerry 10 Android Runtime embedding
 │  ├─ desktop/    gpui window host — macos-app + linux-app (standalone lone-bin crate)
 │  ├─ web/        browser dev + Pocket System host (wasm core, isolated iframe Realms)
 │  └─ sim/        deterministic headless simulation host (docs/DETERMINISM.md)
 ├─ framework/    Guest: @pocketjs/framework
 │  ├─ src/        the TS runtime (Solid + Vue Vapor renderers, components, input, osk…)
-│  ├─ native/     portable C input normalization for native hosts
 │  └─ compiler/   the interpreted-path build pipeline (jsx-plugin, tailwind, pak)
 ├─ vapor/        Pocket Vapor: the AOT compiler family (Vue Vapor subset → GBA/GB/NES)
 ├─ contracts/    single sources of truth binding the layers

@@ -563,7 +563,7 @@ function buildNativeLibrary(bundle: GuestBundle, quickJsLibrary: string, coreLib
     `-DPOCKET_LOGICAL_WIDTH=${bundle.inputs.viewport.logical[0]}`,
     `-DPOCKET_LOGICAL_HEIGHT=${bundle.inputs.viewport.logical[1]}`,
     `-I${join(repository, "engine/quickjs-c")}`,
-    `-I${join(repository, "framework/native")}`,
+    `-I${join(repository, "hosts/blackberry-classic")}`,
     `-I${join(repository, "contracts/generated")}`,
     "-c",
     join(appHost, "jni/runtime.c"),
@@ -573,9 +573,9 @@ function buildNativeLibrary(bundle: GuestBundle, quickJsLibrary: string, coreLib
   const sharedSources = [
     {
       name: "pocket_input",
-      source: join(repository, "framework/native/pocket_input.c"),
+      source: join(repository, "hosts/blackberry-classic/pocket_input.c"),
       includes: [
-        `-I${join(repository, "framework/native")}`,
+        `-I${join(repository, "hosts/blackberry-classic")}`,
         `-I${join(repository, "contracts/generated")}`,
       ],
     },
