@@ -31,6 +31,7 @@ export const DOC_NAV: DocSection[] = [
       { slug: "input-focus", title: "Input & focus" },
       { slug: "app-shell", title: "App shell & overlays" },
       { slug: "devtools", title: "DevTools" },
+      { slug: "esp-idf", title: "ESP-IDF" },
       { slug: "net", title: "Networking" },
     ],
   },

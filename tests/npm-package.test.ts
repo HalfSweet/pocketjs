@@ -257,9 +257,9 @@ describe("published npm artifacts", () => {
       files.some((file) => /(^|\/)target\//.test(file) || file.includes(".fingerprint")),
     ).toBe(false);
     // Git-only platform integrations must not leak into the tarball.
-    expect(files).not.toContain("engine/backends/esp32p4-ppa/src/lib.rs");
+    expect(files).not.toContain("engine/backends/rgb565/src/lib.rs");
     expect(files.some((file) => file.startsWith("engine/backends/"))).toBe(false);
-    expect(files.some((file) => file.startsWith("hosts/esp32p4/"))).toBe(false);
+    expect(files.some((file) => file.startsWith("hosts/esp-idf/"))).toBe(false);
     expect(files).not.toContain("docs/SYMBIAN_E7.md");
     // The CLI toolchain pin still ships via the wholesale "tools" entry.
     expect(files).toContain("tools/cli/psp-toolchain.json");
