@@ -533,7 +533,7 @@ test("public PocketJS icon surfaces keep the arcade mark on the plum backing", (
     "site/for/shell.html",
     "site/templates.ts",
     "site/assets/og-image.svg",
-    "hosts/ipodtouch/Icon.svg",
+    "hosts/ipodtouch6/Icon.svg",
     "hosts/iphone4s/Icon.svg",
   ]) {
     const source = readFileSync(ROOT + file, "utf8");

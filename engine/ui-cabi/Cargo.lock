@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocketjs-symbian-core"
+name = "pocketjs-ui-cabi"
 version = "0.1.0"
 dependencies = [
  "pocketjs-core",

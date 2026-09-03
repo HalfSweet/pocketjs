@@ -1,6 +1,6 @@
 #include "pocket_runtime.h"
 
-#include "pocket_core.h"
+#include "pocket_ui_cabi.h"
 #include "pocket_spec.h"
 #include "quickjs.h"
 

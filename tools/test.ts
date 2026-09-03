@@ -47,6 +47,7 @@ const SUITE: readonly Stage[] = [
       "tests/pocket-system.test.ts",
       "tests/site-stage.test.ts",
       "tests/host-build-inputs.test.ts",
+      "tests/host-layout.test.ts",
       "tests/3ds-profile.test.ts",
       "tests/3ds-runtime-state.test.ts",
       "tests/3ds-runtime-wire.test.ts",

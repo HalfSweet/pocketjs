@@ -1,24 +1,27 @@
-# pocketjs-symbian-core — pocketjs-core plus the GLES2 DrawList backend and
-# deterministic capture rasterizer, exposed as a C static library for the
-# Qt/Symbian host. QGLWidget owns the graphics context and presentation.
+# pocketjs-ui-cabi — pocketjs-core plus software, GLES1, and GLES2 rendering,
+# exposed as a no_std-compatible C static library for native hosts.
 #
-# This is deliberately a standalone workspace. The custom Symbian target
-# needs nightly build-std while the desktop engine workspace stays on the
+# This is deliberately a standalone workspace. Historical device toolchains
+# need nightly build-std while the desktop engine workspace stays on the
 # normal host toolchain.
 #
 # Build from this directory (rust-toolchain.toml pins the compiler):
 #   cargo build --release --locked \
-#     --target targets/armv6-symbian-eabi.json \
+#     --target ../../hosts/nokia-e7/targets/armv6-symbian-eabi.json \
 #     -Z json-target-spec \
 #     -Z build-std=core,alloc,compiler_builtins \
 #     -Z build-std-features=compiler-builtins-mem
 
 [package]
-name = "pocketjs-symbian-core"
+name = "pocketjs-ui-cabi"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
+# Compatibility name: device toolchains and custom Nokia E7 cores already
+# consume this Rust crate and archive as pocketjs_symbian_core. Renaming the
+# linked artifact is a separate ABI migration.
+name = "pocketjs_symbian_core"
 crate-type = ["rlib", "staticlib"]
 
 [features]
