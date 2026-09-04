@@ -184,6 +184,24 @@ fn ui() -> &'static mut Ui {
     unsafe { UI.get_or_insert_with(Ui::new) }
 }
 
+/// Run `f` against an already initialized C ABI `Ui` singleton.
+///
+/// In-process harness crates enable `harness-access` to inspect DrawList words
+/// or replay mutations against the same core instance as the C guest runtime.
+/// Returns `None` before `ui_init` or after `ui_shutdown`; it never creates an
+/// implicit replacement instance.
+///
+/// # Safety
+///
+/// The caller must ensure there is no concurrent or reentrant UI access, must
+/// not call any `ui_*` C ABI function from `f`, and must prevent `ui_init` and
+/// `ui_shutdown` for the duration of the closure. Violating these requirements
+/// can alias the mutable borrow or drop the borrowed value.
+#[cfg(feature = "harness-access")]
+pub unsafe fn with_initialized_ui_unchecked<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    unsafe { UI.as_mut().map(f) }
+}
+
 #[inline]
 unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if ptr.is_null() || len == 0 {
@@ -861,8 +879,15 @@ mod tests {
         assert_eq!(draw_hash(&words), draw_hash(&words));
         assert_ne!(draw_hash(&words), draw_hash(&[0x0102_0304, 0x0506_0709]));
 
+        #[cfg(feature = "harness-access")]
+        assert!(unsafe { with_initialized_ui_unchecked(|_| ()) }.is_none());
         ui_init(1);
         ui_set_viewport(2.0, 1.0);
+        #[cfg(feature = "harness-access")]
+        assert_eq!(
+            unsafe { with_initialized_ui_unchecked(|ui| ui.viewport()) },
+            Some((2.0, 1.0)),
+        );
         // Texture backing is Vec<u128>; this aborts under a C allocator policy
         // that incorrectly rejects its 16-byte alignment on a 64-bit host.
         let pixel = [0xff, 0x00, 0x00, 0xff];
@@ -889,5 +914,7 @@ mod tests {
         let pixels = unsafe { core::slice::from_raw_parts(framebuffer, 8) };
         assert_eq!(pixels, &[0x11, 0x22, 0x33, 0xff, 0x11, 0x22, 0x33, 0xff]);
         ui_shutdown();
+        #[cfg(feature = "harness-access")]
+        assert!(unsafe { with_initialized_ui_unchecked(|_| ()) }.is_none());
     }
 }
