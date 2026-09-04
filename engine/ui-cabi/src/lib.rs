@@ -37,8 +37,16 @@ pub mod extension;
 ))]
 mod gl;
 
+/// `malloc` and the supported host allocator ABIs provide `max_align_t`
+/// storage: 16 bytes on their 64-bit targets and 8 on 32-bit ARM. Core texture
+/// storage uses `Vec<u128>`, so rejecting that natural alignment makes every
+/// texture allocation fail on a 64-bit C host.
 #[cfg(any(target_os = "none", feature = "bare-platform", test))]
-const C_MALLOC_ALIGNMENT: usize = 8;
+const C_MALLOC_ALIGNMENT: usize = if cfg!(target_pointer_width = "64") {
+    16
+} else {
+    8
+};
 
 #[cfg(any(target_os = "none", feature = "bare-platform", test))]
 #[inline]
@@ -61,7 +69,9 @@ unsafe extern "C" {
     feature = "host-allocator"
 ))]
 unsafe extern "C" {
+    /// Must return storage aligned to at least `C_MALLOC_ALIGNMENT`.
     fn pocket_host_alloc(size: usize) -> *mut c_void;
+    /// Must preserve alignment of the original allocation.
     fn pocket_host_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
     fn pocket_host_free(ptr: *mut c_void);
 }
@@ -838,8 +848,9 @@ mod tests {
     use pocketjs_core::spec;
 
     #[test]
-    fn c_allocator_rejects_alignments_above_c_malloc_guarantee() {
+    fn c_allocator_supports_core_texture_alignment() {
         assert!(c_allocator_supports_alignment(1));
+        assert!(c_allocator_supports_alignment(core::mem::align_of::<u128>()));
         assert!(c_allocator_supports_alignment(C_MALLOC_ALIGNMENT));
         assert!(!c_allocator_supports_alignment(C_MALLOC_ALIGNMENT * 2));
     }
@@ -852,6 +863,16 @@ mod tests {
 
         ui_init(1);
         ui_set_viewport(2.0, 1.0);
+        // Texture backing is Vec<u128>; this aborts under a C allocator policy
+        // that incorrectly rejects its 16-byte alignment on a 64-bit host.
+        let pixel = [0xff, 0x00, 0x00, 0xff];
+        assert!(ui_upload_texture(
+            pixel.as_ptr(),
+            pixel.len(),
+            1,
+            1,
+            spec::psm::PSM_8888 as u32,
+        ) >= 0);
         // Packed ABGR: R=0x33, G=0x22, B=0x11, A=0xff.
         ui_set_prop(
             spec::ROOT_ID,
