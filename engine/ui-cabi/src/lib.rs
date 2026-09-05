@@ -888,8 +888,8 @@ mod tests {
             unsafe { with_initialized_ui_unchecked(|ui| ui.viewport()) },
             Some((2.0, 1.0)),
         );
-        // Texture backing is Vec<u128>; this aborts under a C allocator policy
-        // that incorrectly rejects its 16-byte alignment on a 64-bit host.
+        // This unit test uses Rust's default allocator. The linked C fixture in
+        // tests/ui-cabi-allocator.test.ts covers the bare-platform CAllocator.
         let pixel = [0xff, 0x00, 0x00, 0xff];
         assert!(ui_upload_texture(
             pixel.as_ptr(),

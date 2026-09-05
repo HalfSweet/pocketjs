@@ -31,3 +31,21 @@ the `harness-access` feature on `pocketjs-ui-cabi` and use the unsafe
 `with_initialized_ui_unchecked` accessor under its documented no-reentrancy and
 lifecycle contract. Production hosts leave all opt-ins disabled and continue
 to use only the C ABI.
+
+## Validation
+
+The `Native C harness` pull-request workflow runs on Linux and macOS. It builds
+and executes all four stage/dispatcher switch combinations against QuickJS/UI
+stubs, runs renderer contracts, and tests `ui-cabi` with `harness-access` enabled.
+The stubs cover runtime control flow; they do not replace a real QuickJS
+benchmark run.
+
+`bun test tests/ui-cabi-allocator.test.ts` builds the real UI C ABI static library
+with `bare-platform,software-only` using the nightly pinned in
+`engine/ui-cabi/rust-toolchain.toml`. A C executable uploads textures through
+both the C `malloc` path and the `host-allocator` callback path, exercises table
+growth, and releases textures through free and shutdown. The host callback
+fixture checks 16-byte alignment, allocation/reallocation calls, and cleanup.
+This test needs `rustup`, the pinned nightly, and a C compiler. The Rust unit
+texture test uses the default allocator and covers upload behavior, not the
+`CAllocator` allocation path.
