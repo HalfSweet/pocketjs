@@ -201,6 +201,8 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   "data.fs",
   // Copy/cut/paste round-trips with the OS clipboard.
   "host.clipboard",
+  "camera.qr",
+  "host.activity",
   // The logical viewport is runtime-mutable: the app is told about live
   // window resizes and relayouts (framework resizeViewport). Console
   // targets never provide this — their viewport is a platform constant.

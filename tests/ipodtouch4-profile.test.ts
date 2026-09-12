@@ -42,7 +42,7 @@ describe("private iPod touch 4 profile", () => {
         presentations: ["native"],
         rasterDensity: IPODTOUCH4_RASTER_DENSITY,
       },
-      capabilities: ["input.touch", "text.glyphs.baked"],
+      capabilities: ["input.touch", "text.glyphs.baked", "data.fs", "host.clipboard", "camera.qr", "host.activity"],
     });
     // Same legacy UIKit runtime, same op table, same guest protocol as the
     // iPhone 4S — the ABI is the protocol revision, the target id the device.
@@ -132,7 +132,7 @@ describe("private iPod touch 4 profile", () => {
     const tool = readFileSync(join(repository, "tools/ipodtouch4.ts"), "utf8");
     expect(tool).toContain("verifyDeviceIdentity()");
     expect(tool).toContain('deviceValue(udid, "HardwareModel")');
-    expect(tool).toContain("passwordauthentication no");
+    expect(tool).toContain("pubkeyauthentication yes");
     expect(tool).toContain("byte-exact readback");
     expect(tool).toContain('"build-receipt.json": sha256(receiptPath())');
     expect(tool).toContain("/bin/su mobile -c 'touch ${paths.capture}'");

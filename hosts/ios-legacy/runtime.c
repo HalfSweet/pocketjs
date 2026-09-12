@@ -1,4 +1,9 @@
 #include "pocket_runtime.h"
+#ifdef POCKET_IOS_SERVICES
+extern void pocket_ios_services_window(void *);
+extern void pocket_ios_services_active(int);
+extern void pocket_ios_services_presented(void);
+#endif
 /* The svc transport's state, for the acceptance record: "absent" on builds
  * without the network channel, else discover / connecting / hello / up /
  * up-usb / backoff (svcwire.c). */
@@ -1309,7 +1314,8 @@ static void pocket_tick(id self, SEL command, id timer) {
         slot->needs_hit = 0;
       }
       contact = &frame_input.contacts[frame_input.contact_count];
-      contact->id = index;
+      contact->id = index | (slot->ending == 2 ? POCKET_RUNTIME_CONTACT_CANCELLED :
+        slot->ending == 1 && slot->was_sent ? POCKET_RUNTIME_CONTACT_ENDED : 0);
       contact->x = slot->x;
       contact->y = slot->y;
       contact->hit = slot->hit;
@@ -1381,6 +1387,9 @@ static void pocket_tick(id self, SEL command, id timer) {
      */
     capture_software_frame_if_requested();
   }
+#ifdef POCKET_IOS_SERVICES
+  pocket_ios_services_presented();
+#endif
   finished_us = now_us();
   if (finished_us >= frame_started_us) {
     g_frame_us_total += present_started_us - frame_started_us;
@@ -1507,14 +1516,9 @@ static void touch_slot_end(PocketTouchSlot *slot, int x, int y) {
   if (touch_live_count() == 0) {
     g_touch_awaiting_completion = 1;
   }
-  if (slot->was_sent) {
-    slot->ending = 0;
-    slot->needs_hit = 0;
-    slot->hit = 0;
-  } else {
-    /* Keep a very short tap alive until at least one delivered guest frame. */
-    slot->ending = 1;
-  }
+  /* A seen contact carries its FINAL position in a release fact. A short
+   * unseen tap still gets one ordinary down snapshot before disappearing. */
+  slot->ending = 1;
 }
 
 /* The GSEvent fallback has one implicit finger; it owns slot 0 alone. */
@@ -1596,6 +1600,32 @@ static void visit_touch_ended(id self, id touch, int x, int y) {
   (void)self;
   if (slot != NULL) touch_slot_end(slot, x, y);
 }
+
+static void visit_touch_cancelled(id self, id touch, int x, int y) {
+  PocketTouchSlot *slot = touch_slot_for(touch);
+  (void)self;
+  if (!slot) return;
+  touch_slot_move(slot, x, y);
+  slot->touch = NULL; slot->live = 0; slot->ending = 2;
+}
+static void pocket_touches_cancelled(id self, SEL command, id touches, id event) {
+  (void)command; (void)event;
+  visit_touches(self, touches, visit_touch_cancelled);
+}
+#ifdef POCKET_IOS_SERVICES
+static void pocket_app_inactive(id self, SEL command, id application) {
+  (void)self; (void)command; (void)application;
+  for (int i = 0; i < POCKET_TOUCH_SLOT_COUNT; i++) {
+    PocketTouchSlot *slot = &g_touch_slots[i];
+    if (slot->live || slot->ending) { slot->touch = NULL; slot->live = 0; slot->ending = 2; }
+  }
+  pocket_ios_services_active(0);
+}
+static void pocket_app_active(id self, SEL command, id application) {
+  (void)self; (void)command; (void)application;
+  pocket_ios_services_active(1);
+}
+#endif
 
 static void pocket_touches_began(
   id self,
@@ -1794,6 +1824,9 @@ static void launch_application(id self, id application) {
     send_void_bool(g_window, "_setHidden:", NO);
   }
   send_void(g_view, "setNeedsDisplay");
+#ifdef POCKET_IOS_SERVICES
+  pocket_ios_services_window(g_window);
+#endif
 
   /*
    * Prefer the display's own clock. CADisplayLink arrived in iPhone OS 3.1, so
@@ -1918,7 +1951,7 @@ static Class register_view_class(void) {
     class_addMethod(
       cls,
       sel_registerName("touchesCancelled:withEvent:"),
-      (void (*)(void))pocket_touches_ended,
+      (void (*)(void))pocket_touches_cancelled,
       "v@:@@"
     ) &&
     class_addMethod(
@@ -1984,6 +2017,11 @@ static Class register_delegate_class(void) {
   if (!methods_added) {
     return NULL;
   }
+#ifdef POCKET_IOS_SERVICES
+  class_addMethod(cls, sel_registerName("applicationWillResignActive:"), (void (*)(void))pocket_app_inactive, "v@:@");
+  class_addMethod(cls, sel_registerName("applicationDidEnterBackground:"), (void (*)(void))pocket_app_inactive, "v@:@");
+  class_addMethod(cls, sel_registerName("applicationDidBecomeActive:"), (void (*)(void))pocket_app_active, "v@:@");
+#endif
   objc_registerClassPair(cls);
   return cls;
 }

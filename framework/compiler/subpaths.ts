@@ -81,6 +81,7 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
     },
     aliases: ALL,
   },
+  device: { file: "framework/src/device.ts" },
   devtools: { file: "framework/src/devtools.ts" },
   display: { file: "framework/src/display.ts", aliases: TWINS },
   effects: { file: "framework/src/effects.ts", aliases: TWINS },

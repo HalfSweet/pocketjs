@@ -668,6 +668,26 @@ export function __runGestures(): void {
         break;
       }
     }
+    if (c.cancelled) {
+      if (found) {
+        for (const rec of found.owners) if (rec.flags[found.slot] & OBSERVING) fireCancel(rec, found);
+        releaseTrack(found);
+      }
+      continue;
+    }
+    if (c.ended) {
+      if (found) {
+        updateTrack(found, c.x, c.y);
+        for (const rec of found.owners) {
+          if (!(rec.flags[found.slot] & OBSERVING)) continue;
+          const slop = rec.opts.tapSlop ?? DEFAULT_TAP_SLOP;
+          if (Math.abs(found.dx) > slop || Math.abs(found.dy) > slop) rec.flags[found.slot] |= TAP_DEAD;
+          if (rec.flags[found.slot] & PANNING) rec.opts.onPanMove?.(found);
+        }
+        finishTrack(found);
+      }
+      continue;
+    }
     if (found) {
       updateTrack(found, c.x, c.y);
       continue;

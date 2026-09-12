@@ -7,6 +7,10 @@ export interface TouchContact {
   readonly surface: "primary" | "auxiliary";
   /** Stable while this contact remains down; ids may be reused after release. */
   readonly id: number;
+  /** Native cancellation, delivered once; never a normal release. */
+  readonly cancelled?: boolean;
+  /** Final position sampled by the host at normal release. */
+  readonly ended?: boolean;
   /** Logical viewport X coordinate. */
   readonly x: number;
   /** Logical viewport Y coordinate. */
@@ -26,6 +30,8 @@ const LEGACY_COORD_BITS = 9;
 const LEGACY_COORD_MASK = (1 << LEGACY_COORD_BITS) - 1;
 const LEGACY_ID_SHIFT = LEGACY_COORD_BITS * 2;
 const WIDE_MARKER = 0x80000000;
+const CANCEL_MARKER = 0x40000000;
+const END_MARKER = 0x20000000;
 const WIDE_COORD_BITS = 10;
 const WIDE_COORD_MASK = (1 << WIDE_COORD_BITS) - 1;
 const WIDE_ID_SHIFT = WIDE_COORD_BITS * 2;
@@ -64,11 +70,13 @@ export function __setTouches(
         x: value & coordMask,
         y: (value >>> coordBits) & coordMask,
         hit: hits?.[index],
+        ...((value & CANCEL_MARKER) !== 0 ? { cancelled: true } : {}),
+        ...((value & END_MARKER) !== 0 ? { ended: true } : {}),
       });
     });
   allSnapshot = Object.freeze(all);
-  primarySnapshot = Object.freeze(all.filter((contact) => contact.surface === "primary"));
-  auxiliarySnapshot = Object.freeze(all.filter((contact) => contact.surface === "auxiliary"));
+  primarySnapshot = Object.freeze(all.filter((contact) => !contact.cancelled && !contact.ended && contact.surface === "primary"));
+  auxiliarySnapshot = Object.freeze(all.filter((contact) => !contact.cancelled && !contact.ended && contact.surface === "auxiliary"));
 }
 
 /** Front-panel contacts for the current frame, in logical viewport pixels. */
@@ -123,7 +131,7 @@ export function createTouchHitFacts(
       const coordBits = wide ? WIDE_COORD_BITS : LEGACY_COORD_BITS;
       const coordMask = wide ? WIDE_COORD_MASK : LEGACY_COORD_MASK;
       const id = (value >>> (coordBits * 2)) & 0xff;
-      seen.add(id);
+      if ((value & (CANCEL_MARKER | END_MARKER)) === 0) seen.add(id);
       let hit = table.get(id);
       if (hit === undefined) {
         hit = query(value & coordMask, (value >>> coordBits) & coordMask);
@@ -144,4 +152,14 @@ export function __packTouchWide(id: number, x: number, y: number): number {
     ((y & WIDE_COORD_MASK) << WIDE_COORD_BITS) |
     (x & WIDE_COORD_MASK)
   ) >>> 0;
+}
+
+/** Same wire word, with the append-only cancellation marker (bit 30). */
+export function __packTouchCancellation(id: number, x = 0, y = 0): number {
+  return (__packTouch(id, x, y) | CANCEL_MARKER) >>> 0;
+}
+
+/** Release fact retaining the finger's final coordinates. */
+export function __packTouchEnd(id: number, x: number, y: number): number {
+  return (__packTouch(id, x, y) | END_MARKER) >>> 0;
 }

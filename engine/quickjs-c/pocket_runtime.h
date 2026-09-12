@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Contact id bit 8 requests a cancellation fact; low eight bits identify the contact. */
+#define POCKET_RUNTIME_CONTACT_CANCELLED 0x100
+#define POCKET_RUNTIME_CONTACT_ENDED 0x200
+
 /*
  * Stage ids delivered to pocket_bench_stage() when pocket_runtime.c is
  * compiled with POCKET_RUNTIME_STAGE_HOOKS. Production hosts do not define

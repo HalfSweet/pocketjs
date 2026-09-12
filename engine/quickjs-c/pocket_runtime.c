@@ -3,6 +3,9 @@
 #include "pocket_ui_cabi.h"
 #include "pocket_spec.h"
 #include "quickjs.h"
+#ifdef POCKET_IOS_SERVICES
+#include "ios-services.h"
+#endif
 #ifdef POCKET_SVC_WIRE
 #include "svcwire.h"
 #endif
@@ -558,7 +561,11 @@ static int install_host(int width, int height) {
     JS_FreeValue(context, ui);
     return 0;
   }
-  return JS_SetPropertyStr(context, global, "ui", ui) >= 0;
+  int installed = JS_SetPropertyStr(context, global, "ui", ui) >= 0;
+#ifdef POCKET_IOS_SERVICES
+  if (installed) installed = pocket_ios_services_mount(context, global);
+#endif
+  return installed;
 }
 
 static int drain_jobs(void) {
@@ -575,6 +582,9 @@ static int drain_jobs(void) {
 }
 
 void pocket_runtime_shutdown(void) {
+#ifdef POCKET_IOS_SERVICES
+  pocket_ios_services_shutdown();
+#endif
   if (context != 0) {
 #if defined(POCKET_RUNTIME_HARNESS)
     if (!JS_IsUndefined(harness_function)) JS_FreeValue(context, harness_function);
@@ -729,6 +739,8 @@ static int run_frame(
     uint32_t packed = x > 511 || y > 511
       ? 0x80000000U | (id << 20) | (y << 10) | x
       : (id << 18) | (y << 9) | x;
+    if (contact->id & POCKET_RUNTIME_CONTACT_CANCELLED) packed |= 0x40000000U;
+    if (contact->id & POCKET_RUNTIME_CONTACT_ENDED) packed |= 0x20000000U;
     if (JS_SetPropertyUint32(
           context,
           touch_array,

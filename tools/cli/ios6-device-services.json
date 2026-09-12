@@ -1,0 +1,9 @@
+{
+  "sharedCacheSha256": "2dd2dbfb451e89092d31b53936edc38acd5d19e010b9c9903e3403fec77b9472",
+  "frameworks": {
+    "AVFoundation": "a7268af4837342dd3fe4b0cb93182b80df870c36688b5bf9d0a72938e66bcd06",
+    "CoreMedia": "3b6d904d81e122a233eeca0e4b1f67c519eb0b10f05962acba7d0092a3f069f2",
+    "CoreVideo": "0aeefcd7aa4e2e66096e615895b7c5943a3b688b1d4019a98e959f8e3f340f4f",
+    "QuartzCore": "6537e300a20bb41d355773a2ea1f5fc58e1a987217d857a3522ad4ac6e1943b6"
+  }
+}

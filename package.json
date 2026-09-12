@@ -169,6 +169,7 @@
     "./config": "./framework/src/config.ts",
     "./db": "./framework/src/db-api.ts",
     "./components": "./framework/src/components.ts",
+    "./device": "./framework/src/device.ts",
     "./devtools": "./framework/src/devtools.ts",
     "./display": "./framework/src/display.ts",
     "./effects": "./framework/src/effects.ts",

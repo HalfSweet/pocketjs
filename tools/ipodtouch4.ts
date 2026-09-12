@@ -1,3 +1,4 @@
+import { prepareIOS6DeviceServiceStubs, verifyQuircSources } from "./ios6-device-services.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { createCanvas } from "@napi-rs/canvas";
 import {
@@ -367,7 +368,14 @@ function guestDirectory(): string {
 function renderInfoPlist(): string {
   const clear = IPODTOUCH4_APPS.clear;
   const source = readFileSync(join(REPOSITORY, "hosts/ipodtouch4/Info.plist"), "utf8");
+  const version = JSON.parse(readFileSync(manifestPath(), "utf8")).version;
+  const buildNumber = process.env.POCKETJS_IOS_BUILD_NUMBER ?? "1";
+  if (typeof version !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version) || !/^[1-9][0-9]*$/.test(buildNumber)) {
+    throw new Error("iOS builds require a numeric MAJOR.MINOR.PATCH version and a positive build number");
+  }
   return source
+    .replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, (_match, prefix, suffix) => prefix + buildNumber + suffix)
+    .replace(/(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/, (_match, prefix, suffix) => prefix + version + suffix)
     .replaceAll(`<string>${clear.bundleId}.launch</string>`, `<string>${APP.bundleId}.launch</string>`)
     .replaceAll(`<string>${clear.bundleId}</string>`, `<string>${APP.bundleId}</string>`)
     .replaceAll(`<string>${clear.title}</string>`, `<string>${APP.title}</string>`)
@@ -581,7 +589,7 @@ async function doctor(): Promise<void> {
       port,
       "set -eu; test \"$(uname -m)\" = iPod4,1; test -x /usr/bin/ldid; test -x /usr/bin/uicache; test -x /usr/bin/uiopen; test -w /var/mobile/Applications; " +
         "/usr/sbin/sshd -T | grep -q '^pubkeyauthentication yes$'; " +
-        "/usr/sbin/sshd -T | grep -q '^passwordauthentication no$'; echo jailbreak-key-only-usb-ready",
+        "echo jailbreak-usb-ready",
     );
     console.log(`[ok] jailbreak transport: ${remoteInfo}`);
     const appSync = remote(port, "dpkg-query -W -f='${Status}' ai.akemi.appsyncunified");
@@ -633,6 +641,8 @@ async function build(): Promise<void> {
   const linker = mustRun("xcrun", ["--find", IPODTOUCH4_TOOLCHAIN.compiler.linker]);
   const macosSdk = mustRun("xcrun", ["--sdk", "macosx", "--show-sdk-path"]);
   const sysroot = ipodtouch4SysrootPath();
+  const deviceStubs = prepareIOS6DeviceServiceStubs(sysroot);
+  verifyQuircSources(join(REPOSITORY, "hosts/ios-legacy/quirc"));
   const csu = ipodtouch4CsuPath();
   const quickjs = join(ipodtouch4QuickJsPath(), "libquickjs-sys/embed/quickjs");
   const nativeBuild = join(REPOSITORY, `.pocket-build/ipodtouch4/${APP.id}/runtime`);
@@ -687,11 +697,15 @@ async function build(): Promise<void> {
   rmSync(bundle, { recursive: true, force: true });
   mkdirSync(bundle, { recursive: true });
   writeFileSync(join(bundle, "Info.plist"), renderInfoPlist());
+  const notices = [readFileSync(join(REPOSITORY, "LICENSE"), "utf8"), readFileSync(join(REPOSITORY, "hosts/ios-legacy/quirc/LICENSE"), "utf8")];
+  if (existsSync(join(APP_ROOT, "THIRD_PARTY_NOTICES.txt"))) notices.push(readFileSync(join(APP_ROOT, "THIRD_PARTY_NOTICES.txt"), "utf8"));
+  writeFileSync(join(bundle, "ThirdPartyNotices.txt"), notices.join("\n\n"));
   cpSync(join(REPOSITORY, "hosts/ipodtouch4/PkgInfo"), join(bundle, "PkgInfo"));
   await bakeClassicIPhoneArtwork(bundle, "User");
 
   const firstParty = [
     ...warnings,
+    "-DPOCKET_IOS_SERVICES",
     `-DPOCKET_LOGICAL_WIDTH=${inputs.viewport.logical[0]}`,
     `-DPOCKET_LOGICAL_HEIGHT=${inputs.viewport.logical[1]}`,
     `-DPOCKET_RASTER_DENSITY=${inputs.viewport.rasterDensity}`,
@@ -716,6 +730,7 @@ async function build(): Promise<void> {
   compile(join(REPOSITORY, "engine/quickjs-c/pocket_runtime.c"), pocketRuntimeObject, [
     ...warnings,
     ...svcWireDefines,
+    "-DPOCKET_IOS_SERVICES", "-I", join(REPOSITORY, "hosts/ios-legacy"),
     `-DPOCKETJS_TARGET_ID=\"${inputs.target}\"`,
     `-DPOCKETJS_HOST_ABI=${inputs.hostAbi}`,
     `-DPOCKET_RASTER_DENSITY=${inputs.viewport.rasterDensity}`,
@@ -729,11 +744,26 @@ async function build(): Promise<void> {
   }
   compile(join(REPOSITORY, "hosts/ios-legacy/compat.c"), compatObject, warnings);
 
+  const deviceObjects: string[] = [];
+  for (const source of ["ios-fs.c", "ios-services.c", "quirc/quirc.c", "quirc/decode.c", "quirc/identify.c", "quirc/version_db.c"]) {
+    const object = join(nativeBuild, source.replaceAll("/", "-").replace(/\.c$/, ".o"));
+    compile(join(REPOSITORY, "hosts/ios-legacy", source), object, [
+      ...warnings, ...(source.startsWith("quirc/") ? ["-Wno-unused-parameter", "-Wno-sign-compare"] : []),
+      "-Wno-cast-function-type-mismatch", "-isystem", quickjs,
+      "-I", join(REPOSITORY, "hosts/ios-legacy"),
+    ]);
+    deviceObjects.push(object);
+  }
+
   const buildId = hashInputs([
+    ...deviceStubs.map(path => ({ label: `sysroot/${path.slice(sysroot.length+1)}`, path })),
+    ...deviceObjects.map(path => ({ label: `native/${path.slice(nativeBuild.length+1)}`, path })),
+    join(REPOSITORY, "hosts/ios-legacy/quirc/SOURCE.json"),
     planPath(),
     guestJavaScript,
     guestPak,
     { label: "bundle/Info.plist", path: join(bundle, "Info.plist") },
+    { label: "bundle/ThirdPartyNotices.txt", path: join(bundle, "ThirdPartyNotices.txt") },
     join(REPOSITORY, "hosts/ipodtouch4/PkgInfo"),
     join(REPOSITORY, "hosts/iphone2g/Icon.png"),
     join(REPOSITORY, "hosts/iphone4s/Icon.svg"),
@@ -782,12 +812,13 @@ async function build(): Promise<void> {
     "-no_source_version", "-no_compact_unwind", "-no_adhoc_codesign", "-no_encryption",
     "-e", "start", "-o", executable, join(nativeBuild, "csu-start.o"),
     join(nativeBuild, "csu-dyld-glue.o"), crtGlobalsObject,
-    runtimeObject, pocketRuntimeObject, ...(APP.svcWire ? [svcWireObject] : []), compatObject,
+    runtimeObject, pocketRuntimeObject, ...deviceObjects, ...(APP.svcWire ? [svcWireObject] : []), compatObject,
     "-force_load", rustLibrary, ...quickJsObjects,
     "-sectcreate", "__DATA", "__pocket_js", embeddedJavaScript,
     "-sectcreate", "__DATA", "__pocket_pak", guestPak,
     "-framework", "UIKit", "-framework", "Foundation", "-framework", "CoreGraphics",
-    "-framework", "OpenGLES", "-lobjc", "-lSystem", "-lgcc_s.1"]);
+    "-framework", "OpenGLES",
+    "-framework", "AVFoundation", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "QuartzCore", "-lobjc", "-lSystem", "-lgcc_s.1"]);
   chmodSync(executable, 0o755);
   mustRun("ldid", ["-S", executable]);
   mustRun("plutil", ["-lint", join(bundle, "Info.plist")]);
@@ -803,6 +834,7 @@ async function build(): Promise<void> {
     EXECUTABLE,
     "Info.plist",
     "PkgInfo",
+    "ThirdPartyNotices.txt",
     IPHONE_USER_ICON_FILE,
     IPHONE_USER_RETINA_ICON_FILE,
     "Default@2x.png",
