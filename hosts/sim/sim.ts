@@ -332,6 +332,9 @@ export interface BundleOptions {
   viewport?: SimViewportOptions;
   /** The wasm core. Default: hosts/web/pocketjs.wasm of this PocketJS root. */
   wasm?: string;
+  /** Host-flavored op extensions (appTable/appLaunch, …), installed on the ui
+   *  namespace before the bundle evaluates — bootWorld's `mutateOps`. */
+  ops?: (ops: Record<string, unknown>) => void;
 }
 
 /** A guest exception: thrown while the bundle evaluated (`boot`) or inside a frame. */
@@ -470,7 +473,19 @@ export async function bootBundle(options: BundleOptions): Promise<BundleWorld> {
     hitTestBoundsAuxiliary?: (x: number, y: number) => number;
     __viewport: { w: number; h: number };
     __auxiliarySurface?: { root: number; w: number; h: number };
+    captureTexts?: (surface: number, root: number) => boolean;
   };
+  // A device draws every frame; this host draws only when asked. A text
+  // capture is read from a draw, so the frame that arms one draws its surface.
+  const armedCaptures = new Set<number>();
+  const captureTexts = ops.captureTexts;
+  if (captureTexts) {
+    ops.captureTexts = (surface: number, root: number) => {
+      const armed = captureTexts(surface, root);
+      if (armed) armedCaptures.add(surface);
+      return armed;
+    };
+  }
 
   const logs: GuestLog[] = [];
   const effects: EffectEvent[] = [];
@@ -504,6 +519,7 @@ export async function bootBundle(options: BundleOptions): Promise<BundleWorld> {
     fonts.sort((a, b) => a.slot - b.slot);
   }
   g.ui = wasm.ops;
+  options.ops?.(wasm.ops as unknown as Record<string, unknown>);
   g.__pak = pak;
   g.frame = undefined;
   g.offload = undefined;
@@ -601,6 +617,11 @@ export async function bootBundle(options: BundleOptions): Promise<BundleWorld> {
         guest(() => {
           appFrame(input.buttons ?? 0, input.analog ?? 0x8080, touches, hitFacts(touches), touches?.map(() => surface));
           for (let t = 0; t < ticksPerFrame; t++) wasm.tick();
+          for (const armed of armedCaptures) {
+            if (armed === 1) wasm.drawHashAuxiliary?.();
+            else wasm.drawHash?.();
+          }
+          armedCaptures.clear();
         });
       } catch (error) {
         failure = failureOf(error, "frame", frames);

@@ -97,7 +97,11 @@ LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/pocketj
 LIBPATHS := -L$(DEVKITPRO)/libctru/lib
 LIBS := -lcitro3d -lctru -lm
 
-OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
+# quirc (vendored, ISC; src/quirc/VENDORED.txt) decodes QR codes for camera.c.
+QUIRC_OBJECTS := $(BUILD)/quirc/quirc.o $(BUILD)/quirc/decode.o $(BUILD)/quirc/identify.o $(BUILD)/quirc/version_db.o
+OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o \
+  $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link_proto.o $(BUILD)/link.o $(BUILD)/launcher.o $(BUILD)/wifi.o $(BUILD)/camera.o \
+  $(BUILD)/stage.o $(BUILD)/agent.o $(QUIRC_OBJECTS) $(BUILD)/vshader_shbin.o $(BUILD)/stage_shbin.o
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -124,6 +128,16 @@ $(BUILD)/vshader_shbin.s $(BUILD)/vshader_shbin.h &: $(BUILD)/vshader.shbin
 $(BUILD)/vshader_shbin.o: $(BUILD)/vshader_shbin.s
 	$(CC) $(ARCH) -c $< -o $@
 
+# The agent stage's shader (stage.c): the mascot's room on the top screen.
+$(BUILD)/stage.shbin: $(SOURCE)/stage.v.pica | $(BUILD)
+	$(PICASSO) -o $@ $<
+
+$(BUILD)/stage_shbin.s $(BUILD)/stage_shbin.h &: $(BUILD)/stage.shbin
+	cd $(BUILD) && $(BIN2S) -a 4 -H stage_shbin.h stage.shbin > stage_shbin.s
+
+$(BUILD)/stage_shbin.o: $(BUILD)/stage_shbin.s
+	$(CC) $(ARCH) -c $< -o $@
+
 # The capture window, the input tape and the viewport reach the C sources as -D
 # defines, so a rebuild driven by source mtimes alone would keep a previous
 # run's values — a stale tape or a short capture window produces a plausible
@@ -138,10 +152,21 @@ $(FLAGS_STAMP).probe: | $(BUILD)
 	@rm -f $(FLAGS_STAMP).new
 $(FLAGS_STAMP): $(FLAGS_STAMP).probe ;
 
-$(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(BUILD)/vshader_shbin.h $(FLAGS_STAMP) | $(BUILD)
+$(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(BUILD)/vshader_shbin.h $(BUILD)/stage_shbin.h $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Third-party code keeps its own warnings out of the host's build log.
+$(BUILD)/quirc/%.o: $(SOURCE)/quirc/%.c $(wildcard $(SOURCE)/quirc/*.h) $(FLAGS_STAMP) | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -w -c $< -o $@
+
 $(BUILD)/offload.o: $(SOURCE)/offload.h $(SOURCE)/offload_queue.h
+$(BUILD)/link.o $(BUILD)/link_proto.o $(BUILD)/launcher.o $(BUILD)/qjs.o $(BUILD)/main.o $(BUILD)/devmenu.o: \
+  $(SOURCE)/link.h $(SOURCE)/link_proto.h $(SOURCE)/launcher.h $(SOURCE)/jscan.h $(SOURCE)/sha256.h $(SOURCE)/runtime.h
+$(BUILD)/camera.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/main.o: $(SOURCE)/camera.h
+$(BUILD)/wifi.o $(BUILD)/qjs.o $(BUILD)/main.o: $(SOURCE)/wifi.h
+$(BUILD)/stage.o $(BUILD)/agent.o $(BUILD)/qjs.o $(BUILD)/main.o $(BUILD)/link.o: $(SOURCE)/stage.h $(SOURCE)/agent.h
+$(BUILD)/runtime.o: $(SOURCE)/runtime.h
 $(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/offload_coverage.h
 $(BUILD)/media.o: $(SOURCE)/media.h $(SOURCE)/media_wire.h $(SOURCE)/media_adpcm.h
 $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(SOURCE)/media.h

@@ -766,6 +766,42 @@ impl Ui {
             if previous != 0 && previous != parent {
                 self.mark_layout_structure_under(previous);
             }
+            self.rehome_regions(child);
+        }
+    }
+
+    /// A region belongs to the engine of the output its node is in. A node
+    /// contained while detached (a renderer sets the class before it inserts)
+    /// registered with the primary engine; inserting it, or an ancestor, under
+    /// the auxiliary surface moves its region to the auxiliary engine, and
+    /// moving it back moves the region back.
+    fn rehome_regions(&mut self, id: i32) {
+        let Some(auxiliary) = self.auxiliary.as_mut() else {
+            return;
+        };
+        if self.layout.regions.is_empty() && auxiliary.layout.regions.is_empty() {
+            return;
+        }
+        let in_auxiliary = self.tree.is_in_subtree(auxiliary.root, id);
+        let (from, to) = if in_auxiliary {
+            (&mut self.layout, &mut auxiliary.layout)
+        } else {
+            (&mut auxiliary.layout, &mut self.layout)
+        };
+        if from.regions.is_empty() {
+            return;
+        }
+        let mut pending = alloc::vec![id];
+        while let Some(current) = pending.pop() {
+            let Some(slot) = self.tree.resolve(current) else {
+                continue;
+            };
+            let node = &self.tree.slots[slot as usize];
+            if node.region_root && from.is_region(current) {
+                from.unregister_region(current);
+                to.register_region(current);
+            }
+            pending.extend_from_slice(&node.children);
         }
     }
 
@@ -1828,6 +1864,26 @@ impl Ui {
         }
     }
 
+    /// Solve pending layout for both outputs now. `draw` and `draw_auxiliary`
+    /// solve on demand; a host that times layout apart from the DrawList
+    /// build calls this first.
+    pub fn relayout_outputs(&mut self) {
+        if self.layout.needs() {
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+        }
+        if let Some(auxiliary) = self.auxiliary.as_mut() {
+            if auxiliary.layout.needs() {
+                layout::relayout_root(
+                    &mut self.tree,
+                    &self.styles,
+                    &self.fonts,
+                    &mut auxiliary.layout,
+                    auxiliary.root,
+                );
+            }
+        }
+    }
+
     /// Walk the tree into the DrawList (spec.ts DRAWLIST format) and return
     /// it. Output is valid until the next mutating call.
     pub fn draw(&mut self) -> &DrawList {
@@ -2086,6 +2142,49 @@ impl Ui {
         if id == 0 {
             self.inspect_drawn = None;
         }
+    }
+
+    /// Arm a capture of the text runs painted inside node `root`'s subtree
+    /// on the next draw of `surface` (0 the primary output, 1 the auxiliary
+    /// one); `root` 0 reads the whole surface. Returns false for a surface
+    /// this Ui does not have or a node it does not hold.
+    pub fn capture_texts(&mut self, surface: u32, root: i32) -> bool {
+        if root != 0 && self.tree.resolve(root).is_none() {
+            return false;
+        }
+        match surface {
+            0 => self.draw_list.capture_texts = if root == 0 { spec::ROOT_ID } else { root },
+            1 => match self.auxiliary.as_mut() {
+                Some(auxiliary) => auxiliary.draw_list.capture_texts = if root == 0 { auxiliary.root } else { root },
+                None => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    /// The last capture of `surface`, one painted text run per line:
+    /// `x,y,w,h` (whole px of its visible box), a tab, then the text with
+    /// tabs and line breaks as spaces. Empty until a capture completes.
+    pub fn captured_texts(&self, surface: u32) -> alloc::string::String {
+        use core::fmt::Write;
+        let list = match surface {
+            0 => &self.draw_list,
+            1 => match self.auxiliary.as_ref() {
+                Some(auxiliary) => &auxiliary.draw_list,
+                None => return alloc::string::String::new(),
+            },
+            _ => return alloc::string::String::new(),
+        };
+        let mut out = alloc::string::String::new();
+        for text in &list.texts {
+            let _ = write!(out, "{},{},{},{}\t", text.x as i32, text.y as i32, (text.w + 0.999) as i32, (text.h + 0.999) as i32);
+            for ch in text.text.chars() {
+                out.push(if ch == '\t' || ch == '\n' || ch == '\r' { ' ' } else { ch });
+            }
+            out.push('\n');
+        }
+        out
     }
 
     /// Packed `x | y << 16` (i16 halves) of the inspected node's last-drawn

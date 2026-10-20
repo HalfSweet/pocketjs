@@ -94,6 +94,7 @@ const SUITE: readonly Stage[] = [
       "tests/repack-palette.test.ts",
       "tests/repack-vita.test.ts",
       "tests/3ds-soc.test.ts",
+      "tests/3ds-link.test.ts",
       "tests/iphone2g-profile.test.ts",
       "tests/iphone4s-profile.test.ts",
       "tests/ipodtouch-profile.test.ts",
@@ -148,6 +149,8 @@ const SUITE: readonly Stage[] = [
       "tests/repack-worker.test.ts",
       "tests/offload-provider.test.ts",
       "tests/companion-session.test.ts",
+      "tests/pocket-link.test.ts",
+      "tests/pocket-agent.test.ts",
       "tests/resource-cache.test.ts",
       "tests/font-config.test.ts",
       "tests/font-archive.test.ts",
@@ -328,6 +331,19 @@ const SUITE: readonly Stage[] = [
     prep: [["bun", "tools/launcher.ts", "covers"]],
     browser: true,
     tests: ["tests/launcher-sim.test.ts"],
+  },
+  {
+    // The system agent's overlay over a fixture app on the 3DS geometry, with
+    // the agent fake (hosts/sim/console-3ds.ts). The test builds its guest
+    // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Home and the
+    // Hacker News app live in pocket-shell (shells/3ds) with their own sims.
+    name: "agent overlay sim",
+    prep: [
+      ["bun", "tools/wasm.ts"],
+      ["bun", "tools/3ds-stage-art.ts", "--check"],
+    ],
+    browser: true,
+    tests: ["tests/agent-layer.test.ts"],
   },
 ];
 

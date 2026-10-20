@@ -35,7 +35,16 @@ src/native.c          .3dsx staging, verification and swap for the dev connectio
 src/hbldr.c           Luma3DS hb:ldr requests that start a .3dsx on exit
 src/error_text.h      the shared fixed-buffer error formatter
 src/gfx.c             the DrawList -> citro3d walker
-src/qjs.c             QuickJS embedding: globalThis.ui -> ui_* calls
+src/qjs.c             QuickJS embedding: globalThis.ui -> ui_* calls, and the
+                      link / net / wifi / camera namespaces
+src/launcher.c        the app table: installed slots, switch requests, lastError
+src/link.c            Pocket Link client: discovery, handshake, net, catalog, install
+src/link_proto.c      Pocket Link wire facts without sockets (URI, beacon, proofs)
+src/sha256.c          SHA-256 / HMAC-SHA256 (handshake proofs, app-id slots)
+src/jscan.c           bounded JSON reader/writer for the host's own records
+src/wifi.c            globalThis.wifi over AC and nwm::EXT
+src/camera.c          globalThis.camera: outer-camera texture + QR decode
+src/quirc/            vendored quirc (ISC), the QR decoder camera.c runs
 src/input.c           3DS keys and circle pad -> the PSP BTN bitmask
 src/vshader.v.pica    the PICA200 vertex shader
 Makefile              run INSIDE the container by tools/3ds.ts
@@ -270,11 +279,17 @@ message, and a combined top/bottom PNG. `dev` keeps the DevTools panel attached;
 captures both screens, and `o` opens the panel.
 
 **`devStats` carries `timingUs`: the mean and maximum microseconds of each
-frame phase over the last complete 60-frame window** — guest JS, core tick
-(animation and physics), the two DrawList builds, PICA200 preparation and
-submission, and the frame interval — plus `slowFrames`, the count of intervals
-above 25 ms since boot. A frame after a recovery or a package reload starts a
-new interval and is not sampled.
+frame phase over the last complete 60-frame window** — the loop's system work
+before the guest runs (`pre`: sockets, the link, input), guest JS, core tick
+(animation and physics), layout, the two DrawList builds, PICA200 preparation
+and submission, the wait for the vblank and the GPU (`wait`), and the frame
+interval — plus `slowFrames`, the count of intervals above 25 ms since boot,
+and `gpuLate`, the count of frames whose previous GPU work outlasted a
+vblank. A frame after a recovery or a package reload starts a new interval
+and is not sampled. **`ui.__dbgFrames()` returns the same phases for each of
+the last 64 frames** (`pre,js,layout,draw,gpu,wait,frame` in 0.1 ms units,
+oldest first), for finding the frame that missed its vblank rather than a
+window mean.
 
 **One authenticated, ordered TCP connection carries every development
 message.** JSON frames contain only Pocket DevTools control and logs. Package
@@ -384,6 +399,118 @@ both survive. A guest therefore re-introduces itself on its first frame
 hello as "this replica has loaded nothing" rather than as a new socket — the
 Pocket Term companion re-sends its runtime font atlas there, without which
 the new guest draws blanks where the old one drew CJK.
+
+## Installed apps and the launcher
+
+**The embedded ROMFS guest is the launcher** (docs/LAUNCHER.md, "Nintendo
+3DS"). Every other directory under `sdmc:/pocketjs/runtime/apps/` whose state
+names a committed active package is an installed app: `ui.appTable()` lists
+them (never the launcher's own slot) with `output`, `id`, `title`,
+`version` and `bytes` from the `app` object of the package plan, plus
+`current`, `resume`, `launcher` (the embedded output) and `lastError`. The
+facts are cached per slot in `app.txt`, keyed by the package hash, so a table
+rebuild after an install reads one small file per slot instead of a package.
+
+`ui.appLaunch(output)` schedules the swap for the top of the next frame:
+teardown, `runtime_select_slot` + `runtime_storage_init` for the target slot,
+boot of its active package. **An installed app has no recovery chain of its
+own and never enters the launcher's.** A boot failure or an uncaught frame
+exception writes `last-error.txt` into the app's slot, switches to the
+launcher and shows once as `appTable().lastError`. Only the launcher walks
+active → last-good → embedded.
+
+While an installed app runs, **SELECT belongs to the host**: the app never
+sees the bit, and a SELECT press edge returns to the launcher with
+`resume` set to the app's output. The edge detector is latched at every boot,
+so a SELECT still held from the switch cannot bounce straight back. The
+launcher sees SELECT unchanged. `ui.appShot()` returns -1: this host keeps no
+frozen frame.
+
+**A dev-wire push of another app installs into that app's own slot**, commits
+it as the slot's active package and launches it, so
+`bun run 3ds:dev push --app nexus` works while the launcher runs. A push of the
+running app keeps the candidate → accepted lifecycle; when that app is not the
+launcher, a failing candidate returns to the launcher instead of a rollback.
+
+## Pocket Link
+
+`src/link.c` is the console side of `contracts/spec/link.ts`: **one
+authenticated TCP connection to a paired companion computer, owned by the
+host and kept across every app switch.** A guest switch drops the guest's net
+handles, undelivered events and catalog replies; an install that is streaming
+keeps writing to storage. Like `svcwire.c` it is non-blocking and pumped once
+per frame, at most 64 KiB received (and therefore written to the SD card) per
+pump.
+
+- **Identity.** `sdmc:/pocketjs/link/device.txt` holds a random 16-hex device
+  id; the name is the CFG user name and the model comes from
+  `CFGU_GetSystemModel`. Each paired companion is
+  `sdmc:/pocketjs/link/companions/<id>.txt` (key, name, last address, port).
+- **Discovery.** The console listens on UDP 8627 and follows a beacon only from
+  a companion it holds a key for, connecting to the datagram's source address.
+  After 2.5 s without one it tries a paired companion's last address directly.
+  Failures back off from 1 s to 8 s; a refusal holds that companion off for
+  30 s. Pings every 3 s; 10 s of silence drops the link.
+- **Handshake.** The HMAC key is the raw bytes of the secret (32-byte key,
+  16-byte pairing secret). The console checks the companion's proof with a
+  constant-time compare before it sends its own.
+- **Pairing.** `link.pair(uri)` parses `pocketlink://pair?…`, replaces the
+  current connection, tries each `h` host in order in mode `pair`, unmasks and
+  stores the key on `paired` and stays linked.
+- **`globalThis.net`.** The NET module rides the link: at most 2 requests in
+  flight, request bodies up to 64 KiB sent as 16 KiB data frames, response
+  bodies accumulated in one buffer bounded by `maxBytes`, events delivered by
+  `net.poll()` once per tick. `net.start` refuses with
+  `unavailable: no companion linked` while unlinked, and adds the running
+  guest's app id as `app`.
+- **Installs.** `link.install(appId)` streams into
+  `apps/<slot>/link-upload.pocket` of the app's own slot, admits the file
+  against the head's hash and commits it as that slot's active package. The
+  admission reads the package back once, which costs one long frame per install
+  (about 1.6 s for a 4.3 MB package on an Old 3DS). `link.remove` refuses the
+  running app and the launcher.
+
+`link.status()` carries four diagnostics beyond `LinkStatus`: `connectMs`
+(TCP connect + handshake), `rttMs` (last ping), and `rxBytes` / `rxUs` /
+`sdUs` / `pumpMaxUs` since the previous read. The development menu shows the
+link state on one line.
+
+## Wi-Fi and camera
+
+`src/wifi.c` serves `globalThis.wifi`. Reads go through AC; **libctru's
+`acInit` opens `ac:i` when it can, which the saved-slot SSIDs need**
+(`ACI_LoadNetworkSetting` + `ACI_GetNetworkWirelessEssidSecuritySsid`, the
+working copy only). `connect(slot)` makes the request Luma3DS Rosalina's
+"Force wireless connection" makes and polls the completion event with a zero
+timeout from `wifi_pump`; `setEnabled` goes through `nwm::EXT`. Nothing writes
+a saved connection.
+
+`src/camera.c` serves `globalThis.camera`: **the outer camera at 320x240
+RGB565, 30 fps, into one 512x256 host texture.** A capture thread keeps one
+`CAMU_SetReceiving` armed into three rotating buffers and restarts capture on
+the buffer-error event; the main thread copies the newest frame into the
+texture at the GPU-idle frame boundary (`camera_present`). Four times a second
+a frame is handed to a low-priority thread that runs quirc. The camera
+service starts on `open()` and stops on `close()` or a guest switch. Measured
+on an Old 3DS: 30 frames and 4 decode passes a second with the guest still at
+60 fps.
+
+Capture and offload builds compile link, net, wifi and camera to inert stubs
+and leave the app switching ops out, so goldens stay deterministic.
+
+## The agent stage
+
+A guest that declares `system.agent` gets the top screen drawn by the host:
+`src/stage.c` and `src/stage.v.pica` draw the mascot's room in stereo (a
+right-eye target `GFX_RIGHT`, `gfxSet3D` on while such a guest runs), and
+`src/agent.c` serves `globalThis.agent`: the L+R chord, the microphone (MICU
+at 16,360 Hz), touch-screen shots, and the companion's glyph atlases and
+own-screen frames, all over the Pocket Link. `main.c` filters the chord out of
+the guest's buttons, copies the touch screen into the monitor's texture at
+the start of the frame and calls `stage_render` in place of the primary
+surface's draw. `ui.captureTexts` / `ui.capturedTexts` read the texts a
+surface painted. The mechanism, the overlay and the companion side are in
+[docs/POCKET-AGENT.md](../../docs/POCKET-AGENT.md).
 
 ## ZL and ZR
 
