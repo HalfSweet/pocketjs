@@ -51,6 +51,7 @@
 #include "soc.h"
 #include "svcwire.h"
 #include "camera.h"
+#include "fs.h"
 #include "launcher.h"
 #include "link.h"
 #include "wifi.h"
@@ -484,11 +485,34 @@ static bool boot_guest(
     return false;
   }
   if (!surfaces_admit(package, error, error_length)) return false;
+  /* link.c names the running app in every NET request, and the guest's
+   * first code (a module's top level, the first effects) runs inside
+   * qjs_boot and may fetch: the launcher learns the app before it starts. */
+  launcher_set_current(runtime_slot(), package);
+  /* data.fs: the guest's tree is its own slot's data directory, bound before
+   * qjs_boot publishes `globalThis.fs`. A card that cannot hold it leaves
+   * the namespace out, as on a host without the capability; so does a
+   * capture build, whose goldens must not read an earlier run's files. */
+  fs_unbind();
+#ifndef POCKETJS_CAPTURE
+  if ((package->guest.features & POCKET_GUEST_FEATURE_FS) != 0) {
+    char root[128];
+    char temp[128];
+    if (runtime_slot_path(package->guest.slot, "data", root, sizeof root) &&
+        runtime_slot_path(package->guest.slot, "fs-tmp", temp, sizeof temp)) {
+      fs_bind(root, temp, fs_plan_quota((const char *)package->guest.plan, package->guest.plan_length));
+    }
+  }
+#endif
+  camera_admit(
+    (package->guest.features & POCKET_GUEST_FEATURE_CAMERA_QR) != 0,
+    (package->guest.features & POCKET_GUEST_FEATURE_CAMERA_PHOTO) != 0
+  );
   /* The guest's capability decides who owns the top screen; it must be set
    * before qjs_boot, which publishes `globalThis.agent` only for it. */
   bool agent = stage_ready && (package->guest.features & POCKET_GUEST_FEATURE_AGENT) != 0;
+  /* Also sets 3D and the top backlight from the console's display mode. */
   agent_set_enabled(agent);
-  gfxSet3D(agent);
   ui_init(raster_density);
   ui_set_viewport((float)VIEW_W, (float)VIEW_H);
   if (ui_create_auxiliary_surface((float)AUX_VIEW_W, (float)AUX_VIEW_H) == 0) {
@@ -509,6 +533,7 @@ static bool boot_guest(
     qjs_shutdown();
     gfx_reset_resources();
     ui_shutdown();
+    fs_unbind();
     return false;
   }
   return true;
@@ -520,6 +545,7 @@ static void teardown_guest(void) {
    * install still streaming) and drop what belonged to this guest. */
   camera_teardown();
   link_reset_guest();
+  fs_unbind();
   agent_set_enabled(false);
   qjs_shutdown();
   gfx_reset_resources();
@@ -854,7 +880,6 @@ static void boot_home(
   runtime_failure_lineage_reset(failures);
   *choice = home_choice(state, embedded, failures);
   if (!boot_with_recovery(choice, state, embedded, failures, error, sizeof error)) fail(error);
-  launcher_set_current(launcher_home_slot(), choice->package);
 }
 
 /* Boot an installed app from its own slot: `candidate` when one was just
@@ -888,7 +913,6 @@ static bool boot_app(
     return false;
   }
   runtime_write_status(state, choice->package, choice->commit_on_accept ? "candidate" : "booted");
-  launcher_set_current(target->slot, choice->package);
   return true;
 }
 
@@ -1115,7 +1139,6 @@ int main(void) {
     guest.commit_on_accept ? "candidate" : "booted",
     0
   );
-  launcher_set_current(runtime_slot(), guest.package);
 #endif
 #endif /* ordinary recovery boot */
 
@@ -1397,9 +1420,11 @@ int main(void) {
     C3D_RenderTargetClear(primary_target, C3D_CLEAR_ALL, 0x000000ff, 0);
     if (agent_enabled()) {
       /* The top screen is the agent stage's; the guest's primary surface is
-       * laid out but not shown. */
-      if (osGet3DSliderState() > 0.0f) C3D_RenderTargetClear(right_target, C3D_CLEAR_ALL, 0x000000ff, 0);
-      stage_render(primary_target, right_target);
+       * laid out but not shown. In single display mode it stays black. */
+      if (agent_stage_shown()) {
+        if (osGet3DSliderState() > 0.0f) C3D_RenderTargetClear(right_target, C3D_CLEAR_ALL, 0x000000ff, 0);
+        stage_render(primary_target, right_target);
+      }
     } else {
       C3D_FrameDrawOn(primary_target);
       /* C3D_FrameDrawOn resets the viewport, so this comes after it. */

@@ -43,7 +43,9 @@ src/link_proto.c      Pocket Link wire facts without sockets (URI, beacon, proof
 src/sha256.c          SHA-256 / HMAC-SHA256 (handshake proofs, app-id slots)
 src/jscan.c           bounded JSON reader/writer for the host's own records
 src/wifi.c            globalThis.wifi over AC and nwm::EXT
-src/camera.c          globalThis.camera: outer-camera texture + QR decode
+src/camera.c          globalThis.camera: camera texture, QR decode, stills
+src/photos.c          camera.photo: JPEG save, list, decode, thumbnails
+src/photos_image.c    DCF names, JPEG through libjpeg, thumbnail and full view
 src/quirc/            vendored quirc (ISC), the QR decoder camera.c runs
 src/input.c           3DS keys and circle pad -> the PSP BTN bitmask
 src/vshader.v.pica    the PICA200 vertex shader
@@ -495,8 +497,47 @@ service starts on `open()` and stops on `close()` or a guest switch. Measured
 on an Old 3DS: 30 frames and 4 decode passes a second with the guest still at
 60 fps.
 
+`open(flags)` selects the inner camera (`CAMERA_OPEN.inner`, previewed
+mirrored) and drops QR decoding (`noScan`); a reopen with other flags restarts
+capture behind the same texture handle. **camera.photo** adds stills on the
+SD card. `capture()` stops the stream, switches the camera to its second
+context (`CONTEXT_B`, 640x480, never mirrored), keeps the second frame, and
+returns to the preview. `src/photos.c` encodes the still on a worker with
+libjpeg (devkitPro's `3ds-libjpeg-turbo` portlib, linked by the Makefile) as
+a JPEG under `sdmc:/DCIM/100POCKT/PKT_nnnn.JPG` (DCF names,
+contracts/spec/camera.ts). `load(name, kind)` decodes on the same worker at
+the smallest JPEG scale that covers the result (**1/4** of 640x480 for the
+78 px centre thumbnail, cached under `sdmc:/pocketjs/photos/thumbs`; **1/2**
+for the photo fitted to 320x240), and `photos_present` uploads the pixels as a core texture
+and publishes a "loaded" event. Measured on an Old 3DS: the preview at 30 fps
+with the guest at 16.9 ms a frame; a photo saved 3.3 s after the press
+(0.7 s for the still, 2.6 s to encode and write it behind the 60 fps UI); a
+full 640x480 decode in 0.64 s. The pure parts (`src/photos_image.c`: names,
+pixel conversion, box filters) run natively in `tests/camera-photo.test.ts`.
+
 Capture and offload builds compile link, net, wifi and camera to inert stubs
 and leave the app switching ops out, so goldens stay deterministic.
+
+## Files
+
+A guest that declares `data.fs` gets `globalThis.fs`
+([contracts/spec/fs.ts](../../contracts/spec/fs.ts)) from `src/fs.c`: the nine
+synchronous ops over **its own slot's `data` directory**,
+`sdmc:/pocketjs/runtime/apps/<slot>/data`. `main.c` binds the tree before
+`qjs_boot` and unbinds it at a guest switch; no op names a path outside it,
+and an uninstall deletes it with the slot. The quota is the plan's
+`applet.store.maxBytes` (contracts/spec/applet.ts), else **4 MiB**; `usage()`
+walks the tree once per binding and keeps the sum current after that.
+
+FAT refuses a rename onto an existing name, so a truncating write over an
+existing file stages the bytes in the slot's `fs-tmp` directory, records the
+destination in `fs-tmp/write.dest`, removes the old file and renames the
+staged one into place. The next binding finishes a replacement a power loss
+cut between the two: the guest reads the old content or the new.
+`tests/fs-3ds.test.ts` compiles `src/fs.c` natively under ASan and UBSan and
+runs each scenario against it and the sim's fs host (`hosts/sim/fs.ts`), op by
+op, result and `lastError` both, plus the FAT path and that recovery. Capture
+builds leave the tree unbound.
 
 ## The agent stage
 
