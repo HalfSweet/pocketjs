@@ -1,126 +1,222 @@
 # @pocketjs/cli
 
-The [PocketJS](https://pocketjs.dev) toolchain CLI — target selection and
-installs of the target toolchains the framework pins, manifest-first app
-scaffolding for consoles and ESP-IDF products, build passthrough for PSP and
-PS Vita, an isolated Nokia E7 / Symbian development toolchain, and an Apple
-iOS flow that stages guests into a NativeScript shell and launches them on the
-simulator.
+The PocketJS CLI resolves a framework, compiles applications for software
+profiles, runs program-owned native build recipes and installs pinned
+toolchains. It also scaffolds applications and ESP-IDF products.
 
-**The CLI runs on Bun.** The framework's compiler and host scripts are Bun
-programs; the CLI launches them with its own executable, so a machine without
-Bun cannot build a PocketJS application. Install Bun (https://bun.sh), then the
-CLI through either package manager. The
-[CLI reference](https://pocketjs.pocket.nexus/docs/cli/) documents every
-command and option.
+**The CLI requires Bun 1.2 or later.** It launches the framework's scripts
+with its own Bun executable. Installing the package through npm still
+requires Bun to run `pocket`.
 
 ```sh
-bun add -g @pocketjs/cli      # or: npm install -g @pocketjs/cli
-bunx @pocketjs/cli show       # one-off, no global install
-
-pocket show              # framework, project, selected target, install states
-pocket target add psp    # install the PSP toolchain the framework pins
-pocket create my-app     # scaffold an app (see below)
-pocket check --target psp --manifest my-app/pocket.json
-pocket compile --target psp --manifest my-app/pocket.json
-pocket build --target psp --manifest my-app/pocket.json -- --release
-pocket build --target vita --manifest my-app/pocket.json -- --release
-pocket build --host-profile firmware/pocket.host.json \
-  --manifest app/pocket.json --project-root app --output dist/app.pocket
-pocket play vita hero    # build, install and launch a stock demo in Vita3K
-pocket dev my-app-main   # build + serve in the browser
-pocket psp my-app        # build the PSP EBOOT
-pocket vita my-app       # build the PS Vita VPK
-pocket symbian doctor --device
-pocket symbian doctor --coda-usb
-pocket symbian setup --yes
-pocket symbian build probe
-pocket symbian deploy dist/symbian/pocketjs-e7-probe.sis
-pocket symbian coda usb
-pocket symbian coda usb launch <executable.exe>
-pocket ios doctor
-pocket ios setup
-pocket ios play nsengine     # NativeScript shell on the arm64 iOS simulator
-pocket play ios nsengine     # the same flow through the play front door
-pocket hw my-app         # build + run on a real PSP over PSPLINK
-pocket psplink           # interactive multi-app switcher on a real PSP
-pocket devtools my-app   # DevTools panel + USB debug bridge, one command
-pocket tape replay …     # record / replay / inspect input tapes headlessly
+bun add -g @pocketjs/cli
+# npm install -g @pocketjs/cli
+bunx @pocketjs/cli show
 ```
 
-## Scaffolding
+## Compile an application
 
-`pocket create <name> [--target T] [--framework F] [--host-profile FILE]`
-writes `app.tsx`, `main.tsx` and a `pocket.json` v2 manifest. `--framework`
-selects `solid` (default), `vue-vapor` or `octane`; the mount entry and the
-component use that framework's subpaths. `--target` selects `psp` (default),
-`vita`, `pocketbook`, `web-app`, `macos-app`, `linux-app` or `esp-idf` and
-decides which `pocket` commands the scaffold prints or records.
+```sh
+pocket create my-app --target psp --framework solid
+cd my-app
+bun install
+bun run check
+bun run compile
+```
 
-Outside a PocketJS checkout the result is a standalone project:
+Outside a framework checkout this creates a standalone project with
+`pocket.json`, `main.tsx`, `app.tsx`, `package.json`, `tsconfig.json`, a README
+and `.gitignore`. Inside a checkout it creates the application files under
+`apps/<name>/`. `--framework` accepts `solid`, `vue-vapor` and `octane`.
+Application scaffold targets are `psp`, `vita`, `web-app`,
+`macos-app` and `linux-app`.
+
+**`compile` produces a version 2 `.pocket` application package.** It validates
+the manifest and TypeScript, resolves capabilities and viewport against the
+selected profile, and records that profile's hash in the package. The
+scaffold's `build` package script is an alias for `pocket compile`.
+
+```sh
+pocket check --manifest pocket.json --target psp
+pocket compile --manifest pocket.json --target psp --output dist/app.pocket
+pocket compile --manifest pocket.json --target ./profiles/my-board.ts \
+  --output dist/app.pocket --depfile dist/app.d
+```
+
+For an application with `app.aot: true`, `pocket compile --aot --out dist/aot`
+generates MicroTS Rust modules, fonts, images, an include file and dependency
+metadata. It runs no Cargo build and emits neither JavaScript nor a `.pocket`
+package. A declared `execution.classes` list must include `aot`.
+
+## Profiles and program builds
+
+**`--target` means a profile ID or profile module.** A module can be a file or
+an installed package and must default-export a profile. Selection uses an
+explicit target, then `POCKET_TARGET`, then the single profile in the nearest
+`pocket.runtime-config.ts`. A configuration with multiple profiles requires a
+profile ID.
+
+```ts
+// pocket.runtime-config.ts
+import { defineRuntimeConfig, cargo } from "@pocketjs/framework/runtime-config";
+import profile from "./profiles/my-board.ts";
+
+export default defineRuntimeConfig({
+  profile,
+  build: {
+    hosts: ["darwin-arm64", "linux-x64"],
+    steps: cargo({ manifest: "native/Cargo.toml", package: "my-runtime" }),
+  },
+});
+```
+
+```sh
+pocket build --config pocket.runtime-config.ts --out dist/profile
+pocket profile export --config pocket.runtime-config.ts --out dist/profile
+```
+
+**`build` executes the program's native recipe and accepts compiled inputs.**
+`--pocket` supplies a package; `--aot-dir` supplies generated Rust sources.
+The executor verifies the profile hash, binding generation and input checksums
+before invoking native tools. It copies the admitted inputs into the output
+directory so a source edit cannot change an active build.
+
+The command reads a runtime configuration; `--target` selects an ID
+implemented by that configuration. Recipes use `cargo`, `cmake`, `make` or
+`compilerOnly` helpers. A configuration containing only `{ profile }` exports
+the profile and leaves native compilation to the external build system.
+
+`profile export` writes `pocket_profile.h` and `pocket-profile.json`, containing
+the canonical profile and its hash for the program's package admission check.
+The C header exposes typed display geometry, logical viewport choices,
+auxiliary and dynamic viewport data, presentation masks and capability masks.
+`--depfile` records imported configuration, profile and exporter inputs.
+
+Application settings, including `app.framework` and `app.theme`, belong in
+`pocket.json`. The profile declares display geometry, capabilities and tick
+rate. Runtime configuration declares the program's profiles and build recipe.
+
+## Native programs and repacking
+
+**Each shipped program has a configuration under `programs/`.** From the
+checkout root, `--target` locates that program's configuration. Inside a
+product directory, the nearest configuration owns the build. `--config`
+selects a configuration without consulting the catalog.
+
+```sh
+pocket compile --manifest pocket.json --target psp --output dist/app.pocket
+pocket build --target psp --pocket dist/app.pocket --out dist/psp
+
+pocket compile --manifest pocket.json --target psp-runtime --output dist/game.pocket
+pocket build --target psp --generic --out dist/psp-runtime
+pocket pack --target psp dist/game.pocket --runtime dist/psp-runtime \
+  --author "Example Studio" --output dist/game.zip
+```
+
+**The generic PSP and 3DS programs use `psp-runtime` and `3ds-runtime`.**
+The PSP program has no compiled offload worker; the 3DS program has no
+application-specific offload or media worker. Those capabilities are absent
+from these profiles. Packages compiled for the full `psp` or `3ds-dev`
+profile need the corresponding native program build.
+
+`build-receipt.json` records the selected profile hash, binding generation,
+input identity, toolchain digest, native commands and artifact checksums.
+A failed command writes a failed receipt. `--deploy` invokes a configuration's
+deploy hook after the artifact check; an absent hook is an error.
+`pack` uses `build.genericRuntime.repack` and checks the runtime's own
+`runtime.json` before writing the installation package. The default runtime comes
+from the framework release; `--runtime` supplies a local build. Identity defaults to
+the compiled application's id, title and version. `--author` supplies package
+authorship; its default is `Unspecified`.
+
+The toolchain definitions live under `tools/build/toolchains/`.
+`pocket-toolchain/2` installs only declared components. Targets that require
+an external SDK report that prerequisite through their native builder;
+an empty install manifest does not prove the SDK is installed.
+
+## ESP-IDF products
+
+```sh
+pocket create my-product --target esp-idf
+cd my-product
+bun install
+bun run check
+bun run compile
+bun run profile
+```
+
+The generated product contains:
 
 ```text
-my-app/
-  package.json     depends on @pocketjs/framework, pins @pocketjs/cli, scripts check/compile/build
-  tsconfig.json    editor typecheck; `pocket check` extends it
-  pocket.json      the manifest
-  main.tsx         mount entry
-  app.tsx          the component
-  README.md        the build commands (ESP-IDF: the CMake integration snippets)
-  .gitignore       node_modules/, dist/, .pocket/
+profiles/my-product.ts     profile ID product-my-product
+pocket.runtime-config.ts  selects the profile; native build belongs to ESP-IDF
+app/pocket.json            application manifest
+app/main.tsx              mount entry
+app/app.tsx               component
 ```
 
-`bun install` then `bun run check` / `bun run build` run the recorded
-commands; `pocket` resolves the compiler from the project's
-`node_modules/@pocketjs/framework`.
+The starting profile declares a 320×240 native viewport, 60 Hz, buttons and
+baked glyphs. Standalone scripts compile `dist/my-product.pocket` and export
+the profile to `dist/profile/`. The README contains `pocketjs_compile_app`
+with `RUNTIME_CONFIG`, and `pocketjs_embed_package` with
+`PROFILE_EXPORT_DIR` for builds that consume a prebuilt package without Bun.
 
-Inside a checkout the same command writes `apps/<name>/` with the three app
-files and resolves the framework from the checkout; `pocket check --target psp
---manifest apps/<name>/pocket.json` runs from the checkout root.
+## Framework and toolchain resolution
 
-### ESP-IDF products
-
-A firmware repository that consumes the PocketJS ESP-IDF components owns a
-`pocket.host.json`. Scaffold the application against it from the firmware
-root:
-
-```sh
-pocket create app --host-profile pocket.host.json
-```
-
-`pocket.json` takes the profile's first logical viewport, its `native`
-presentation when the profile lists one, and declares `input.buttons` under
-`requires` when the profile advertises it (the template drops the button
-handler otherwise). The `build` script is `pocket build --host-profile
-../pocket.host.json --output dist/app.pocket`, and `app/README.md` carries the
-`pocketjs_compile_app` and `pocketjs_embed_package` CMake snippets with the
-paths filled in. `--target esp-idf` without `--host-profile` writes a starting
-`pocket.host.json` (320×240, `native`, buttons and baked glyphs) into the app
-directory.
-
-## Resolution
-
-Host-development commands (`dev`, `psp`, `vita`, `hw`, `psplink`, `devtools`,
-`tape`, `play`, `symbian`, `ios`) run inside a PocketJS checkout; the CLI finds
-it by walking up from the current directory:
+`POCKETJS_FRAMEWORK_ROOT` selects a framework directory. Otherwise the CLI
+walks up from the current directory and uses the nearest framework checkout
+or `node_modules/@pocketjs/framework`. A framework is identified by its
+`package.json` field `pocketjs.protocol`, so fork packages can use another
+name. The CLI requires a matching protocol. `pocket show --json` reports
+resolution and toolchain state; `pocket --version` prints both versions.
 
 ```sh
-git clone https://github.com/pocket-nexus/pocketjs
-cd pocketjs && bun install
 pocket show
+pocket target list
+pocket target add psp
+pocket target remove psp
 ```
 
-`check`, `compile`, and `build` delegate to PocketJS's canonical manifest
-resolver. `pocket.json` owns the framework, entry, output, viewport and API
-requirements; the target backend consumes the resulting build plan. Arguments
-after `--` go to the selected PSP or Vita backend. They run from a checkout or
-from any project that installs `@pocketjs/framework`: the CLI resolves the
-compiler from the nearest project `node_modules`. `POCKETJS_FRAMEWORK_ROOT` is
-an explicit development override. `pocket --version` prints the CLI version
-and the framework it resolved.
+The framework owns built-in toolchain pins; a runtime configuration can own
+another manifest under `build.toolchain`. `target add` without IDs installs
+that declared toolchain. A profile-only configuration needs no toolchain
+installation through the CLI. `target list --check` checks the configuration's
+declared toolchain and requires a runtime configuration.
 
-`pocket target add <id>` installs the toolchain the resolved framework pins in
-`tools/targets/<id>.toolchain.json` into the shared pocket-nexus cache; the CLI
-carries no pins. A PSP build runs no C compiler: QuickJS arrives as a pinned
-prebuilt archive. See the [repository](https://github.com/pocket-nexus/pocketjs)
-and [pocketjs.dev](https://pocketjs.dev) for the framework docs.
+**Toolchain IDs are separate from profile IDs.** For example,
+the toolchain catalog uses `3ds`, while `pocket compile --target 3ds-dev`
+selects the software profile. The `3ds` catalog entry has no installable
+toolchain manifest. The cache root is `POCKET_NEXUS_CACHE_DIR`,
+`$XDG_CACHE_HOME/pocket-nexus` or `~/.cache/pocket-nexus`, in that order.
+
+For an external C consumer, `pocket sdk export --triple <rust-target> --out
+dist/sdk` downloads and verifies a release archive, generated headers and CMake metadata.
+`pocket sdk build` compiles a candidate from a source checkout; `pocket sdk export --cargo` creates a Cargo program template.
+`pocket sdk verify --dir dist/sdk` verifies the export. Profile export supplies
+the program-specific identity alongside this SDK.
+
+## Host-development scripts
+
+These commands require a source checkout or `POCKETJS_FRAMEWORK_ROOT` and run
+from the resolved framework root:
+
+```sh
+pocket dev hero-main
+pocket psp hero
+pocket vita hero
+pocket hw hero
+pocket psplink
+pocket devtools hero
+pocket tape replay …
+pocket play vita hero
+```
+
+Arguments go to the corresponding `tools/<command>.ts` script. See the
+[CLI reference](https://pocketjs.pocket.nexus/docs/cli/) for command options,
+configuration examples and installation states, and the
+[repository](https://github.com/pocket-nexus/pocketjs) for host scripts.
+
+The old `tools/psp.ts`, `tools/vita.ts` and `tools/3ds.ts` application-building
+CLI routes are deprecated compatibility entry points. New native builds use
+`pocket build` with a compiled package; its recipes do not invoke the
+application compiler.

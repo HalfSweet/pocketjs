@@ -8,8 +8,7 @@ import { builtinModules } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { REDMI_1S_TARGET } from "../tools/redmi-1s-profile.ts";
-import { ANDROID_RUNTIME_TARGETS, repackAndroid } from "../tools/repack/android.ts";
+import { repackAndroid } from "../tools/repack/android.ts";
 import { THREE_DS_RUNTIME_TARGET } from "../tools/repack/3ds.ts";
 import { REPACK_TARGETS, repackTarget } from "../tools/repack/index.ts";
 import { IPOD_RUNTIME_TARGET } from "../tools/repack/ipod.ts";
@@ -117,13 +116,12 @@ describe("the Studio's table", () => {
       android: {
         repack: "function",
         runtime: "android",
-        variantTargets: [...ANDROID_RUNTIME_TARGETS],
+        variantTargets: [],
         extension: ".apk",
         contentType: "application/vnd.android.package-archive",
         signed: true,
       },
     });
-    expect(REPACK_TARGETS.android.variantTargets[0]).toBe(REDMI_1S_TARGET);
   });
 
   test("a row by Studio target or runtime name", () => {

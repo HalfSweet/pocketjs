@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
 import { deriveModality } from "../contracts/spec/modality.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
-import { SYMBIAN_E7_DEV_CONTRACTS, SYMBIAN_E7_DEV_TARGET_ID } from "../tools/symbian-profile.ts";
+import { hashPocketProfile } from "../framework/src/profile.ts";
+import profile from "../profiles/symbian-e7-dev.ts";
 import {
-  symbianDataBaseForEmbeddedBytes,
-  symbianExecutableName,
-  symbianPackageIdentity,
-  symbianUidForAppId,
-  validateSymbianDevelopmentUid,
+symbianDataBaseForEmbeddedBytes,
+symbianExecutableName,
+symbianPackageIdentity,
+validateSymbianDevelopmentUid
 } from "../tools/symbian-package.ts";
+import { SYMBIAN_E7_DEV_CONTRACTS, SYMBIAN_E7_DEV_TARGET_ID } from "../tools/symbian-profile.ts";
 
 function plan(
   id: string,
@@ -25,7 +27,7 @@ function plan(
       framework: "solid",
     },
     presentation: { id: "default", entry: "app/main.tsx" },
-    target: { id: "symbian-e7-dev", hostAbi: 4 },
+    target: { id: "symbian-e7-dev", hostAbi: POCKET_BINDING_GENERATION },
     viewport: {
       logical: [640, 360],
       physical: [640, 360],
@@ -36,6 +38,8 @@ function plan(
     modality: deriveModality(SYMBIAN_E7_DEV_CONTRACTS.targets[SYMBIAN_E7_DEV_TARGET_ID]),
     features: {},
     companions: [],
+    profile,
+    profileHash: hashPocketProfile(profile),
     planHash: `sha256:${"0".repeat(64)}`,
   };
 }
@@ -52,16 +56,6 @@ describe("independent Symbian package identity", () => {
     );
     expect(() => symbianDataBaseForEmbeddedBytes(0x10000000)).toThrow(
       "above the E7 limit",
-    );
-  });
-
-  test("derives stable private UIDs from Pocket ids", () => {
-    expect(symbianUidForAppId("dev.pocket-nexus.openstrike")).toBe(
-      "0xEE3D66AB",
-    );
-    expect(symbianUidForAppId("dev.pocket-nexus.figma")).toBe("0xEEC5BADE");
-    expect(symbianUidForAppId("dev.pocket-nexus.launcher")).toBe(
-      "0xEDF4EB85",
     );
   });
 

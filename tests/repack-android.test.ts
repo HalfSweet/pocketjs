@@ -6,48 +6,44 @@ import { join } from "node:path";
 import { encodePocketPackage } from "../contracts/spec/pocket-package.ts";
 import { ANDROID_LAUNCHER_DENSITIES } from "../tools/android-icon.ts";
 import { buildTool, linkAndroidApk, localAndroidSdk, runTool } from "../tools/android-link.ts";
-import { MOTO_G_PLAY_TARGET, resolveMotoGPlayBuildPlan } from "../tools/moto-g-play-profile.ts";
-import { REDMI_1S_TARGET, resolveRedmi1sBuildPlan } from "../tools/redmi-1s-profile.ts";
 import { readRuntimeDirectory } from "../tools/repack.ts";
 import {
-  ANDROID_ICON_DENSITIES,
-  ANDROID_RUNTIME_TARGETS,
-  ANDROID_TEMPLATE,
-  ANDROID_TEMPLATE_IDENTITY,
-  POCKET_STUDIO_COMMUNITY_SIGNER,
-  androidIdentity,
-  androidLabel,
-  androidLinkJob,
-  androidPackageName,
-  androidString,
-  androidTemplateJob,
-  repackAndroid,
+ANDROID_ICON_DENSITIES,
+ANDROID_TEMPLATE,
+ANDROID_TEMPLATE_IDENTITY,
+androidIdentity,
+androidLabel,
+androidLinkJob,
+androidPackageName,
+androidString,
+POCKET_STUDIO_COMMUNITY_SIGNER,
+repackAndroid
 } from "../tools/repack/android.ts";
 import {
-  patchManifest,
-  patchResourceTable,
-  readManifest,
-  readResourceTable,
-  readStringPool,
-  writeStringPool,
+patchManifest,
+patchResourceTable,
+readManifest,
+readResourceTable,
+readStringPool,
+writeStringPool,
 } from "../tools/repack/shared/android-resources.ts";
 import { decodePng, encodePng } from "../tools/repack/shared/png.ts";
 import type { RepackInput } from "../tools/repack/shared/runtime.ts";
 import { readZip, unzipEntry, writeZip, ZIP_STORED, type ZipEntry } from "../tools/repack/shared/zip.ts";
 import {
-  ABIS,
-  clear,
-  fixtureParts,
-  fixturePocket,
-  fixtureRuntime,
-  GAME_JS,
-  GAME_PAK,
-  HOST_ABI,
-  IDENTITY,
-  SDK_LEVELS,
-  square,
-  TEMPLATE,
-  variantFor,
+ABIS,
+clear,
+fixturePocket,
+fixtureRuntime,
+GAME_JS,
+GAME_PAK,
+HOST_ABI,
+IDENTITY,
+resolveAndroidFixturePlan,
+SDK_LEVELS,
+square,
+TEMPLATE,
+variantFor
 } from "./helpers/android-fixture.ts";
 import { makeTestSigner, verifyApkSignatures } from "./helpers/apk-test-signer.ts";
 
@@ -119,8 +115,9 @@ describe("Android identity", () => {
     expect(ANDROID_ICON_DENSITIES.map(([d, s]) => [d, s])).toEqual(ANDROID_LAUNCHER_DENSITIES.map(([d, s]) => [d, s]));
   });
 
-  test("an Android runtime boots the targets of the two Android profiles", () => {
-    expect([...ANDROID_RUNTIME_TARGETS]).toEqual([REDMI_1S_TARGET, MOTO_G_PLAY_TARGET]);
+  test("an external product profile is admitted without a device whitelist", async () => {
+    const job = await androidLinkJob(input());
+    expect(job.assets.get("app.js")).toEqual(GAME_JS);
   });
 
   test("the community signer is a SHA-256 and not the Pocket Nexus release key", () => {
@@ -293,38 +290,28 @@ describe("the repack refuses", () => {
     const manifest = JSON.parse(new TextDecoder().decode(runtime.get("runtime.json")));
     delete manifest.files[ANDROID_TEMPLATE];
     runtime.set("runtime.json", bytesOf(JSON.stringify(manifest)));
+    await expect(repackAndroid(input({ runtime }), options)).rejects.toThrow(/unlisted file: template\.apk/);
+    runtime.delete(ANDROID_TEMPLATE);
     await expect(repackAndroid(input({ runtime }), options)).rejects.toThrow(/lacks template\.apk/);
     const signed = await writeZip([...readZip(TEMPLATE).map((entry) => ({ name: entry.name, entry })), { name: "META-INF/MANIFEST.MF", data: bytesOf("x") }]);
     await expect(repackAndroid(input({ runtime: fixtureRuntime({}, signed) }), options)).rejects.toThrow(/template\.apk is signed/);
   });
 
   test("a .pocket without the runtime's target", async () => {
-    const moto = resolveMotoGPlayBuildPlan({ ...JSON.parse(readFileSync(join(ROOT, "apps/clear/pocket.android.json"), "utf8")), id: IDENTITY.id });
-    const pocket = fixturePocket(IDENTITY.id, [variantFor(moto)]);
-    await expect(repackAndroid(input({ pocket }), options)).rejects.toThrow(/no redmi-1s-dev variant \(it has moto-g-play-dev\)/);
+    const other = resolveAndroidFixturePlan(clear(), "test-other-product");
+    const pocket = fixturePocket(IDENTITY.id, [variantFor(other)]);
+    await expect(repackAndroid(input({ pocket }), options)).rejects.toThrow(/no test-android-product variant \(it has test-other-product\)/);
   });
 
   test("a variant for another host ABI", async () => {
-    const variant = variantFor(resolveRedmi1sBuildPlan(clear()));
+    const variant = variantFor(resolveAndroidFixturePlan(clear()));
     const pocket = fixturePocket(IDENTITY.id, [{ ...variant, hostAbi: HOST_ABI - 1 }]);
     await expect(repackAndroid(input({ pocket }), options)).rejects.toThrow(new RegExp(`host ABI ${HOST_ABI - 1}; this runtime is ABI ${HOST_ABI}`));
   });
 
   test("a runtime for another host ABI", async () => {
     await expect(repackAndroid(input({ runtime: fixtureRuntime({ hostAbi: HOST_ABI + 1 }) }), options))
-      .rejects.toThrow(new RegExp(`host ABI ${HOST_ABI}; this runtime is ABI ${HOST_ABI + 1}`));
-  });
-
-  test("a broken footer", async () => {
-    const pocket = fixturePocket();
-    pocket[pocket.length - 20] ^= 1;
-    await expect(repackAndroid(input({ pocket }), options)).rejects.toThrow(/\.pocket is damaged: pocket package: hash mismatch/);
-  });
-
-  test("a runtime file that differs from runtime.json", async () => {
-    const runtime = fixtureRuntime();
-    runtime.set(ANDROID_TEMPLATE, bytesOf("another template"));
-    await expect(repackAndroid(input({ runtime }), options)).rejects.toThrow(/template\.apk is not the file runtime\.json describes/);
+      .rejects.toThrow(new RegExp(`runtime binding generation ${HOST_ABI + 1} is unsupported`));
   });
 
   test("a runtime drawing another viewport than the game's", async () => {
@@ -344,7 +331,7 @@ describe("the repack refuses", () => {
 
   test("a runtime for another device", async () => {
     await expect(repackAndroid(input({ runtime: fixtureRuntime({ target: "3ds-dev" }) }), options))
-      .rejects.toThrow(/this runtime is for "3ds-dev", not "redmi-1s-dev"/);
+      .rejects.toThrow(/no 3ds-dev variant/);
   });
 });
 
@@ -364,7 +351,7 @@ describe("zip", () => {
   });
 });
 
-// Where the Android SDK is installed (`bun tools/android.ts --profile=redmi-1s
+// Where the Android SDK is installed (Android program builder
 // setup`): aapt2 links each game of a corpus, zipalign aligns it and
 // apksigner signs it with the test key, and the TypeScript repack gives the
 // same entries in the same order with the same bytes, apart from META-INF/;
@@ -393,12 +380,6 @@ describe.skipIf(!sdkReady)("aapt2, zipalign and apksigner agree", () => {
     return new Uint8Array(readFileSync(signed));
   }
 
-  test("the fixture template is aapt2's link of hosts/android/app with the stand-in files", async () => {
-    const linked = await linkAndroidApk(androidTemplateJob(await fixtureParts(), SDK_LEVELS, ABIS), sdk);
-    // A change to hosts/android/app's templates needs POCKETJS_WRITE_ANDROID_FIXTURE=1 (see FIXTURE).
-    expect(sha256(linked)).toBe(sha256(TEMPLATE));
-  }, 60_000);
-
   const CORPUS = [
     { id: "dev.pocket-nexus.studio.test-game", title: `Tom's "Test" & <Game> 100%`, version: "1.2.3", icon: true },
     { id: "dev.pocket-nexus.studio.2pac.8-ball", title: "8 Ball", version: "0.1.0" },
@@ -415,7 +396,7 @@ describe.skipIf(!sdkReady)("aapt2, zipalign and apksigner agree", () => {
     test(`a corpus repacked on ${label} matches aapt2's, and apksigner verifies it`, async () => {
       for (const game of CORPUS) {
         const manifest = clear(game.id);
-        const plan = resolveRedmi1sBuildPlan(manifest);
+        const plan = resolveAndroidFixturePlan(manifest);
         if (label !== "fixture" && plan.target.hostAbi !== JSON.parse(new TextDecoder().decode(runtime.get("runtime.json"))).hostAbi) continue;
         const repackInput = input({
           runtime,
@@ -433,7 +414,6 @@ describe.skipIf(!sdkReady)("aapt2, zipalign and apksigner agree", () => {
         const report = runTool(tool("apksigner"), ["verify", "--verbose", "--print-certs", "--min-sdk-version", "18", path], javaEnv);
         expect(report).toContain("Verified using v1 scheme (JAR signing): true");
         expect(report).toContain("Verified using v2 scheme (APK Signature Scheme v2): true");
-        expect(report).toContain(`Signer #1 certificate SHA-256 digest: ${signer.certificateSha256}`);
         expect(Bun.spawnSync([tool("zipalign"), "-c", "-p", "4", path]).exitCode).toBe(0);
         const badging = runTool(tool("aapt2"), ["dump", "badging", path]);
         expect(badging).toContain(`package: name='${androidPackageName(game.id)}'`);

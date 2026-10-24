@@ -18,21 +18,25 @@ done
   -DPOCKET_BUILD_ID=\"$POCKET_BUILD_ID\" \
   -DPOCKET_LOGICAL_WIDTH=$POCKET_LOGICAL_WIDTH \
   -DPOCKET_LOGICAL_HEIGHT=$POCKET_LOGICAL_HEIGHT \
-  -I/src/engine/quickjs-c \
-  -c /src/hosts/meizu-m8/runtime.c -o /build/objects/runtime.o
+  -I/src/programs/native/quickjs \
+  -c /src/programs/meizu-m8/runtime.c -o /build/objects/runtime.o
 "$CC" $COMMON -Wall -Wextra -Werror -Wno-unused-parameter \
   -DPOCKET_RUNTIME_REPORT_BOOT_STAGE=1 \
   -DPOCKETJS_TARGET_ID=\"$POCKETJS_TARGET_ID\" \
+  -include /build/pocket_host_profile.h \
   -DPOCKETJS_HOST_ABI=$POCKETJS_HOST_ABI \
-  -I/src/engine/quickjs-c -I/src/engine/ui-cabi/include \
+  -I/src/programs/native/quickjs -I/src/engine/guest-quickjs/include -I/src/programs/native/cabi/include \
   -I/src/contracts/generated -I/build/qjs \
-  -c /src/engine/quickjs-c/pocket_runtime.c -o /build/objects/pocket_runtime.o
+  -c /src/programs/native/quickjs/pocket_runtime.c -o /build/objects/pocket_runtime.o
+"$CC" $COMMON -Wall -Wextra -Werror -Wno-unused-parameter \
+  -I/src/engine/guest-quickjs/include -I/src/contracts/generated -I/build/qjs \
+  -c /src/engine/guest-quickjs/src/guest.c -o /build/objects/pocket_guest_quickjs.o
 "$CC" $COMMON -Wall -Wextra -Werror \
-  -c /src/hosts/meizu-m8/compat.c -o /build/objects/compat.o
+  -c /src/programs/meizu-m8/compat.c -o /build/objects/compat.o
 "$CC" $COMMON -Wall -Wextra -Werror \
   -c /build/embedded.c -o /build/objects/embedded.o
 "$CC" $COMMON -Wall -Wextra -Werror \
-  /src/hosts/meizu-m8/stop-old.c -ltoolhelp -o /build/PocketJSStop.exe
+  /src/programs/meizu-m8/stop-old.c -ltoolhelp -o /build/PocketJSStop.exe
 
 for source in quickjs.c cutils.c dtoa.c libregexp.c libunicode.c; do
   name=$(basename "$source" .c)
@@ -47,6 +51,7 @@ done
   -o /build/PocketJS.exe \
   /build/objects/runtime.o \
   /build/objects/pocket_runtime.o \
+  /build/objects/pocket_guest_quickjs.o \
   /build/objects/compat.o \
   /build/objects/embedded.o \
   /build/objects/qjs/*.o \

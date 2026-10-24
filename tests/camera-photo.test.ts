@@ -1,11 +1,11 @@
 // tests/camera-photo.test.ts — camera.photo (contracts/spec/camera.ts):
 //
-// - the 3DS host's pure photo code (hosts/3ds/src/photos_image.c) and the
+// - the 3DS host's pure photo code (products/3ds/src/photos_image.c) and the
 //   libjpeg codec, compiled natively by tests/fixtures/3ds-photos.c:
 //   DCF names, a still encoded the way photos.c saves it and decoded back,
 //   the thumbnail and the full view;
 // - the C constants against the contract;
-// - the sim's camera host (hosts/sim/camera.ts) through the framework's
+// - the sim's camera host (platforms/sim/camera.ts) through the framework's
 //   camera module, the way an applet calls it.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -32,10 +32,10 @@ import {
   openCamera,
   photoEvents,
 } from "../framework/src/camera.ts";
-import { createSimCameraHost } from "../hosts/sim/camera.ts";
+import { createSimCameraHost } from "../platforms/sim/camera.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const SRC = join(ROOT, "hosts/3ds/src");
+const SRC = join(ROOT, "products/3ds/src");
 let scratch = "";
 let binary = "";
 

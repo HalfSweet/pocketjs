@@ -1,3 +1,6 @@
+import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
+import softwareProfile from "../profiles/macos-embedded.ts";
+import { targetProfile } from "../profiles/contract.ts";
 // bun run widget [app] [flags…] — build + launch a Pocket Stage desktop widget
 // (the first bundled stage is the PSP asset; docs/WIDGET.md).
 //
@@ -25,14 +28,15 @@ import {
 } from "../contracts/spec/platforms.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
+import { exportProfile } from "./profile-export.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 
 /** Transitional embedded target shared by the bundled PSP and iPod stages. */
-export const STAGE_TARGET_ID = "macos-embedded";
+export const STAGE_TARGET_ID = softwareProfile.id;
 // Same current desktop HostOps wire generation as macos-widget; form and
 // capabilities differ even though the native UI surface implementation is shared.
-export const STAGE_HOST_ABI = 3;
+export const STAGE_HOST_ABI = POCKET_BINDING_GENERATION;
 export type WidgetStage = "psp" | "ipod";
 
 export interface StageDisplayFacts {
@@ -115,23 +119,15 @@ export function stagePlatformContracts(display: StageDisplayFacts) {
   return definePlatformContractRegistry(
     POCKET_CAPABILITIES,
     defineTargetRegistry({
-      [STAGE_TARGET_ID]: {
-        hostAbi: STAGE_HOST_ABI,
-        platform: "macos",
-        form: "embedded",
+      [STAGE_TARGET_ID]: targetProfile({
+        ...softwareProfile,
         display: {
+          ...softwareProfile.display,
           physicalViewport: [width * density, height * density],
           logicalViewports: [[width, height]],
-          presentations: ["native", "integer-fit"],
           rasterDensity: density,
         },
-        capabilities: [
-          "input.analog.left",
-          "input.buttons",
-          "input.cursor",
-          "text.glyphs.baked",
-        ],
-      },
+      }),
     }),
   );
 }
@@ -267,9 +263,16 @@ async function main(): Promise<void> {
   // target-flavored bundles in dist/ proper are never picked up by mistake.
   const stageDist = resolvePath(root, "dist", `stage-${stage}`);
   await $`bun tools/build.ts --plan=${planPath} --project-root=${root} --outdir=${stageDist}`.cwd(root);
-  await $`cargo build --release -p pocket-stage`.cwd(`${root}engine`);
+  // The binary compiles in this stage's profile; switching stages rebuilds it.
+  const exported = exportProfile(
+    { profile: plan.profile, profileHash: plan.profileHash, hostAbi: STAGE_HOST_ABI, dependencies: [] },
+    resolvePath(root, ".pocket", STAGE_TARGET_ID, `${stage}-profile`),
+  );
+  await $`cargo build --locked --release -p pocket-stage`
+    .cwd(root)
+    .env({ ...process.env, POCKETJS_PROFILE_RS: exported.module });
 
-  const bin = `${root}engine/target/release/pocket-stage`;
+  const bin = `${root}target/release/pocket-stage`;
   const env = {
     ...process.env,
     RUST_LOG: process.env.RUST_LOG ?? "info",

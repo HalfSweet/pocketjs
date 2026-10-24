@@ -1,5 +1,5 @@
 // tools/3ds-stage-art.ts — bakes the agent stage's two pictures
-// (hosts/3ds/src/stage.c) into C headers:
+// (products/3ds/src/stage.c) into C headers:
 //
 //   stage_hint.h   two pills drawn at the top screen's own pixels after both
 //                  eyes while the mascot is idle: "L+R Ask Claude" (row 0)
@@ -25,8 +25,8 @@ import { bakeSvg } from "../framework/compiler/bake-svg.ts";
 import { encodePNG } from "./png.ts";
 
 const ROOT = join(import.meta.dir, "..");
-const HINT_OUT = join(ROOT, "hosts/3ds/src/stage_hint.h");
-const SAVER_OUT = join(ROOT, "hosts/3ds/src/stage_saver.h");
+const HINT_OUT = join(ROOT, "products/3ds/src/stage_hint.h");
+const SAVER_OUT = join(ROOT, "products/3ds/src/stage_saver.h");
 const TEX_W = 128;
 const TEX_H = 64;
 /** The SELECT pill's row in the hint texture. */

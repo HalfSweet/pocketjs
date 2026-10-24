@@ -2,42 +2,99 @@ name: Native C harness
 
 on:
   pull_request:
-    paths:
+    paths: &paths
+      - ".bun-version"
+      - "tools/build/embedded-apps.rs"
       - ".github/workflows/native-c-harness.yml"
-      - "engine/quickjs-c/**"
-      - "hosts/shared/contact_latch.h"
-      - "hosts/ios-legacy/**"
-      - "hosts/android/**"
-      - "tests/contact-latch.test.ts"
-      - "hosts/esp-idf/components/pocketjs_package/**"
-      - "hosts/esp-idf/tests/host/package_corpus.*"
-      - "tests/idf-package-corpus.test.ts"
-      - "tests/ipodtouch4-installation.test.ts"
-      - "tools/ipodtouch4-installation.ts"
-      - "tools/ipodtouch4-resources.ts"
-      - "tests/ipodtouch4-resources.test.ts"
-      - "tools/ipodtouch4.ts"
-      - "tests/ipodtouch4-profile.test.ts"
-      - "tools/repack.ts"
+      - "programs/native/quickjs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "tools/ui-bindings.ts"
+      - "tools/test-quickjs-guest.ts"
+      - "tests/guest-web-bindings.test.ts"
+      - "tests/embedded-package.test.ts"
+      - "engine/guest-web/**"
+      - "engine/ios/**"
+      - "tools/guest-web-bindings.ts"
+      - "tests/runtime-cabi.test.ts"
+      - "tests/sdk.test.ts"
+      - "tests/sdk-idf.test.ts"
+      - "tests/fixtures/sdk-idf/**"
+      - "tools/test-sdk-idf.ts"
+      - "tests/out-of-tree-rust.test.ts"
+      - "tests/fixtures/out-of-tree-rust/**"
+      - "tools/test-out-of-tree-rust.ts"
+      - "tests/fixtures/sdk/**"
+      - "tools/sdk.ts"
+      - "tools/release/**"
+      - "tools/packaging/cmake/**"
+      - "tools/pocket.ts"
+      - "tools/cli/**"
+      - "tests/fixtures/runtime-cabi/**"
+      - "engine/runtime/include/pocket/compat/contact_latch.h"
+      - "platforms/android/**"
+      - "programs/android/**"
+      - "programs/shared/ios-legacy/**"
+      - "programs/ios-simulator/**"
+      - "programs/ipodtouch4/**"
+      - "tests/android-platform-integration.test.ts"
+      - "tests/fixtures/android/**"
+      - "tests/nativescript-bridge.test.ts"
+      - "tests/ipodtouch4-*.test.ts"
+      - "tests/repack-ipod.test.ts"
+      - "tools/ipodtouch4*.ts"
       - "tools/repack/**"
       - "tools/runtime/**"
-      - "tests/repack-ipod.test.ts"
+      - "tests/android-platform.test.ts"
+      - "tests/fixtures/android-*.c"
+      - "engine/runtime/compat/**"
+      - "tests/contact-latch.test.ts"
+      - "platforms/esp-idf/pocket_runtime/**"
+      - "tests/esp-idf/host/*"
+      - "tests/idf-package-corpus.test.ts"
+      - "tools/repack.ts"
       - "tests/fixtures/repack-ipod/**"
-      - "hosts/nokia-e7/runtime/pocketjs_symbian_extension.h"
       - "tests/clear-text.test.ts"
       - "tests/clear-ime-loading.test.ts"
-      - "apps/**"
       - "assets/**"
-      - "engine/wasm/**"
-      - "hosts/web/wasm-ops.js"
+      - "programs/web/wasm/**"
+      - "platforms/web/wasm-ops.js"
       - "tests/golden*.ts"
       - "tests/goldens/web/**"
       - "tests/tapes/**"
       - "tests/png.ts"
       - "tools/tape.ts"
       - "tests/fixtures/contact-latch.c"
-      - "engine/ui-cabi/**"
+      - "programs/native/cabi/**"
+      - "engine/runtime/**"
+      - "engine/runtime-cabi/**"
+      - "engine/profile-build/**"
+      - "devices/gles/**"
+      - "devices/psp/pocket-psp-render/**"
+      - "devices/psp/pocket-psp-ge/**"
+      - "tests/ge-driver.test.ts"
+      - "tests/psp-runtime.test.ts"
+      - "tests/fixtures/psp-runtime/**"
+      - "tools/test-psp-runtime.ts"
+      - "programs/psp/src/**"
+      - "platforms/esp-idf/**"
+      - "engine/guest-quickjs/**"
+      - "engine/guest-rquickjs/**"
+      - "engine/driver-kit/**"
       - "engine/core/**"
+      - "engine/crates/microts/**"
+      - "programs/gba/**"
+      - "programs/ipodnano/**"
+      - "engine/spec/**"
+      - "engine/drivers/**"
+      - "engine/raster/**"
+      - "engine/present/**"
+      - "engine/package/**"
+      - "engine/modules/media/**"
+      - "engine/render/draw-ops/**"
+      - "engine/render/glyph-pages/**"
+      - "engine/render/tri-batch/**"
+      - "engine/render/tex-cache/**"
       - "framework/src/**"
       - "framework/compiler/**"
       - "contracts/**"
@@ -45,10 +102,12 @@ on:
       - "tests/fixtures/ui-cabi-allocator/**"
       - "tests/fixtures/ui-cabi-psm-draw/**"
       - "tests/quickjs-c-harness.test.ts"
+      - "tests/native-program.test.ts"
+      - "tests/fixtures/native-program/**"
       - "tests/ui-cabi-allocator.test.ts"
       - "tests/ui-cabi-psm-draw.test.ts"
-      - "tests/tape-assert.test.ts"
-      - "tests/test-suite.test.ts"
+      - "tests/e2e-build.test.ts"
+      - "tests/e2e/**"
       - "tools/test.ts"
       - "tests/renderer.test.ts"
       - "tests/virtual-list.test.ts"
@@ -58,60 +117,7 @@ on:
       - "bun.lock"
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/native-c-harness.yml"
-      - "engine/quickjs-c/**"
-      - "hosts/shared/contact_latch.h"
-      - "hosts/ios-legacy/**"
-      - "hosts/android/**"
-      - "tests/contact-latch.test.ts"
-      - "hosts/esp-idf/components/pocketjs_package/**"
-      - "hosts/esp-idf/tests/host/package_corpus.*"
-      - "tests/idf-package-corpus.test.ts"
-      - "tests/ipodtouch4-installation.test.ts"
-      - "tools/ipodtouch4-installation.ts"
-      - "tools/ipodtouch4-resources.ts"
-      - "tests/ipodtouch4-resources.test.ts"
-      - "tools/ipodtouch4.ts"
-      - "tests/ipodtouch4-profile.test.ts"
-      - "tools/repack.ts"
-      - "tools/repack/**"
-      - "tools/runtime/**"
-      - "tests/repack-ipod.test.ts"
-      - "tests/fixtures/repack-ipod/**"
-      - "hosts/nokia-e7/runtime/pocketjs_symbian_extension.h"
-      - "tests/clear-text.test.ts"
-      - "tests/clear-ime-loading.test.ts"
-      - "apps/**"
-      - "assets/**"
-      - "engine/wasm/**"
-      - "hosts/web/wasm-ops.js"
-      - "tests/golden*.ts"
-      - "tests/goldens/web/**"
-      - "tests/tapes/**"
-      - "tests/png.ts"
-      - "tools/tape.ts"
-      - "tests/fixtures/contact-latch.c"
-      - "engine/ui-cabi/**"
-      - "engine/core/**"
-      - "framework/src/**"
-      - "framework/compiler/**"
-      - "contracts/**"
-      - "tests/fixtures/quickjs-c-harness/**"
-      - "tests/fixtures/ui-cabi-allocator/**"
-      - "tests/fixtures/ui-cabi-psm-draw/**"
-      - "tests/quickjs-c-harness.test.ts"
-      - "tests/ui-cabi-allocator.test.ts"
-      - "tests/ui-cabi-psm-draw.test.ts"
-      - "tests/tape-assert.test.ts"
-      - "tests/test-suite.test.ts"
-      - "tools/test.ts"
-      - "tests/renderer.test.ts"
-      - "tests/virtual-list.test.ts"
-      - "tests/vue-vapor-dom.test.ts"
-      - "tools/build.ts"
-      - "package.json"
-      - "bun.lock"
+    paths: *paths
   workflow_dispatch: {}
 
 permissions:
@@ -125,39 +131,87 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install the workspace stable compiler
+        run: |
+          stable=$(bun -e 'console.log((await import("./tools/build/toolchains/rust.ts")).STABLE_RUST_TOOLCHAIN)')
+          rustup toolchain install "$stable" --profile minimal --target wasm32-unknown-unknown --component llvm-tools-preview
       - run: bun install --frozen-lockfile
       - name: Install the UI C ABI's pinned nightly
         run: |
-          toolchain=$(bun -e 'console.log(Bun.TOML.parse(await Bun.file("engine/ui-cabi/rust-toolchain.toml").text()).toolchain.channel)')
+          toolchain=$(bun -e 'console.log((await import("./tools/build/toolchains/rust.ts")).BUILD_STD_NIGHTLY)')
           rustup toolchain install "$toolchain" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine/ui-cabi
+          workspaces: .
+      - name: Fetch host test dependencies
+        run: |
+          cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
       - name: Build renderer test styles
         run: bun tools/build.ts hero
       - name: Renderer and runtime stage/dispatcher contracts
-        run: bun test --conditions=browser tests/quickjs-c-harness.test.ts tests/renderer.test.ts tests/virtual-list.test.ts tests/vue-vapor-dom.test.ts
-      - name: Native contacts, package corpus and device installation contracts
-        run: bun test tests/contact-latch.test.ts tests/idf-package-corpus.test.ts tests/ipodtouch4-installation.test.ts tests/ipodtouch4-profile.test.ts tests/ipodtouch4-resources.test.ts tests/repack-ipod.test.ts
+        run: bun test --conditions=browser tests/quickjs-c-harness.test.ts tests/native-program.test.ts tests/guest-web-bindings.test.ts tests/embedded-package.test.ts tests/nativescript-bridge.test.ts tests/runtime-cabi.test.ts tests/sdk.test.ts tests/sdk-idf.test.ts tests/out-of-tree-rust.test.ts tests/renderer.test.ts tests/virtual-list.test.ts tests/vue-vapor-dom.test.ts
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Native contacts, Android JNI and package corpus contracts
+        run: |
+          export POCKET_TEST_JNI_INCLUDE="$JAVA_HOME/include"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export POCKET_TEST_JNI_PLATFORM_INCLUDE="$JAVA_HOME/include/darwin"
+          else
+            export POCKET_TEST_JNI_PLATFORM_INCLUDE="$JAVA_HOME/include/linux"
+          fi
+          export POCKET_TEST_ANDROID_INCLUDE="$PWD/.pocket-build/validation/android-platform/headers"
+          python3 - <<'PY'
+          import base64, hashlib, os, pathlib, urllib.request
+          url = "https://android.googlesource.com/platform/system/logging/+/efbed624fef7eaf28f8bd50686302a5576f544a1/liblog/include/android/log.h?format=TEXT"
+          data = base64.b64decode(urllib.request.urlopen(url, timeout=60).read())
+          expected = "ec7e66a6a6b7342c08ffa7459c15929da0c42e871f0ca5a003cbf1d024c5f597"
+          if hashlib.sha256(data).hexdigest() != expected:
+              raise SystemExit("pinned Android log header checksum mismatch")
+          header = pathlib.Path(os.environ["POCKET_TEST_ANDROID_INCLUDE"]) / "android/log.h"
+          header.parent.mkdir(parents=True, exist_ok=True)
+          header.write_bytes(data)
+          PY
+          bun test tests/contact-latch.test.ts tests/pocket-input.test.ts tests/android-platform.test.ts tests/android-platform-integration.test.ts tests/idf-package-corpus.test.ts tests/ipodtouch4-installation.test.ts tests/ipodtouch4-profile.test.ts tests/ipodtouch4-resources.test.ts tests/repack-ipod.test.ts
       - name: Build Clear simulator inputs
         run: bun tools/wasm.ts && bun tools/build.ts clear-main --framework=vue-vapor
       - name: Clear input and text chain
         run: bun test --conditions=browser tests/clear-text.test.ts tests/clear-ime-loading.test.ts
       - name: UI singleton access and alignment policy
-        run: cargo test --locked --manifest-path engine/ui-cabi/Cargo.toml --features harness-access
+        run: cargo test --locked --manifest-path Cargo.toml -p pocket-runtime-cabi --features legacy-ui,harness-access
+      - name: GLES1 vertex layout and ordered batches
+        run: cargo test --locked --manifest-path Cargo.toml -p pocket-gles -p pocket-gles1 -p pocket-gles2
+      - name: GE ownership and terminal completion
+        run: bun test tests/ge-driver.test.ts
+      - name: PSP generated guest composition
+        run: bun test tests/psp-runtime.test.ts
+      - name: Test GLES1 compatibility composition
+        run: cargo test --locked --manifest-path Cargo.toml -p pocket-runtime-cabi --features legacy-ui,gles1 gl::tests
+      - name: Test shared runtime, bindings and PPA renderer
+        run: cargo test --locked --manifest-path Cargo.toml -p pocket-runtime -p pocket-guest-rquickjs -p pocket-ui-surface -p pocket-present -p pocket-package -p pocket-apple -p pocket-render-esp-ppa
+      - name: AOT guest and compiled native presentation
+        run: |
+          cargo +stable test --locked --manifest-path Cargo.toml -p microts --features runtime
+          bun tools/pocket.ts profile export --target gba --out .pocket-build/gba-profile
+          POCKETJS_PROFILE_RS="$PWD/.pocket-build/gba-profile/pocket_profile.rs" cargo +stable test --locked --manifest-path programs/gba/Cargo.toml --lib
+      - name: Generated C guest against QuickJS-NG
+        run: bun tools/test-quickjs-guest.ts
       - name: Link and execute the C allocator and texture draw fixtures
         run: bun test tests/ui-cabi-allocator.test.ts tests/ui-cabi-psm-draw.test.ts
-      - name: Test suite coverage and tape assertion contracts
-        run: bun test tests/test-suite.test.ts tests/tape-assert.test.ts
-      - name: Contract drift
+      - name: Build validation behavior
+        run: bun test tests/e2e-build.test.ts
+      - name: Contract codec
         run: bun tests/contract.ts
-      - name: Renderer goldens and deterministic replay
+      - name: Software renderer goldens
         if: runner.os == 'Linux'
-        run: bun tests/golden.ts && bun run tape:check
+        run: bun tests/golden.ts

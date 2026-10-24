@@ -23,7 +23,7 @@ test("native navigation is bounded, unique and includes the current package", ()
 test("native return contacts reserve the bar and distinguish a swipe from a hold", () => {
   const root = mkdtempSync(join(tmpdir(), "pocket-nav-"));
   try {
-    const header = new URL("../hosts/nokia-e7/runtime/pocketjs_navigation_gesture.h", import.meta.url).pathname;
+    const header = new URL("../programs/nokia-e7/runtime/pocketjs_navigation_gesture.h", import.meta.url).pathname;
     writeFileSync(join(root, "test.cpp"), `#include <assert.h>
 #include "${header}"
 int main() {

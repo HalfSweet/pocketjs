@@ -1,3 +1,6 @@
+import { repositoryPath } from "./repository.ts";
+import type { RuntimeApplication } from "../framework/src/runtime-config.ts";
+import { applicationBundle, runProgramBuild } from "./build/programs/application.ts";
 import {
   chmodSync,
   cpSync,
@@ -9,9 +12,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { writeHostProfileHeader } from "../tools/host-profile.ts";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { readPocketManifest } from "../framework/src/manifest/load.ts";
 import {
   IPHONE2G_TOOLCHAIN,
   inspectIPhone2GToolchain,
@@ -22,7 +27,7 @@ import {
   iphone2gRamdiskPath,
   iphone2gSysrootPath,
   sha256File,
-} from "./iphone2g-toolchain.ts";
+} from "./build/toolchains/iphone2g.ts";
 import {
   IPHONE2G_DEV_TARGET_ID,
   resolveIPhone2GBuildPlan,
@@ -61,7 +66,7 @@ function run(
     stderr: "pipe",
   });
   return {
-    exitCode: result.exitCode,
+    exitCode: result.success ? 0 : result.exitCode || 1,
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
@@ -83,7 +88,7 @@ function runBinary(
     stderr: "pipe",
   });
   return {
-    exitCode: result.exitCode,
+    exitCode: result.success ? 0 : result.exitCode || 1,
     stdout: Buffer.from(result.stdout),
     stderr: result.stderr.toString(),
   };
@@ -339,36 +344,9 @@ function iphone2gGuestOutputDirectory(): string {
 }
 
 function currentIPhone2GBuildPlan() {
-  return resolveIPhone2GBuildPlan(
-    JSON.parse(readFileSync(iphone2gManifestPath(), "utf8")),
-  );
+  return resolveIPhone2GBuildPlan(readPocketManifest(iphone2gManifestPath()).manifest);
 }
 
-function readIPhone2GGuestArtifacts(): IPhone2GGuestArtifacts {
-  const planPath = iphone2gPlanPath();
-  if (!existsSync(planPath)) {
-    throw new Error(
-      "PocketJS iPhone 2G: resolved build plan is absent; run `bun tools/iphone2g.ts build-demo`",
-    );
-  }
-  const storedPlan = JSON.parse(readFileSync(planPath, "utf8")) as unknown;
-  const currentPlan = currentIPhone2GBuildPlan();
-  const artifacts = deriveIPhone2GGuestArtifacts(
-    storedPlan,
-    iphone2gGuestOutputDirectory(),
-  );
-  if (
-    typeof storedPlan !== "object" ||
-    storedPlan === null ||
-    !("planHash" in storedPlan) ||
-    storedPlan.planHash !== currentPlan.planHash
-  ) {
-    throw new Error(
-      "PocketJS iPhone 2G: resolved build plan is stale; rerun `bun tools/iphone2g.ts build-demo`",
-    );
-  }
-  return artifacts;
-}
 
 function buildDemo(): void {
   const plan = currentIPhone2GBuildPlan();
@@ -393,8 +371,8 @@ function buildDemo(): void {
   console.log(`PocketJS iPhone 2G: guest bundle -> ${output}`);
 }
 
-function buildRuntime(): void {
-  ensureSources();
+export function buildIPhone2GNative(application: RuntimeApplication, outdir: string): void {
+  const guestArtifacts = applicationBundle(application, IPHONE2G_DEV_TARGET_ID);
   const status = inspectIPhone2GToolchain();
   if (!status.sysroot || !status.csu || !status.quickjs) {
     throw new Error(
@@ -429,14 +407,13 @@ function buildRuntime(): void {
   // slow part of the toolchain. Keep Cargo's target directory outside the
   // disposable native-object directory so subsequent demo builds reuse it.
   const rustTarget = join(iphone2gCacheRoot(), "build/rust-target");
-  const bundle = join(repository, "dist/iphone2g/PocketJSDemo.app");
-  const guestArtifacts = readIPhone2GGuestArtifacts();
+  const bundle = join(outdir, "PocketJSDemo.app");
   const { inputs: hostInputs } = guestArtifacts;
   const guestJavaScript = guestArtifacts.javaScript;
   const guestPack = guestArtifacts.pack;
   if (!existsSync(guestJavaScript) || !existsSync(guestPack)) {
     throw new Error(
-      "PocketJS iPhone 2G: guest bundle is absent; run `bun tools/iphone2g.ts build-demo`",
+      "PocketJS iPhone 2G: compiled package payload is absent; pass a current --pocket input",
     );
   }
   // This nonce binds a device acceptance record to one concrete deployment,
@@ -488,32 +465,35 @@ function buildRuntime(): void {
     "-DCRT",
   ]);
   compile(
-    join(repository, "hosts/ios-legacy/crt_globals.c"),
+    join(repository, "programs/shared/ios-legacy/crt_globals.c"),
     join(build, "crt_globals.o"),
     firstPartyWarnings,
   );
   compile(
-    join(repository, "hosts/ios-legacy/runtime.c"),
+    join(repository, "programs/shared/ios-legacy/runtime.c"),
     join(build, "runtime.o"),
     [
       ...firstPartyWarnings,
+      "-include", writeHostProfileHeader(build, hostInputs.profile),
       `-DPOCKET_BUILD_ID="${buildId}"`,
       `-DPOCKET_LOGICAL_WIDTH=${hostInputs.viewport.logical[0]}`,
       `-DPOCKET_LOGICAL_HEIGHT=${hostInputs.viewport.logical[1]}`,
       "-I",
-      join(repository, "engine/quickjs-c"),
+      join(repository, "programs/native/quickjs"),
       "-Wno-cast-function-type-mismatch",
     ],
   );
   compile(
-    join(repository, "engine/quickjs-c/pocket_runtime.c"),
+    join(repository, "programs/native/quickjs/pocket_runtime.c"),
     join(build, "pocket_runtime.o"),
     [
       ...firstPartyWarnings,
+      "-include", writeHostProfileHeader(build, hostInputs.profile),
       `-DPOCKETJS_TARGET_ID="${hostInputs.target}"`,
       `-DPOCKETJS_HOST_ABI=${hostInputs.hostAbi}`,
       "-I",
-      join(repository, "engine/ui-cabi/include"),
+      join(repository, "programs/native/cabi/include"),
+      "-I", join(repository, "engine/guest-quickjs/include"),
       "-I",
       join(repository, "contracts/generated"),
       "-isystem",
@@ -521,11 +501,15 @@ function buildRuntime(): void {
     ],
   );
   compile(
-    join(repository, "hosts/ios-legacy/compat.c"),
+    join(repository, "programs/shared/ios-legacy/compat.c"),
     join(build, "compat.o"),
     firstPartyWarnings,
   );
 
+  compile(join(repository, "engine/guest-quickjs/src/guest.c"), join(build, "pocket_guest_quickjs.o"), [
+    ...firstPartyWarnings, "-I", join(repository, "engine/guest-quickjs/include"),
+    "-I", join(repository, "contracts/generated"), "-isystem", quickjs,
+  ]);
   const quickJsObjects: string[] = [];
   for (const source of [
     "quickjs.c",
@@ -557,21 +541,22 @@ function buildRuntime(): void {
     IPHONE2G_TOOLCHAIN.compiler.rustToolchain,
     "cargo",
   ]);
-  const coreDirectory = join(repository, "engine/ui-cabi");
+  const coreDirectory = join(repository, "programs/native/cabi");
   const rustTargetSpec = join(
     repository,
-    "hosts/iphone2g/armv6-apple-ios.json",
+    "tools/build/toolchains/iphone2g/armv6-apple-ios.json",
   );
   mustRun(
     cargo,
     [
-      "build",
+      "build", "--manifest-path", repositoryPath("programs/native/cabi/Cargo.toml"), "-p", "pocketjs-ui-cabi",
       "--release",
       "--locked",
+      "--no-default-features",
       "--features",
       // The MBX Lite predates shaders, so this target takes the core's
       // fixed-function GL pipeline rather than Symbian's ES 2 one.
-      "bare-platform,gles1",
+      "standalone-extension-provider,bare-platform,gles1",
       "--target",
       rustTargetSpec,
       "-Z",
@@ -585,7 +570,7 @@ function buildRuntime(): void {
     {
       ...process.env,
       RUSTC: rustc,
-      CARGO_TARGET_DIR: rustTarget,
+      CARGO_TARGET_DIR: rustTarget, CARGO_PROFILE_RELEASE_LTO: "true", CARGO_PROFILE_RELEASE_PANIC: "abort",
       IPHONEOS_DEPLOYMENT_TARGET: "10.0",
     },
   );
@@ -632,6 +617,7 @@ function buildRuntime(): void {
     join(build, "crt_globals.o"),
     join(build, "runtime.o"),
     join(build, "pocket_runtime.o"),
+    join(build, "pocket_guest_quickjs.o"),
     join(build, "compat.o"),
     "-force_load",
     coreLibrary,
@@ -663,11 +649,11 @@ function buildRuntime(): void {
   mustRun(ldid, ["-S", executable]);
 
   cpSync(
-    join(repository, "hosts/iphone2g/Info.plist"),
+    join(repository, "programs/iphone2g/Info.plist"),
     join(bundle, "Info.plist"),
   );
-  cpSync(join(repository, "hosts/iphone2g/PkgInfo"), join(bundle, "PkgInfo"));
-  cpSync(join(repository, "hosts/iphone2g/Icon.png"), join(bundle, "Icon.png"));
+  cpSync(join(repository, "programs/iphone2g/PkgInfo"), join(bundle, "PkgInfo"));
+  cpSync(join(repository, "programs/iphone2g/Icon.png"), join(bundle, "Icon.png"));
   chmodSync(executable, 0o755);
   for (const name of ["Info.plist", "PkgInfo", "Icon.png"])
     chmodSync(join(bundle, name), 0o644);
@@ -867,12 +853,12 @@ function buildBootstrapDeviceTool(output: string, scratch: string): void {
     "-DCRT",
   ]);
   compile(
-    join(repository, "hosts/ios-legacy/crt_globals.c"),
+    join(repository, "programs/shared/ios-legacy/crt_globals.c"),
     join(build, "crt-globals.o"),
     ["-Wall", "-Wextra", "-Werror", "-Wno-incompatible-sysroot"],
   );
   compile(
-    join(repository, "hosts/iphone2g/device_tool.c"),
+    join(repository, "programs/iphone2g/device_tool.c"),
     join(build, "device-tool.o"),
     ["-Wall", "-Wextra", "-Werror", "-Wno-incompatible-sysroot"],
   );
@@ -1084,7 +1070,7 @@ function prepareBootstrap(): void {
           files,
           deviceHelper: {
             sourceSha256: sha256File(
-              join(repository, "hosts/iphone2g/device_tool.c"),
+              join(repository, "programs/iphone2g/device_tool.c"),
             ),
             protocol: "PJS2G003",
             signed: true,
@@ -1188,7 +1174,7 @@ function verifiedBootstrapReceipt(): BootstrapReceipt {
     receipt.deviceHelper?.protocol !== "PJS2G003" ||
     receipt.deviceHelper.signed !== true ||
     receipt.deviceHelper.sourceSha256 !==
-      sha256File(join(repository, "hosts/iphone2g/device_tool.c")) ||
+      sha256File(join(repository, "programs/iphone2g/device_tool.c")) ||
     !validPolicy ||
     JSON.stringify(Object.keys(receipt.files ?? {})) !==
       JSON.stringify(expectedFiles)
@@ -2021,8 +2007,6 @@ function deploymentPackage(bundle: string, identifier: string): Buffer {
 }
 
 function deployDemo(): void {
-  buildDemo();
-  buildRuntime();
   const bundle = join(repository, "dist/iphone2g/PocketJSDemo.app");
   const receipt = verifiedBootstrapReceipt();
   const buildReceipt = JSON.parse(
@@ -2377,11 +2361,9 @@ if (import.meta.main) {
     else if (command === "install-bootstrap") await installBootstrap();
     else if (command === "tunnel") runTunnel();
     else if (command === "build-runtime" || command === "build-probe") {
-      buildDemo();
-      buildRuntime();
+      await runProgramBuild("iphone2g", Bun.argv.slice(3));
     } else if (command === "build") {
-      buildDemo();
-      buildRuntime();
+      await runProgramBuild("iphone2g", Bun.argv.slice(3));
     } else if (command === "deploy") await withManagedTunnel(deployDemo);
     else if (command === "launch") await withManagedTunnel(launchDemo);
     else if (command === "device-status")

@@ -8,7 +8,7 @@
 //
 // The runtime's DATA.PSP (the program) travels unchanged; at boot it reads
 // app.pocket from its own folder, checks the footer, the psp variant and the
-// host ABI, and runs the game (hosts/psp/src/package_file.rs).
+// host ABI, and runs the game (platforms/psp/io/src/package.rs).
 //
 // MEMSIZE = 1 asks the firmware of a PSP-2000 or 3000 for the 52 MB user
 // partition instead of 24 MB: the runtime holds the whole game file in
@@ -20,7 +20,7 @@ import { fitRgba } from "./shared/scale.ts";
 import { readSfo, writeSfo, type SfoEntry } from "./shared/sfo.ts";
 import { writeZip } from "./shared/zip.ts";
 
-export const PSP_RUNTIME_TARGET = "psp";
+export const PSP_RUNTIME_TARGET = "psp-runtime";
 /** The runtime's program inside dist/runtime/psp/. */
 export const PSP_RUNTIME_FILE = "EBOOT.PBP";
 export const PSP_ICON0 = { width: 144, height: 80 } as const;
@@ -110,7 +110,7 @@ export async function repackPsp(input: RepackInput): Promise<Uint8Array> {
   const runtime = await readRuntime(input.runtime, PSP_RUNTIME_TARGET);
   const program = input.runtime.get(PSP_RUNTIME_FILE);
   if (!program || !(PSP_RUNTIME_FILE in runtime.files)) throw new Error(`repack psp: the runtime has no ${PSP_RUNTIME_FILE}`);
-  const pocket = admitPocket(input.pocket, runtime, input.identity);
+  const pocket = await admitPocket(input.pocket, runtime, input.identity);
   const features = planFeatures(pocket.plan);
   for (const feature of UNSUPPORTED_FEATURES) {
     if (features[feature] === true) throw new Error(`repack psp: the plan asks for ${feature}, which the PSP runtime leaves out`);

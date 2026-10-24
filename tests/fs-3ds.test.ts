@@ -1,8 +1,8 @@
-// tests/fs-3ds.test.ts — the 3DS host's fs module (hosts/3ds/src/fs.c),
+// tests/fs-3ds.test.ts — the 3DS host's fs module (products/3ds/src/fs.c),
 // compiled natively under ASan/UBSan by tests/fixtures/3ds-fs.c over a
 // temporary directory:
 //
-// - every scenario runs against the sim's fs host (hosts/sim/fs.ts, the
+// - every scenario runs against the sim's fs host (platforms/sim/fs.ts, the
 //   contract's reference for the JS hosts) and the C module, and each op's
 //   result and lastError must agree;
 // - FAT's rename path (no rename onto an existing name) and the recovery of
@@ -15,10 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APPLET_STORE_MAX_BYTES } from "../contracts/spec/applet.ts";
 import { FS_MAX_IO_BYTES, FS_WRITE_APPEND, FS_WRITE_TRUNCATE } from "../contracts/spec/fs.ts";
-import { createSimFsHost } from "../hosts/sim/fs.ts";
+import { createSimFsHost } from "../platforms/sim/fs.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const SRC = join(ROOT, "hosts/3ds/src");
+const SRC = join(ROOT, "products/3ds/src");
 let scratch = "";
 let binary = "";
 

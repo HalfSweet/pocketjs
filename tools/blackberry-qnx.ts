@@ -1,3 +1,8 @@
+import { repositoryPath } from "./repository.ts";
+import nativeToolchain from "./build/toolchains/blackberry-qnx.ts";
+import type { RuntimeApplication } from "../framework/src/runtime-config.ts";
+import { applicationBundle, runProgramBuild } from "./build/programs/application.ts";
+import { writeHostProfileHeader } from "../tools/host-profile.ts";
 import { createHash, randomBytes } from "node:crypto";
 import {
   copyFileSync,
@@ -26,7 +31,6 @@ import {
   packageIdentity,
   printCheck,
   quickJsCheckoutStatus,
-  readGuestBundle,
   renderTemplate,
   runCommand,
   sha256File,
@@ -36,12 +40,7 @@ import {
 const LABEL = "PocketJS BlackBerry QNX";
 const repository = fileURLToPath(new URL("..", import.meta.url));
 const command = Bun.argv[2] ?? "doctor";
-const toolchain = JSON.parse(
-  readFileSync(
-    join(repository, "tools/cli/blackberry-qnx-toolchain.json"),
-    "utf8",
-  ),
-) as {
+const toolchain = nativeToolchain as {
   readonly toolchainVersion: string;
   readonly cachePath: string;
   readonly image: {
@@ -78,7 +77,7 @@ const quickJsRoot = join(cache, "sources/quickjs-rs");
 const nativeBuild = join(repository, ".pocket-build/blackberry-qnx/runtime");
 const rustTarget = join(cache, "build/rust-target");
 const outputBar = join(repository, toolchain.app.bar);
-const outputReceipt = join(dirname(outputBar), "build-receipt.json");
+const outputReceipt = join(dirname(outputBar), "native-build-receipt.json");
 const rustTargetSpec = join(repository, toolchain.rust.target);
 const rustTargetName = basename(toolchain.rust.target, ".json");
 const guest: GuestBundleRequest = {
@@ -106,6 +105,7 @@ function mustRun(
 }
 
 function imagePresent(): boolean {
+  if (!Bun.which("docker")) return false;
   return run("docker", ["image", "inspect", image]).exitCode === 0;
 }
 
@@ -163,6 +163,7 @@ function setup(): void {
 }
 
 function buildRustCore(): string {
+
   mkdirSync(rustTarget, { recursive: true });
   mustRun(
     "rustup",
@@ -170,11 +171,11 @@ function buildRustCore(): string {
       "run",
       toolchain.rust.toolchain,
       "cargo",
-      "build",
+      "build", "--manifest-path", repositoryPath("programs/native/cabi/Cargo.toml"), "-p", "pocketjs-ui-cabi",
       "--release",
       "--locked",
-      "--features",
-      "bare-platform",
+      "--no-default-features", "--features",
+      "standalone-extension-provider,bare-platform",
       "--target",
       rustTargetSpec,
       "-Z",
@@ -184,10 +185,11 @@ function buildRustCore(): string {
       "-Z",
       "build-std-features=compiler-builtins-mem",
     ],
-    join(repository, "engine/ui-cabi"),
+    join(repository, "programs/native/cabi"),
     {
       ...process.env,
       CARGO_PROFILE_RELEASE_LTO: "false",
+      CARGO_PROFILE_RELEASE_PANIC: "abort",
       CARGO_TARGET_DIR: rustTarget,
     },
   );
@@ -202,6 +204,7 @@ function buildRustCore(): string {
 }
 
 function dockerBuild(buildId: string, inputs: HostBuildInputs): void {
+  writeHostProfileHeader(nativeBuild, inputs.profile);
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
   mustRun("docker", [
@@ -257,14 +260,16 @@ function readBarEntry(bar: string, entry: string): Buffer {
   return Buffer.from(result.stdout);
 }
 
-function buildRuntime(): void {
+export function buildBlackBerryNative(application: RuntimeApplication, outdir: string): void {
+  const bundle = applicationBundle(application, BLACKBERRY_QNX_DEV_TARGET_ID);
+  const outputBar = join(outdir, basename(toolchain.app.bar));
+  const outputReceipt = join(outdir, "native-build-receipt.json");
   if (!imagePresent()) {
     throw new Error(
       `${LABEL}: pinned BBNDK image is absent; run \`bun blackberry-qnx setup\``,
     );
   }
   ensureQuickJsCheckout(LABEL, quickJsRoot, toolchain.quickjs);
-  const bundle = readGuestBundle(guest);
   const coreLibrary = buildRustCore();
   const buildId = randomBytes(16).toString("hex");
   rmSync(nativeBuild, { recursive: true, force: true });
@@ -294,7 +299,7 @@ function buildRuntime(): void {
   writeFileSync(
     join(nativeBuild, "staging/bar-descriptor.xml"),
     renderTemplate(
-      readFileSync(join(repository, "hosts/blackberry-classic-qnx/bar-descriptor.xml"), "utf8"),
+      readFileSync(join(repository, "programs/blackberry-classic/bar-descriptor.xml"), "utf8"),
       {
         ID: identity.packageId,
         TITLE: xmlEscape(identity.title),
@@ -329,8 +334,8 @@ function buildRuntime(): void {
   }
   for (const symbol of [
     " main",
-    " pocket_runtime_boot",
-    " pocket_runtime_tick",
+    " pocket_legacy_runtime_boot",
+    " pocket_legacy_runtime_tick",
     " ui_gl_render",
   ]) {
     if (!symbols.includes(symbol)) {
@@ -394,10 +399,6 @@ function buildRuntime(): void {
   console.log(`Receipt: ${outputReceipt}`);
 }
 
-function build(): void {
-  buildGuestBundle(guest);
-  buildRuntime();
-}
 
 function deviceAddress(): string {
   const address = process.env.POCKETJS_BLACKBERRY_DEVICE?.trim();
@@ -559,7 +560,7 @@ function deviceStatus(): void {
   );
 }
 
-switch (command) {
+if (import.meta.main) switch (command) {
   case "doctor":
     doctor();
     break;
@@ -570,10 +571,10 @@ switch (command) {
     buildGuestBundle(guest);
     break;
   case "build-runtime":
-    buildRuntime();
+    await runProgramBuild("blackberry-classic", Bun.argv.slice(3));
     break;
   case "build":
-    build();
+    await runProgramBuild("blackberry-classic", Bun.argv.slice(3));
     break;
   case "device-info":
     deviceInfo();

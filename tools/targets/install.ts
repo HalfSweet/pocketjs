@@ -74,15 +74,15 @@ function run(command: string[], options: { env: NodeJS.ProcessEnv; cwd?: string;
     stdout: options.quiet ? "pipe" : "inherit",
     stderr: options.quiet ? "pipe" : "inherit",
   });
-  if (result.exitCode !== 0) {
+  if (!result.success) {
     const detail = options.quiet ? `\n${result.stderr?.toString().trim() ?? ""}` : "";
-    throw new InstallError(`${command.slice(0, 3).join(" ")} … failed with exit ${result.exitCode}${detail}`);
+    throw new InstallError(`${command.slice(0, 3).join(" ")} … failed with ${result.signalCode ?? result.exitCode}${detail}`);
   }
 }
 
 function output(command: string[], env: NodeJS.ProcessEnv): string {
   const result = Bun.spawnSync(command, { env, stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0) {
+  if (!result.success) {
     throw new InstallError(`${command.slice(0, 2).join(" ")} failed: ${result.stderr.toString().trim()}`);
   }
   return result.stdout.toString();
@@ -306,7 +306,7 @@ function context(options: InstallOptions): Context {
  * record. Returns the record; a second call installs nothing and fetches
  * nothing.
  */
-export async function addTarget(descriptor: TargetDescriptor, options: InstallOptions = {}): Promise<InstallRecord> {
+export async function addTarget(descriptor: Pick<TargetDescriptor, "id" | "title" | "hosts" | "toolchain">, options: InstallOptions = {}): Promise<InstallRecord> {
   const ctx = context(options);
   const manifest = descriptor.toolchain;
   if (!manifest) throw new InstallError(`${descriptor.id} has no toolchain manifest in this framework`);

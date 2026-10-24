@@ -13,7 +13,9 @@
 //   /playground/          the live editor page
 //   /docs/*, /index.html  rendered from site/content (added below)
 
+import { stageWebAssets } from "../tools/build/web-assets.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
+import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, cpSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -50,6 +52,9 @@ import {
 import { emitSingleLodStagePackage } from "./stage-package.ts";
 import { renderHomeShowcase } from "./home-showcase.ts";
 import { SHOWCASE_APPS } from "./showcase.ts";
+import pspProfile from "../profiles/psp.ts";
+import { hashPocketProfile } from "../framework/src/profile.ts";
+import { decodePocketPackage, findVariant } from "../contracts/spec/pocket-package.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname; // repo root
 const SITE = ROOT + "site/";
@@ -572,17 +577,12 @@ async function main() {
   // validator. The deployed path is POCKET_MANIFEST_SCHEMA_ID —
   // /schema/pocket-2.json, independent of where the repo keeps the file.
   copy(ROOT + "contracts/schema/pocket-2.json", "schema/pocket-2.json");
-  copy(ROOT + "contracts/schema/pocket-idf-host-1.json", "schema/pocket-idf-host-1.json");
-  copy(ROOT + "hosts/web/pocketjs.wasm", "pg/pocketjs.wasm");
-  // The AppInstance realm a docs demo boots into: one hidden same-origin
-  // iframe per demo, so several demos on one page never share globals.
-  copy(ROOT + "hosts/web/app-instance.html", "pg/app-instance.html");
-  copy(ROOT + "hosts/web/app-instance.js", "pg/app-instance.js");
-  copy(ROOT + "hosts/web/wasm-ops.js", "pg/wasm-ops.js");
-  copy(ROOT + "hosts/web/runtime-glyphs.js", "pg/runtime-glyphs.js");
-  for (const name of ["offload-worker.js", "text-worker.js", "text-engine.js", "pocket_text.wasm"]) {
-    copy(ROOT + "hosts/web/" + name, "pg/" + name);
-  }
+  copy(ROOT + "platforms/web/pocketjs.wasm", "pg/pocketjs.wasm");
+  // Preserve program/provider module and worker URLs under the deployed root.
+  stageWebAssets(OUT + "pg", {
+    wasm: ROOT + "platforms/web/pocketjs.wasm",
+    textWasm: ROOT + "platforms/web/pocket_text.wasm",
+  });
   copy(ROOT + "assets/fonts/Inter-Regular.ttf", "pg/fonts/Inter-Regular.ttf");
   copy(ROOT + "assets/fonts/Inter-Bold.ttf", "pg/fonts/Inter-Bold.ttf");
   for (const f of readdirSync(ROOT + "assets/images/")) copy(ROOT + "assets/images/" + f, "demo-assets/" + f);
@@ -601,16 +601,22 @@ async function main() {
     apps: { output: string; id: string; title: string }[];
   };
   const stageApps = ["launcher-main", ...launcherRegistry.apps.map((a) => a.output)];
+  const stageProfileHash = hashPocketProfile(pspProfile);
   for (const output of stageApps) {
     const source = ROOT + `dist/packages/${output}.pocket`;
     if (!existsSync(source)) {
       throw new Error(`missing dist/packages/${output}.pocket — run: bun tools/launcher.ts pack`);
+    }
+    const variant = findVariant(decodePocketPackage(new Uint8Array(readFileSync(source))), "psp");
+    if (!variant || variant.profileHash !== stageProfileHash) {
+      throw new Error(`stage package ${output} does not match the PSP software profile; rebuild it`);
     }
     copy(source, `stage/apps/${output}.pocket`);
   }
   write(
     "stage/apps/apps.json",
     JSON.stringify({
+      target: "psp", hostAbi: POCKET_BINDING_GENERATION, profileHash: stageProfileHash,
       apps: launcherRegistry.apps.map(({ output, id, title }) => ({ output, id, title })),
     }),
   );
@@ -1021,7 +1027,7 @@ function docDemoFigure(demo: DocDemo, caption: string): string {
   const attrs: Record<string, string> = {
     "data-app": demo.app,
     "data-package-id": demo.packageId,
-    "data-instance": "/pg/app-instance.html",
+    "data-instance": "/pg/programs/web/app-instance.html",
     "data-wasm": "/pg/pocketjs.wasm",
     "data-bundle": `/pg/demos/${demo.bundleFile}`,
     "data-pak": `/pg/demos/${demo.pakFile}`,

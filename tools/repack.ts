@@ -6,13 +6,13 @@
 // and the game's `.pocket`, with no native tools. This file only reads the
 // files; tools/repack/index.ts names each target's repack, which works on
 // bytes, so a Worker calls it the same way. `--target` is a runtime name
-// (psp, vita, 3ds, ipod, android) or a Pocket Studio target (ipod-touch).
+// (psp, vita, 3ds, android).
 //
 // Android signs with the Pocket Studio community key: the two DER files
 // `bun tools/community-key.ts` writes beside the keystore
 // (POCKET_STUDIO_COMMUNITY_KEY names another keystore).
 
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, lstatSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { readCommunitySigner } from "./community-key.ts";
 import { REPACK_TARGETS, repackTarget } from "./repack/index.ts";
@@ -23,7 +23,9 @@ export function readRuntimeDirectory(directory: string): Map<string, Uint8Array>
   const walk = (path: string) => {
     for (const name of readdirSync(path)) {
       const child = join(path, name);
-      if (statSync(child).isDirectory()) walk(child);
+      const stat = lstatSync(child);
+      if (stat.isSymbolicLink()) throw new Error(`runtime contains a symlink: ${child}`);
+      if (stat.isDirectory()) walk(child);
       else files.set(relative(directory, child).split("\\").join("/"), new Uint8Array(readFileSync(child)));
     }
   };

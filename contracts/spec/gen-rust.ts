@@ -1,9 +1,10 @@
-// Deterministic codegen: contracts/spec/{spec,audio,db,net,physics}.ts -> engine/core/src/spec.rs.
+import { POCKET_BINDING_GENERATION } from "./binding-generation.ts";
+// Deterministic codegen: contracts/spec/{spec,audio,db,fs,net,physics}.ts -> engine/spec/src/lib.rs.
 //
 // Run from PocketJS/:  bun contracts/spec/gen-rust.ts
 //
 // tests/contract.ts imports generateRust() and byte-compares its output against
-// the committed engine/core/src/spec.rs, so the generated file can never drift from
+// the committed engine/spec/src/lib.rs, so the generated file can never drift from
 // spec.ts. Keep this generator free of anything non-deterministic (no dates,
 // no env, no object-key sorting surprises — insertion order only).
 
@@ -97,6 +98,7 @@ import {
   PAK_MAGIC,
   PAK_VERSION,
   DRAW_OP,
+  DRAW_LIST_VERSION,
   ENUMS,
   FIXED_DT,
   FONT_CMAP_ENTRY_SIZE,
@@ -213,12 +215,17 @@ export function generateRust(): string {
 
   put("//! GENERATED — do not edit; run `bun contracts/spec/gen-rust.ts` (from PocketJS/).");
   put("//!");
-  put("//! Source of truth: PocketJS/spec/spec.ts — every constant here mirrors it.");
+  put("//! Source of truth: contracts/spec — every constant here mirrors its TypeScript definition.");
   put("//! tests/contract.ts regenerates this file in-memory and byte-compares;");
   put("//! if that fails, run `bun contracts/spec/gen-rust.ts` and commit the result.");
   put("");
+  put("#![no_std]");
   put("#![allow(dead_code)]");
   put("#![allow(clippy::all)]");
+  put("");
+
+  put("/// Generated guest/native binding contract; independent of profile identity.");
+  put(`pub const BINDING_GENERATION: u32 = ${POCKET_BINDING_GENERATION};`);
   put("");
 
   // --- scalars ---------------------------------------------------------------
@@ -271,7 +278,7 @@ export function generateRust(): string {
   put("");
 
   // --- op codes ---------------------------------------------------------------
-  put("/// UI op codes (the engine/wasm/FFI ABI identity of each `ui.*` op; 0 reserved).");
+  put("/// UI op codes (the programs/web/wasm/FFI ABI identity of each `ui.*` op; 0 reserved).");
   put("/// Signatures are documented in spec.ts and docs/DESIGN.md.");
   put("pub mod op {");
   for (const [name, v] of Object.entries(OP)) {
@@ -394,7 +401,7 @@ export function generateRust(): string {
   put("}");
   put("");
   put("/// STREAM container (.pkst) — host-written video+audio ring file.");
-  put("/// Full byte layout in spec.ts; parsed by engine/core/src/stream.rs.");
+  put("/// Full byte layout in spec.ts; parsed by engine/modules/media/src/stream.rs.");
   put("pub mod stream {");
   put(`    pub const MAGIC: u32 = ${hex(STREAM_MAGIC)}; // 'PKST' LE`);
   put(`    pub const VERSION: u16 = ${STREAM_VERSION};`);
@@ -410,7 +417,7 @@ export function generateRust(): string {
   put("}");
   put("");
   put("/// SVC WIRE protocol (PKNT) — the svc mailbox over a socket.");
-  put("/// Full byte layout in spec.ts; parsed by engine/core/src/wire.rs.");
+  put("/// Full byte layout in spec.ts; parsed by engine/modules/media/src/wire.rs.");
   put("pub mod wire {");
   put(`    pub const MAGIC: u32 = ${hex(WIRE_MAGIC)}; // 'PKNT' LE`);
   put(`    pub const BEACON_MAGIC: u32 = ${hex(WIRE_BEACON_MAGIC)}; // 'PKDB' LE`);
@@ -467,6 +474,7 @@ export function generateRust(): string {
   put("/// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,");
   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9.");
+  put(`pub const DRAW_LIST_VERSION: u32 = ${DRAW_LIST_VERSION};`);
   put("pub mod draw_op {");
   for (const [name, v] of Object.entries(DRAW_OP)) {
     put(`    pub const ${screaming(name)}: u32 = ${v};`);
@@ -510,7 +518,7 @@ export function generateRust(): string {
   // The audio MODULE's boundary (contracts/spec/audio.ts): its own op space,
   // mounted as `globalThis.audio`, independent of the ui surface. A native
   // host implementing it reads these constants; the ring/thread discipline to
-  // copy is hosts/psp/src/audio.rs (currently serving the video plane).
+  // copy is platforms/psp/audio/src/output.rs (currently serving the video plane).
   if (audioFramesForTick(22050, 0) !== 367 || audioFramesForTick(22050, 1) !== 368) {
     throw new Error("audioFramesForTick drifted from the pinned Bresenham formula");
   }
@@ -653,7 +661,7 @@ export function generateRust(): string {
 }
 
 if (import.meta.main) {
-  const out = new URL("../../engine/core/src/spec.rs", import.meta.url).pathname;
+  const out = new URL("../../engine/spec/src/lib.rs", import.meta.url).pathname;
   await Bun.write(out, generateRust());
   console.log(`wrote ${out}`);
   for (const [path, source] of [

@@ -1,4 +1,4 @@
-/* Native harness for hosts/3ds/src/photos_image.c, linked against the
+/* Native harness for products/3ds/src/photos_image.c, linked against the
  * computer's libjpeg (tests/camera-photo.test.ts).
  *
  *   3ds-photos names <name>...    one line per name: "<name> 1|0"
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../hosts/3ds/src/photos_image.h"
+#include "../../products/3ds/src/photos_image.h"
 
 /* The camera's RGB565 (red high): left half red, right half blue, a white
  * square in the middle. */

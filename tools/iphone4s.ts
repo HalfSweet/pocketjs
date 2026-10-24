@@ -1,3 +1,6 @@
+import { repositoryPath } from "./repository.ts";
+import type { RuntimeApplication } from "../framework/src/runtime-config.ts";
+import { applicationBundle, runProgramBuild } from "./build/programs/application.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { createCanvas } from "@napi-rs/canvas";
 import {
@@ -15,6 +18,7 @@ import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractHostBuildInputs } from "../framework/src/manifest/host-build-inputs.ts";
+import { writeHostProfileHeader } from "../tools/host-profile.ts";
 import {
   bakeClassicIPhoneArtwork,
   IPHONE_CLASSIC_ICON_FILE,
@@ -29,7 +33,7 @@ import {
   iphone4sQuickJsPath,
   iphone4sSysrootPath,
   sha256File,
-} from "./iphone4s-toolchain.ts";
+} from "./build/toolchains/iphone4s.ts";
 import {
   IPHONE4S_DEV_TARGET_ID,
   IPHONE4S_PHYSICAL_VIEWPORT,
@@ -116,7 +120,7 @@ function run(
     stderr: "pipe",
   });
   return {
-    exitCode: result.exitCode,
+    exitCode: result.success ? 0 : result.exitCode || 1,
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
@@ -131,7 +135,7 @@ function runBinary(executable: string, args: readonly string[]): BinaryCommandRe
     stderr: "pipe",
   });
   return {
-    exitCode: result.exitCode,
+    exitCode: result.success ? 0 : result.exitCode || 1,
     stdout: Buffer.from(result.stdout),
     stderr: result.stderr.toString(),
   };
@@ -586,32 +590,11 @@ function prepareSysroot(): void {
   }
 }
 
-async function build(): Promise<void> {
-  setupSources();
+export async function buildIPhone4SNative(application: RuntimeApplication, outdir: string): Promise<void> {
+  const { inputs, javaScript: guestJavaScript, pack: guestPak } = applicationBundle(application, IPHONE4S_DEV_TARGET_ID);
   const toolchain = inspectIPhone4SToolchain();
-  if (!toolchain.sysroot) {
-    throw new Error("pocket iphone4s: validated iOS 6.1.3 sysroot is absent; run `bun iphone4s prepare-sysroot`");
-  }
-  const manifest = JSON.parse(readFileSync(manifestPath(), "utf8"));
-  const plan = resolveIPhone4SBuildPlan(manifest);
-  mkdirSync(dirname(planPath()), { recursive: true });
-  writeFileSync(planPath(), JSON.stringify(plan, null, 2) + "\n");
-  const inputs = extractHostBuildInputs(plan, { expectedTarget: IPHONE4S_DEV_TARGET_ID });
-
-  rmSync(guestDirectory(), { recursive: true, force: true });
-  mkdirSync(guestDirectory(), { recursive: true });
-  mustRun("bun", [
-    "tools/build.ts",
-    `--plan=${planPath()}`,
-    `--project-root=${REPOSITORY}`,
-    `--outdir=${guestDirectory()}`,
-  ]);
-  const guestJavaScript = join(guestDirectory(), `${inputs.appOutput}.js`);
-  const guestPak = join(guestDirectory(), `${inputs.appOutput}.pak`);
-  if (!existsSync(guestJavaScript) || !existsSync(guestPak)) {
-    throw new Error("pocket iphone4s: guest build did not produce its JS and pak artifacts");
-  }
-
+  if (!toolchain.csu || !toolchain.quickjs) throw new Error("pocket iphone4s: pinned sources are absent; run `bun iphone4s setup-sources`");
+  if (!toolchain.sysroot) throw new Error("pocket iphone4s: validated iOS 6.1.3 sysroot is absent; run `bun iphone4s prepare-sysroot`");
   const clang = mustRun("xcrun", ["--find", "clang"]);
   const linker = mustRun("xcrun", ["--find", IPHONE4S_TOOLCHAIN.compiler.linker]);
   const macosSdk = mustRun("xcrun", ["--sdk", "macosx", "--show-sdk-path"]);
@@ -653,12 +636,12 @@ async function build(): Promise<void> {
   const rustc = mustRun(rustup, ["which", "--toolchain", IPHONE4S_TOOLCHAIN.compiler.rustToolchain, "rustc"]);
   mustRun(
     cargo,
-    ["build", "--release", "--locked", "--features", "bare-platform,gles1", "--target",
-      join(REPOSITORY, "hosts/iphone4s/armv7-apple-ios.json"), "-Z", "json-target-spec",
+    ["build", "--manifest-path", repositoryPath("programs/native/cabi/Cargo.toml"), "-p", "pocketjs-ui-cabi", "--release", "--locked", "--no-default-features", "--features", "standalone-extension-provider,bare-platform,gles1", "--target",
+      join(REPOSITORY, "tools/build/toolchains/ios/armv7-apple-ios.json"), "-Z", "json-target-spec",
       "-Z", "build-std=core,alloc,compiler_builtins", "-Z", "build-std-features=compiler-builtins-mem"],
     {
-      cwd: join(REPOSITORY, "engine/ui-cabi"),
-      env: { ...process.env, RUSTC: rustc, CARGO_HOME: cargoHome, CARGO_TARGET_DIR: rustTarget, IPHONEOS_DEPLOYMENT_TARGET: DEPLOYMENT_TARGET },
+      cwd: join(REPOSITORY, "programs/native/cabi"),
+      env: { ...process.env, RUSTC: rustc, CARGO_HOME: cargoHome, CARGO_TARGET_DIR: rustTarget, CARGO_PROFILE_RELEASE_LTO: "true", CARGO_PROFILE_RELEASE_PANIC: "abort", IPHONEOS_DEPLOYMENT_TARGET: DEPLOYMENT_TARGET },
     },
   );
   const rustLibrary = join(rustTarget, "armv7-apple-ios/release/libpocketjs_symbian_core.a");
@@ -666,15 +649,16 @@ async function build(): Promise<void> {
     throw new Error(`pocket iphone4s: missing Rust static library at ${rustLibrary}`);
   }
 
-  const bundle = bundleDirectory();
+  const bundle = join(outdir, "PocketJSiPhone4S.app");
   rmSync(bundle, { recursive: true, force: true });
   mkdirSync(bundle, { recursive: true });
-  cpSync(join(REPOSITORY, "hosts/iphone4s/Info.plist"), join(bundle, "Info.plist"));
-  cpSync(join(REPOSITORY, "hosts/iphone4s/PkgInfo"), join(bundle, "PkgInfo"));
+  cpSync(join(REPOSITORY, "programs/iphone4s/Info.plist"), join(bundle, "Info.plist"));
+  cpSync(join(REPOSITORY, "programs/iphone4s/PkgInfo"), join(bundle, "PkgInfo"));
   await bakeClassicIPhoneArtwork(bundle);
 
   const firstParty = [
     ...warnings,
+    "-include", writeHostProfileHeader(nativeBuild, inputs.profile),
     `-DPOCKET_LOGICAL_WIDTH=${inputs.viewport.logical[0]}`,
     `-DPOCKET_LOGICAL_HEIGHT=${inputs.viewport.logical[1]}`,
     `-DPOCKET_RASTER_DENSITY=${inputs.viewport.rasterDensity}`,
@@ -682,40 +666,47 @@ async function build(): Promise<void> {
   const crtGlobalsObject = join(nativeBuild, "crt_globals.o");
   const runtimeIdentityObject = join(nativeBuild, "runtime.build-id-input.o");
   const pocketRuntimeObject = join(nativeBuild, "pocket_runtime.o");
+  const guestAdapterObject = join(nativeBuild, "pocket_guest_quickjs.o");
   const compatObject = join(nativeBuild, "compat.o");
-  compile(join(REPOSITORY, "hosts/ios-legacy/crt_globals.c"), crtGlobalsObject, warnings);
-  compile(join(REPOSITORY, "hosts/iphone4s/runtime.c"), runtimeIdentityObject, [
+  compile(join(REPOSITORY, "programs/shared/ios-legacy/crt_globals.c"), crtGlobalsObject, warnings);
+  compile(join(REPOSITORY, "programs/iphone4s/runtime.c"), runtimeIdentityObject, [
     ...firstParty,
     `-DPOCKET_BUILD_ID=\"${BUILD_ID_PLACEHOLDER}\"`,
-    "-I", join(REPOSITORY, "engine/quickjs-c"),
+    "-I", join(REPOSITORY, "programs/native/quickjs"),
     "-Wno-cast-function-type-mismatch",
   ]);
-  compile(join(REPOSITORY, "engine/quickjs-c/pocket_runtime.c"), pocketRuntimeObject, [
+  compile(join(REPOSITORY, "programs/native/quickjs/pocket_runtime.c"), pocketRuntimeObject, [
     ...warnings,
+    "-include", writeHostProfileHeader(nativeBuild, inputs.profile),
     `-DPOCKETJS_TARGET_ID=\"${inputs.target}\"`,
     `-DPOCKETJS_HOST_ABI=${inputs.hostAbi}`,
     `-DPOCKET_RASTER_DENSITY=${inputs.viewport.rasterDensity}`,
-    "-I", join(REPOSITORY, "engine/ui-cabi/include"),
+    "-I", join(REPOSITORY, "programs/native/cabi/include"),
+    "-I", join(REPOSITORY, "engine/guest-quickjs/include"),
     "-I", join(REPOSITORY, "contracts/generated"),
     "-isystem",
     quickjs,
   ]);
-  compile(join(REPOSITORY, "hosts/ios-legacy/compat.c"), compatObject, warnings);
+  compile(join(REPOSITORY, "engine/guest-quickjs/src/guest.c"), guestAdapterObject, [
+    ...warnings, "-I", join(REPOSITORY, "engine/guest-quickjs/include"),
+    "-I", join(REPOSITORY, "contracts/generated"), "-isystem", quickjs,
+  ]);
+  compile(join(REPOSITORY, "programs/shared/ios-legacy/compat.c"), compatObject, warnings);
 
   const buildId = hashInputs([
-    planPath(),
+    application.planPath,
     guestJavaScript,
     guestPak,
-    join(REPOSITORY, "hosts/iphone4s/Info.plist"),
-    join(REPOSITORY, "hosts/iphone4s/PkgInfo"),
-    join(REPOSITORY, "hosts/iphone2g/Icon.png"),
-    join(REPOSITORY, "hosts/iphone4s/Icon.svg"),
+    join(REPOSITORY, "programs/iphone4s/Info.plist"),
+    join(REPOSITORY, "programs/iphone4s/PkgInfo"),
+    join(REPOSITORY, "programs/iphone2g/Icon.png"),
+    join(REPOSITORY, "programs/iphone4s/Icon.svg"),
     join(REPOSITORY, "tools/iphone-classic-icon.ts"),
     join(REPOSITORY, "tools/icon-raster.ts"),
     join(REPOSITORY, "tools/iphone4s.ts"),
-    join(REPOSITORY, "tools/iphone4s-toolchain.ts"),
-    join(REPOSITORY, "tools/cli/iphone4s-toolchain.json"),
-    join(REPOSITORY, "hosts/iphone4s/armv7-apple-ios.json"),
+    join(REPOSITORY, "tools/build/toolchains/iphone4s.ts"),
+    join(REPOSITORY, "tools/build/toolchains/iphone4s/manifest.json"),
+    join(REPOSITORY, "tools/build/toolchains/ios/armv7-apple-ios.json"),
     { label: "sysroot/UIKit.tbd", path: join(sysroot, "System/Library/Frameworks/UIKit.framework/UIKit.tbd") },
     { label: "sysroot/Foundation.tbd", path: join(sysroot, "System/Library/Frameworks/Foundation.framework/Foundation.tbd") },
     { label: "sysroot/CoreGraphics.tbd", path: join(sysroot, "System/Library/Frameworks/CoreGraphics.framework/CoreGraphics.tbd") },
@@ -728,6 +719,7 @@ async function build(): Promise<void> {
     { label: "native/crt_globals.o", path: crtGlobalsObject },
     { label: "native/runtime.build-id-input.o", path: runtimeIdentityObject },
     { label: "native/pocket_runtime.o", path: pocketRuntimeObject },
+    { label: "native/pocket_guest_quickjs.o", path: guestAdapterObject },
     { label: "native/compat.o", path: compatObject },
     ...quickJsObjects.map((path) => ({ label: `native/${path.slice(nativeBuild.length + 1)}`, path })),
     { label: "native/libpocketjs_symbian_core.a", path: rustLibrary },
@@ -738,10 +730,10 @@ async function build(): Promise<void> {
   ]);
 
   const runtimeObject = join(nativeBuild, "runtime.o");
-  compile(join(REPOSITORY, "hosts/iphone4s/runtime.c"), runtimeObject, [
+  compile(join(REPOSITORY, "programs/iphone4s/runtime.c"), runtimeObject, [
     ...firstParty,
     `-DPOCKET_BUILD_ID=\"${buildId}\"`,
-    "-I", join(REPOSITORY, "engine/quickjs-c"),
+    "-I", join(REPOSITORY, "programs/native/quickjs"),
     "-Wno-cast-function-type-mismatch",
   ]);
 
@@ -754,7 +746,7 @@ async function build(): Promise<void> {
     "-no_source_version", "-no_compact_unwind", "-no_adhoc_codesign", "-no_encryption",
     "-e", "start", "-o", executable, join(nativeBuild, "csu-start.o"),
     join(nativeBuild, "csu-dyld-glue.o"), crtGlobalsObject,
-    runtimeObject, pocketRuntimeObject, compatObject,
+    runtimeObject, pocketRuntimeObject, guestAdapterObject, compatObject,
     "-force_load", rustLibrary, ...quickJsObjects,
     "-sectcreate", "__DATA", "__pocket_js", embeddedJavaScript,
     "-sectcreate", "__DATA", "__pocket_pak", guestPak,
@@ -790,7 +782,7 @@ async function build(): Promise<void> {
     deploymentTarget: DEPLOYMENT_TARGET,
     files,
   };
-  writeFileSync(receiptPath(), JSON.stringify(receipt, null, 2) + "\n");
+  writeFileSync(join(bundle, "build-receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
 
   console.log(`built ${bundle}`);
   console.log(fileInfo);
@@ -930,7 +922,6 @@ export function deploymentInstallCommand(transactionId: string, paths: Deploymen
 }
 
 async function deploy(): Promise<void> {
-  await build();
   const receipt = readReceipt();
   const transactionId = randomBytes(12).toString("hex");
   const paths = iphone4sDeploymentPaths(transactionId);
@@ -1250,7 +1241,7 @@ export async function main(args: readonly string[] = Bun.argv.slice(2)): Promise
       prepareSysroot();
       break;
     case "build":
-      await build();
+      await runProgramBuild("iphone4s", args.slice(1));
       break;
     case "deploy":
       await deploy();

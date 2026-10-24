@@ -1,0 +1,17 @@
+[package]
+name = "pocket-gles"
+edition = "2021"
+description = "Instance GLES DrawList renderer with owned submission resources"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocket-drivers = { workspace = true, default-features = true }
+pocket-spec = { workspace = true, default-features = true }
+pocket-draw-ops = { workspace = true, default-features = true }
+pocket-tri-batch = { workspace = true, default-features = true }
+pocket-glyph-pages = { workspace = true, default-features = true }
+pocket-tex-cache = { workspace = true, default-features = true }

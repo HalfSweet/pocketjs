@@ -1,4 +1,5 @@
 import { isHostExtension, type HostExtension } from "./host-extension.ts";
+import { hashPocketProfile, profileHashProjection } from "../profile.ts";
 import { DYNAMIC_FORMS, PACKAGE_ROLES, TARGET_FORMS } from "../../../contracts/spec/platforms.ts";
 import { deriveModality, modalityMisses } from "../../../contracts/spec/modality.ts";
 import type {
@@ -20,6 +21,7 @@ import {
   type ResolvedBuildPlanContent,
 } from "./plan.ts";
 import { validatePocketManifest, type ContractDiagnostic } from "./validate.ts";
+import { POCKET_BINDING_GENERATION } from "../../../contracts/spec/binding-generation.ts";
 import { appletManifestDiagnostics } from "../../../contracts/spec/applet.ts";
 
 const AUXILIARY_DISPLAY = "display.auxiliary";
@@ -27,6 +29,8 @@ const AUXILIARY_TOUCH = "input.touch.auxiliary";
 
 export interface ResolveBuildRequest {
   readonly target: string;
+  /** Artifact selected by the caller. Omitted retains JavaScript guest plans. */
+  readonly executionClass?: "guest" | "aot";
   /** Defaults to an ordinary application. System resolution assigns the
    *  System UI role before capability admission. */
   readonly role?: "application" | "systemUI";
@@ -305,6 +309,14 @@ export function validatePlatformContractRegistry(
   });
 
   for (const [targetId, target] of Object.entries(registry.targets)) {
+    if (target.hostAbi !== POCKET_BINDING_GENERATION) {
+      diagnostics.push({ code: "registry.bindingGeneration", path: `/targets/${targetId}/hostAbi`,
+        message: `target must use binding generation ${POCKET_BINDING_GENERATION}` });
+    }
+    if (target.tickHz !== undefined && (!Number.isInteger(target.tickHz) || target.tickHz < 1 || target.tickHz > 240)) {
+      diagnostics.push({ code: "registry.invalidTickHz", path: `/targets/${targetId}/tickHz`,
+        message: "target tickHz must be an integer from 1 through 240" });
+    }
     if (
       !Number.isInteger(target.display.rasterDensity) ||
       target.display.rasterDensity < 1 ||
@@ -426,6 +438,14 @@ export function resolveBuildPlan(
     diagnostics.push({ code: "hostExtension.invalid", path: "/hostExtension",
       message: "host extension must carry a versioned, content-verified JSON payload" });
   }
+  if (typeof manifest.app.theme === "string") {
+    diagnostics.push({
+      code: "app.themeUnresolved",
+      path: "/app/theme",
+      message: `app.theme names the module ${JSON.stringify(manifest.app.theme)}; readPocketManifest loads it before resolution`,
+    });
+    return { ok: false, diagnostics };
+  }
   const profile = registry.targets[request.target];
   if (!profile) {
     diagnostics.push({
@@ -436,16 +456,17 @@ export function resolveBuildPlan(
     return { ok: false, diagnostics };
   }
 
-  // This resolver only produces guest-class plans. AOT-class packages are
-  // admitted at compile time by their compiler family;
-  // a manifest that ships no guest artifact has nothing for us to build.
-  const executionClasses = manifest.execution?.classes ?? ["guest"];
-  if (!executionClasses.includes("guest")) {
+  const executionClass = request.executionClass ?? "guest";
+  const executionClasses = manifest.execution?.classes;
+  if (executionClasses && !executionClasses.includes(executionClass)) {
     diagnostics.push({
-      code: "execution.guestExcluded",
+      code: `execution.${executionClass}Excluded`,
       path: "/execution/classes",
-      message: "manifest declares no guest execution class; this resolver only builds guest plans",
+      message: `manifest declares no ${executionClass} execution class`,
     });
+  }
+  if (executionClass === "aot" && manifest.app.aot !== true) {
+    diagnostics.push({ code: "execution.aotDisabled", path: "/app/aot", message: "AOT compilation requires app.aot to be true" });
   }
 
   // The device's modality selects the presentation; the first declared
@@ -654,7 +675,12 @@ export function resolveBuildPlan(
     [...featureAvailability.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
   );
 
+  // The old registry's absent rate has always meant 60 Hz. This one-way
+  // adapter preserves that contract while every emitted plan names its rate.
+  const softwareProfile = profileHashProjection({ id: request.target, ...profile, tickHz: profile.tickHz ?? 60 });
   const content: ResolvedBuildPlanContent = {
+    profile: softwareProfile,
+    profileHash: hashPocketProfile(softwareProfile),
     app: {
       id: manifest.id,
       title: manifest.title,
@@ -662,6 +688,7 @@ export function resolveBuildPlan(
       entry: presentation.entry,
       output,
       framework: manifest.app.framework,
+      ...(manifest.app.theme !== undefined ? { theme: manifest.app.theme } : {}),
       ...(manifest.app.aot !== undefined ? { aot: manifest.app.aot } : {}),
       ...(manifest.app.model !== undefined ? { model: manifest.app.model } : {}),
       ...(manifest.app.recursionLimit !== undefined ? { recursionLimit: manifest.app.recursionLimit } : {}),

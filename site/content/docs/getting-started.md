@@ -273,17 +273,20 @@ app.)
 
 ## Build it
 
-Use the manifest path for product builds. It validates the app, resolves the
-target once, compiles target-specific assets, and dispatches the native backend:
+**`compile` validates the application and produces a version 2 `.pocket` package.**
+The runtime program owns native linking and device packaging. The checkout
+provides PSP and Vita commands for building a demo program:
 
 ```sh
-pocket build --target psp --manifest apps/my-app/pocket.json -- --release
-# hosts/psp/target/mipsel-sony-psp/release/EBOOT.PBP
+pocket compile --target psp --manifest apps/my-app/pocket.json
+pocket psp my-app --release
+# programs/psp/target/mipsel-sony-psp/release/EBOOT.PBP
 
 export VITASDK="$HOME/vitasdk"
 export PATH="$VITASDK/bin:$HOME/.cargo/bin:$PATH"
-pocket build --target vita --manifest apps/my-app/pocket.json -- --release
-# apps/my-app/dist/vita/my-app-main.vpk
+pocket compile --target vita --manifest apps/my-app/pocket.json
+pocket vita my-app --release
+# dist/vita/my-app-main.vpk
 ```
 
 Vita VPKs include PocketJS's default black 128x128 bubble icon and complete
@@ -293,7 +296,7 @@ a blank bubble or generic launch gate. Custom native hosts call
 assets override matching defaults while missing artwork continues to inherit
 PocketJS's complete set.
 
-[check, compile, build](/docs/cli/#check-compile-build) lists the options of
+[check, compile, build](/docs/cli/#check-and-compile) lists the options of
 the three commands and the `build` output of each target.
 
 For framework work, the lower-level compiler remains available:
@@ -382,7 +385,7 @@ pocket play vita gallery --fullscreen
 
 Vita3K is interactive here; `--fullscreen` controls the emulator window. The
 application still uses the profile's 480×272 logical viewport rendered at
-960×544 density 2. See the [Vita host guide](https://github.com/pocket-nexus/pocketjs/blob/main/hosts/vita/README.md)
+960×544 density 2. See the [Vita host guide](https://github.com/pocket-nexus/pocketjs/blob/main/programs/vita/README.md)
 for toolchain setup, key mappings, real-device installation, and the golden E2E.
 
 ## Next steps

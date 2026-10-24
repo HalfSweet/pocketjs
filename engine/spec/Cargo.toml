@@ -1,0 +1,8 @@
+[package]
+name = "pocket-spec"
+edition = "2021"
+description = "Generated PocketJS operation codes, data formats, and input constants"
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true

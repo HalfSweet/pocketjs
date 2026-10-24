@@ -1,0 +1,8 @@
+[package]
+name = "pocket-tex-cache"
+edition = "2021"
+description = "Versioned driver texture storage with submission-scoped retirement"
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true

@@ -1,89 +1,167 @@
 # Repository structure
 
-The tree mirrors the platform ontology from [RUNTIMES.md](RUNTIMES.md) —
-**Cores + Surfaces + Guest** — plus the compiler family, the contracts that
-bind the layers, and the products built on top. One axis per top-level
-directory; nothing else gets a top-level name.
+**Programs compose runtime instances, drivers and platform hooks.** Engine
+libraries hold contracts and shared mechanisms. Operating-system and SDK drivers
+live in `platforms/`; GPU mechanisms and DrawList drivers live in `devices/`.
 
-```
+```text
 pocketjs/
-├─ engine/       Cores: the Rust simulation cores
-│  ├─ core/       pocketjs-core — retained UI tree, taffy layout, damage + raster (standalone crate)
-│  ├─ backends/    platform render backends (ESP32-P4 PPA is a standalone no_std
-│  │              crate; gpui is the standalone native desktop backend with native
-│  │              text layout — docs/BACKENDS.md)
-│  ├─ wasm/       core compiled to wasm32 for web/sim hosts (standalone crate)
-│  ├─ ui-cabi/    no_std UI C ABI: software raster + GLES1/GLES2 backends (standalone crate)
-│  ├─ quickjs-c/  portable QuickJS guest driver used by native C hosts
-│  ├─ ios/        iOS C ABI and UIKit PocketSurfaceView
-│  ├─ pocket3d/   the 3D core family (bsp, cook, gu, vita, GLES2) + desktop examples
-│  ├─ crates/     non-3D engine crates: pocket-mod, pocket-ui-surface, pocket-ui-wgpu, pocket-vrm, pocket-widget
-│  └─ Cargo.toml  the desktop workspace root (core/, wasm/, ui-cabi/, and
-│                 console-toolchain crates are deliberately excluded and
-│                 standalone; see each crate's Cargo.toml for its toolchain)
-├─ hosts/        Surfaces: every embedding of the cores
-│  ├─ psp/        QuickJS + rust-psp EBOOT host
-│  ├─ vita/       Vita host
-│  ├─ esp32p4/    reusable ESP-IDF PPA adapter + component smoke build
-│  ├─ pocketbook/ PocketBook e-reader host (inkview, standalone lone-bin crate)
-│  ├─ nokia-e7/   Nokia E7 Qt/QuickJS host + visible toolchain probe
-│  ├─ ios-legacy/ UIKit host shared by the iPhone 2G and iPhone 4S ports
-│  ├─ ios-nativescript/ NativeScript iOS shell over engine/ios + @nativescript/pocketjs
-│  ├─ blackberry-classic/ input sampling shared by BlackBerry QNX and Android
-│  ├─ blackberry-classic-qnx/ BlackBerry 10 Core Native embedding
-│  ├─ desktop/    gpui window host — macos-app + linux-app (standalone lone-bin crate)
-│  ├─ web/        browser dev + Pocket System host (wasm core, isolated iframe Realms)
-│  └─ sim/        deterministic headless simulation host (docs/DETERMINISM.md)
-├─ framework/    Guest: @pocketjs/framework
-│  ├─ src/        the TS runtime (Solid + Vue Vapor renderers, components, input, osk…)
-│  └─ compiler/   the interpreted-path build pipeline (jsx-plugin, tailwind, pak)
-├─ microts/      MicroTS: Solid/Vue views and TypeScript models → View IR / Model IR → Rust
-│                (README.md is its entry point)
-├─ devices/      Pocket3D device kernels: pocket-vita-gxm, pocket-psp-ge, pocket-3ds-pica,
-│                pocket-web-wgpu (the browser: a Rust crate, and web/ for the page's modules)
-├─ pocket3d/     Pocket3D entry point: README.md with its design and a map of its code
-│                (devices/, engine/pocket3d/, site/pocket3d/); it holds no code
-├─ contracts/    single sources of truth binding the layers
-│  ├─ spec/       op contract, platform contracts, manifest + package spec, gen-rust + gen-c
-│  ├─ generated/  generated C contract headers consumed by native hosts
-│  └─ schema/     published JSON schemas (pocket-2.json)
-├─ apps/         demo apps (pocket.json manifests; built by tools/build.ts)
-├─ tools/        every command: build/dev/device/release bun scripts (flat),
-│                plus cli/ (@pocketjs/cli), psplink/, and
-│                symbian/ (isolated GCCE/Qt toolchain + CODA USB transport)
-├─ tests/        the test suite: *.test.ts flat at the root, plus
-│                e2e/ (PPSSPP, Vita3K drivers), goldens/{web,psp,vita}, tapes/, fixtures/
-├─ site/         pocketjs.dev (Cloudflare), plus nexus/ (pocket.nexus), pocket3d/ (3d.pocket.nexus)
-│                and microts/ (microts.pocket.nexus)
-├─ docs/         design docs (DESIGN, RUNTIMES, DETERMINISM, PLATFORM, …)
-├─ skills/       repo Claude skills
-├─ assets/       brand, fonts, shared art
-└─ README.md, CLAUDE.md, AGENTS.md — the only markdown that lives at root
+├─ Cargo.toml, Cargo.lock    shared dependency graph and lockfile
+├─ rust-toolchain.toml      fixed stable compiler for portable libraries
+├─ contracts/
+│  ├─ spec/                 formats, operations, driver ABI and profile schema
+│  ├─ generated/            generated C headers and package readers
+│  └─ schema/               application manifest JSON schema
+├─ engine/
+│  ├─ spec/                 generated no_std constants and ABI records
+│  ├─ drivers/              resource views and device-class contracts
+│  ├─ driver-kit/           Rust and C driver conformance checks
+│  ├─ core/                 retained UI tree, layout, text and animation
+│  ├─ render/               operation decoding, glyph pages, batches and caches
+│  ├─ raster/               software rendering
+│  ├─ present/              damage history and presentation transactions
+│  ├─ profile-build/        build-script support that embeds the exported profile
+│  ├─ package/              package, asset and font archive readers and hashing
+│  ├─ runtime/              instance lifecycle, admission, input and scheduling
+│  ├─ runtime-cabi/         instance C ABI and retained compatibility adapters
+│  ├─ guest-quickjs/        C guest lifecycle and generated operation bindings
+│  ├─ guest-rquickjs/       Rust guest lifecycle and generated operation bindings
+│  ├─ guest-web/            generated browser guest bindings
+│  ├─ modules/              media transport and shared offload queues
+│  ├─ backends/gpui/        desktop renderer and text integration
+│  ├─ ios/                 UIKit runtime integration
+│  ├─ crates/              module, UI embedding, text and widget libraries
+│  └─ pocket3d/            3D libraries and examples
+├─ devices/                 GPU mechanisms and DrawList renderers
+│  ├─ psp/ vita/ 3ds/       fixed-console GPU libraries
+│  ├─ gles/                 GLES traversal and GLES1/GLES2 pipelines
+│  └─ web/                  wgpu mechanism library and renderer
+├─ platforms/               OS, SDK and fixed-console drivers
+│  ├─ psp/ vita/ 3ds/       input, display, audio, I/O and system services
+│  ├─ gba/ rockbox/         display and input adapters
+│  ├─ web/ sim/             browser and deterministic service providers
+│  ├─ android/              JNI helpers, input queue, logging and clock
+│  ├─ linux/ posix/         DRM, fbdev, evdev, ALSA and transport
+│  └─ esp-idf/ zephyr/      SDK drivers, hooks and build descriptions
+├─ profiles/                software contracts identified by content hashes
+├─ programs/
+│  ├─ psp/ vita/ 3ds/       console entries and runtime configurations
+│  ├─ gba/ ipodnano/        fixed-console programs
+│  ├─ web/ sim/ desktop/    reference programs and their composition
+│  ├─ iphone2g/ iphone4s/   phone entries and runtime configurations
+│  ├─ ipodtouch4/ ipodtouch6/ music-player programs
+│  ├─ ios-simulator/        NativeScript shell and UIKit integration
+│  ├─ android/             shared Android application shell
+│  ├─ moto-g-play/ redmi-1s/ Android device runtime configurations
+│  ├─ meizu-m8/ nokia-e7/   Windows CE and Symbian programs
+│  ├─ blackberry-classic/   QNX program
+│  ├─ pocketbook/           reader program and InkView integration
+│  ├─ linux-kms/            Linux program with its own profile
+│  ├─ esp-idf/archive/      one Rust archive for the IDF composition
+│  └─ native/               compatibility C-shell composition and QuickJS glue
+├─ products/
+│  └─ 3ds/                  Link, launcher, camera and development product
+├─ framework/               guest APIs and application compiler
+├─ microts/                 TypeScript model and view compilation
+├─ tools/
+│  ├─ build/                executor, program recipes, bakers and toolchains
+│  ├─ packaging/            IDF, Zephyr, Buildroot and CMake adapters
+│  ├─ release/              archive generation, verification and retrieval
+│  ├─ repack/               application replacement in runtime bundles
+│  ├─ dev/                  development servers
+│  └─ cli/                  installed command entry points
+├─ zephyr/module.yml        west module entry
+├─ tests/                   contracts, fixtures, integration and E2E tests
+│  └─ esp-idf/              IDF sample programs and test harnesses
+├─ apps/                    applications with pocket.json manifests
+├─ assets/                  maintained fonts, artwork and branding
+├─ docs/ site/              reference documentation and website
+└─ .pocket-build/           ignored build and validation output
 ```
 
-## Placement rules
+**Phone, music-player, reader and console programs live in this repository.**
+Shared mechanisms belong in `engine/`, OS and SDK adapters in `platforms/`,
+and GPU mechanisms in `devices/`. Programs own their entries and driver
+composition; profiles describe the software contract. Device age and product
+category do not determine directory or repository ownership. See
+[Device native builds](DEVICE_BUILDS.md).
 
-New things go where the axis says — never invent a top-level directory:
+**The 3DS product lives in `products/3ds`.**
+Its private package inspection, Link, camera, launcher and development services
+are separate from the file-backed reference program in `programs/3ds`. Both
+compose the same Runtime, generated guest and PICA driver.
 
-- **A new Rust simulation core** → `engine/` (workspace member if it builds on
-  desktop; excluded standalone crate if it needs a console toolchain).
-- **A new platform embedding** (ESP32, 3DS, …) → `hosts/<platform>/`.
-- **A new demo** → `apps/<name>/` with a `pocket.json`. Standalone products
-  keep the `pocket-<name>` separate-repo convention and do not move in.
-- **A new command** → `tools/<name>.ts`. No single-file top-level directories.
-- **A new cross-layer contract** → `contracts/spec/`; generated code stays
-  generated (`gen-rust.ts` style), never hand-forked per layer.
-- **A new design doc** → `docs/`. Root keeps only README/CLAUDE/AGENTS.
+## Ownership and dependency rules
 
-## Invariants the layout preserves
+**`engine/runtime` owns application instances.** Each instance owns its package,
+guest, input encoding and display/renderer registrations. `engine/runtime-cabi`
+exposes instance handles. Compatibility entry points delegate to this state;
+`programs/native/cabi` supplies the historical archive name and program
+composition. `programs/web/wasm` compiles the browser composition against the
+same runtime and C ABI.
 
-- **npm surface is frozen**: `@pocketjs/framework/*` export *keys* never
-  change; the `exports`/`files` maps in package.json absorb internal moves.
-- **Cargo stays non-workspace where toolchains demand it**: `engine/core`,
-  `engine/wasm`, `engine/ui-cabi`, `engine/backends/rgb565`, `hosts/psp`,
-  `hosts/vita`, `hosts/pocketbook`, and the gu/vita 3D crates each stand alone
-  with their own lockfiles. `engine/Cargo.toml` is the one desktop workspace.
-- **Moves are `git mv`** — history stays traceable.
+**Platform drivers do not depend on programs or the UI core.** Drivers receive
+resource views, input builders and transport buffers through their interfaces.
+The font archive reader in `pocket-package` lets an I/O worker load glyphs
+without linking the UI tree. A program selects implementations in code and
+provides its memory budgets and private services.
+
+**DrawList renderers consume `FrameInput` and `RenderResources`.** GPU mechanism
+libraries retain their device interfaces. `pocket-present` owns damage history
+and orders render completion, display transfer and resource retirement.
+`pocket-ui-wgpu` adapts existing desktop embedding APIs to `pocket-web-render`.
+
+**`contracts/spec/ui-ops.ts` defines 61 public operations and six private guest
+hooks.** `tools/ui-bindings.ts` generates the runtime dispatcher and guest
+operation descriptors. Missing service providers leave their guest methods
+absent. Package format 2 records profile hashes; binding generation 12 identifies
+the generated script interface. Driver and runtime C tables use `struct_size`
+prefix compatibility.
+
+## Build and distribution
+
+**One root Cargo workspace shares one lockfile.** Library, platform and program
+crates inherit versioned dependencies. Default members build on the desktop;
+console recipes select a package, target and compiler. Test and fuzz harnesses
+with isolated dependency graphs retain their own lockfiles. Stable is fixed in
+`rust-toolchain.toml`; `tools/build/toolchains/rust.ts` supplies one build-std
+nightly, and `esp.ts` pins the Xtensa compiler.
+
+**Application compilation and native builds have separate inputs.** `pocket.json`
+describes an application. A program's `pocket.runtime-config.ts` imports its
+profile and declares native build steps. The executor verifies application
+inputs, compiler identity and source hashes before writing a build receipt.
+IDF, Zephyr and Buildroot retain ownership of their firmware configuration.
+
+**SDK exports contain one no_std Rust archive.** `pocket sdk export` retrieves a
+verified release; `pocket sdk build` creates a local candidate. Canonical headers,
+C guest sources and a hash manifest accompany the archive. CMake consumers use
+`Pocket::runtime` and `Pocket::guest_quickjs`; see [SDK.md](SDK.md).
+
+The npm package contains the framework, compiler, profiles, command tools,
+generated contracts and browser assets. **Native source is distributed through
+Cargo and source releases.** Web assets preserve `programs/web` and
+`platforms/web` paths so module imports and worker URLs resolve in deployed
+artifacts. `tools/build/web-assets.ts` stages these files for programs, the site
+and Pocket3D consumers.
+
+## Adding code
+
+- Add a shared mechanism under `engine/` and expose the types it needs.
+- Add an OS or SDK driver under `platforms/`; add GPU code under `devices/`.
+- Put composition and entry points under `programs/`, with a runtime config.
+- Keep product-specific profiles with the product; tree-owned profiles live in
+  `profiles/`.
+- Put compilation, packaging and release orchestration under `tools/`.
+- Put application demos under `apps/`, with a `pocket.json` manifest.
+- Define contracts in `contracts/spec/` and generate language bindings.
+- Keep run logs, screenshots and receipts under ignored
+  `.pocket-build/validation/<task>/<run>/`. Maintained fixtures belong in `tests/`.
+
+Directory moves preserve public framework import keys through the package export
+map. Device programs use the shared workspace and lockfile. A separate consumer
+can still use the exported SDK or versioned Rust crates without moving the
+maintained device programs out of this repository.
 
 Solid AOT admission, contract mapping and JSX lowering live in `microts/compiler/aot-solid-frontend.ts`. Both front ends share `aot-contract.ts`, `aot-program.ts` and the Rust generator. The reference is `site/content/docs/microts-solid.md`; `apps/solid-aot-lab/` contains the TSX view and compiled TypeScript model example.
 

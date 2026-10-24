@@ -110,7 +110,7 @@ beforeAll(() => {
       define("TRANSACTION_FILE", transaction),
       define("TRANSACTION_TEMP", transactionTemp),
       define("ACCEPTANCE_RECORD", acceptance),
-      join(repository, "hosts/iphone2g/device_tool.c"),
+      join(repository, "programs/iphone2g/device_tool.c"),
       "-o",
       helper,
     ],

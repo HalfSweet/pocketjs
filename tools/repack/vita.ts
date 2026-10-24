@@ -16,7 +16,7 @@
 // The entries are files only, param.sfo and eboot.bin first, as vita-pack-vpk
 // writes them. At startup the runtime reads app0:app.pocket, checks the
 // footer, the vita variant and host ABI 2, and runs the game
-// (hosts/vita/src/package_file.rs). It has no compiled app id: the file is
+// (programs/vita/src/package_file.rs). It has no compiled app id: the file is
 // the app.
 
 import { encodeIndexedPng, quantizeRgb } from "./shared/palette.ts";
@@ -94,7 +94,7 @@ export async function repackVita(input: RepackInput): Promise<Uint8Array> {
   };
   const eboot = file(VITA_RUNTIME_FILE);
   const liveArea = VITA_LIVEAREA.map((name) => ({ name, data: file(name) }));
-  const pocket = admitPocket(input.pocket, runtime, input.identity);
+  const pocket = await admitPocket(input.pocket, runtime, input.identity);
   const titleId = await vitaTitleIdFor(input.identity.id);
   const icon = input.identity.icon ? await vitaIcon0(input.identity.icon) : file(VITA_ICON);
   return writeZip([

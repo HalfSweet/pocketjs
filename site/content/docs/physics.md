@@ -280,9 +280,8 @@ from positions the input already reports and from the spill's launch
 parabolas. It reads one pose per frame for each speech bubble riding a toy,
 at most two, which it keeps upright and on screen.
 
-```sh
-bun apps/nexus-touch/gen-art.ts                            # re-bake the art from the homepage
-POCKETJS_IPODTOUCH4_APP=nexus-touch bun ipodtouch4 build   # dist/ipodtouch4/PocketNexus.app
-bun tools/symbian.ts build app --manifest apps/nexus-touch/pocket.symbian.json \
-  --frame-rate 60                                          # dist/symbian/nexus-touch-e7.sis
-```
+The maintained demo lives in `apps/nexus-touch`. **The iPod touch and Symbian
+programs use the device profiles and native recipes in this repository.**
+Compile the demo against the selected program's runtime configuration, then
+pass its `.pocket` package to the native build. Artwork can be regenerated
+with `bun apps/nexus-touch/gen-art.ts`.

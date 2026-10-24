@@ -24,8 +24,8 @@
 // names carry a hash of the 57 px PNG, so an update with a new icon is not
 // shown from SpringBoard's icon cache.
 
-import { decodePng, encodePng } from "./shared/png.ts";
-import { flattenRgba, squareIcon } from "./shared/scale.ts";
+import { decodePng, encodePng } from "../../tools/repack/shared/png.ts";
+import { flattenRgba, squareIcon } from "../../tools/repack/shared/scale.ts";
 import {
   admitPocket,
   checkIdentity,
@@ -33,8 +33,8 @@ import {
   sha256Hex,
   type RepackIdentity,
   type RepackInput,
-} from "./shared/runtime.ts";
-import { writeZip, type ZipInput } from "./shared/zip.ts";
+} from "../../tools/repack/shared/runtime.ts";
+import { writeZip, type ZipInput } from "../../tools/repack/shared/zip.ts";
 
 export const IPOD_RUNTIME_TARGET = "ipodtouch4-dev";
 export const IPOD_RUNTIME_EXECUTABLE = "PocketJSRuntime";
@@ -128,7 +128,7 @@ export async function repackIPod(input: RepackInput): Promise<Uint8Array> {
   for (const name of IPOD_RUNTIME_FILES) {
     if (!(name in runtime.files)) throw new Error(`repack ipod: the runtime does not list ${name}`);
   }
-  const pocket = admitPocket(input.pocket, runtime, input.identity);
+  const pocket = await admitPocket(input.pocket, runtime, input.identity);
   const viewport = pocket.plan.viewport as { logical?: number[]; physical?: number[]; rasterDensity?: number } | undefined;
   const logical = viewport?.logical ?? [];
   if (!SURFACES.some(([width, height]) => logical[0] === width && logical[1] === height) || viewport?.rasterDensity !== 2) {

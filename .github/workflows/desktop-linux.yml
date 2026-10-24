@@ -2,17 +2,26 @@ name: Linux portable renderer
 
 on:
   pull_request:
-    paths:
+    paths: &paths
+      - ".bun-version"
       - ".github/workflows/desktop-linux.yml"
       - "contracts/spec/**"
       - "engine/core/**"
+      - "engine/spec/**"
+      - "engine/drivers/**"
+      - "engine/raster/**"
+      - "engine/present/**"
+      - "engine/package/**"
+      - "engine/modules/media/**"
+      - "engine/render/draw-ops/**"
+      - "engine/render/glyph-pages/**"
       - "engine/crates/pocket-mod/**"
       - "engine/crates/pocket-ui-surface/**"
       - "engine/crates/pocket-text/**"
       - "framework/src/text-layout.ts"
       - "framework/src/offload.ts"
-      - "hosts/web/*offload*.js"
-      - "hosts/web/text-*"
+      - "platforms/web/*offload*.js"
+      - "platforms/web/text-*"
       - "tools/*offload*"
       - "tools/companion-session.ts"
       - "tests/offload-provider.test.ts"
@@ -21,47 +30,22 @@ on:
       - "tools/text-*"
       - "tests/text-layout-client.test.ts"
       - "apps/text-offload/**"
-      - "hosts/desktop/**"
+      - "programs/desktop/**"
       - "engine/crates/pocket-ui-wgpu/**"
+      - "devices/web/pocket-web-render/**"
+      - "engine/runtime/**"
+      - "engine/guest-rquickjs/**"
       - "engine/pocket3d/crates/pocket3d/**"
-      - "hosts/web/app-instance.*"
-      - "hosts/web/system-engine.js"
-      - "hosts/web/wasm-ops.js"
+      - "programs/web/app-instance.*"
+      - "programs/web/system-engine.js"
+      - "platforms/web/wasm-ops.js"
       - "framework/src/manifest/**"
       - "tests/platform-contracts.test.ts"
       - "tests/pocket-system.test.ts"
       - "tests/web-system-host.test.ts"
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/desktop-linux.yml"
-      - "contracts/spec/**"
-      - "engine/core/**"
-      - "engine/crates/pocket-mod/**"
-      - "engine/crates/pocket-ui-surface/**"
-      - "engine/crates/pocket-text/**"
-      - "framework/src/text-layout.ts"
-      - "framework/src/offload.ts"
-      - "hosts/web/*offload*.js"
-      - "hosts/web/text-*"
-      - "tools/*offload*"
-      - "tools/companion-session.ts"
-      - "tests/offload-provider.test.ts"
-      - "tests/companion-session.test.ts"
-      - "tests/fixtures/offload-ready-worker.ts"
-      - "tools/text-*"
-      - "tests/text-layout-client.test.ts"
-      - "apps/text-offload/**"
-      - "hosts/desktop/**"
-      - "engine/crates/pocket-ui-wgpu/**"
-      - "engine/pocket3d/crates/pocket3d/**"
-      - "hosts/web/app-instance.*"
-      - "hosts/web/system-engine.js"
-      - "hosts/web/wasm-ops.js"
-      - "framework/src/manifest/**"
-      - "tests/platform-contracts.test.ts"
-      - "tests/pocket-system.test.ts"
-      - "tests/web-system-host.test.ts"
+    paths: *paths
   workflow_dispatch: {}
 
 permissions:
@@ -81,20 +65,23 @@ jobs:
           clang cmake pkg-config libwayland-dev libx11-dev libx11-xcb-dev
           libxkbcommon-dev libxkbcommon-x11-dev libudev-dev libdrm-dev libgbm-dev
           libxcb-shape0-dev libxcb-xfixes0-dev xvfb xauth libvulkan1 mesa-vulkan-drivers
-
+      - name: Read fixed Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: echo "version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ steps.rust-pin.outputs.version }}
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            engine/crates/pocket-text
-            hosts/desktop
-            engine/wasm
+          workspaces: .
 
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
 
       - run: bun install --frozen-lockfile
 
@@ -115,22 +102,26 @@ jobs:
 
       - name: Rust format, lint and tests
         run: |
-          cargo fmt --check --manifest-path hosts/desktop/Cargo.toml
-          cargo clippy --locked --manifest-path hosts/desktop/Cargo.toml -- -D warnings
-          cargo test --locked --manifest-path hosts/desktop/Cargo.toml
-          cargo test --locked --manifest-path hosts/desktop/Cargo.toml -- --ignored
-          cargo test --locked --manifest-path engine/crates/pocket-text/Cargo.toml
-          cargo test --locked --manifest-path engine/wasm/Cargo.toml
+          cargo fmt --check --manifest-path Cargo.toml -p pocket-desktop-host
+          cargo clippy --locked --manifest-path Cargo.toml -p pocket-desktop-host --no-deps -- -D warnings
+          cargo test --locked --manifest-path Cargo.toml -p pocket-desktop-host
+          cargo test --locked --manifest-path Cargo.toml -p pocket-desktop-host -- --ignored
+          cargo test --locked --manifest-path Cargo.toml -p pocket-text
+          cargo test --locked --manifest-path Cargo.toml -p pocketjs-wasm
           bun tools/text-wasm.ts
 
+      # The host compiles in the exported linux-app profile; a build without
+      # one stops at startup.
       - name: Build linux-app release host
-        run: cargo build --release --locked --manifest-path hosts/desktop/Cargo.toml
+        run: |
+          bun tools/pocket.ts profile export --target linux-app --out .pocket-build/linux-app-profile
+          POCKETJS_PROFILE_RS="$PWD/.pocket-build/linux-app-profile/pocket_profile.rs" cargo build --release --locked --manifest-path Cargo.toml -p pocket-desktop-host
 
       - name: Launch linux-app under X11
         env:
           POCKETJS_DIST: ${{ github.workspace }}/dist
         run: >-
-          timeout 30s xvfb-run -a hosts/desktop/target/release/pocket-desktop-host
+          timeout 30s xvfb-run -a target/release/pocket-desktop-host
           --app note-main --title Note --viewport 720x480 --density 1
           --companions note --editor --file /tmp/pocket-note.md
           --quit-after 20

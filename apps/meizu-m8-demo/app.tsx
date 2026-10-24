@@ -1,4 +1,4 @@
-import Hero from "../hero/app.tsx";
+import Hero from "../../apps/hero/app.tsx";
 import { reportAppAction } from "@pocketjs/framework/host";
 
 export default function MeizuM8Hero() {

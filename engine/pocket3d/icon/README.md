@@ -55,7 +55,7 @@ $(BUILD)/game.smdh: $(ICON) $(SMALL_ICON)
 	smdhtool --create '$(TITLE)' '$(DESCRIPTION)' '$(AUTHOR)' $(ICON) $@ $(SMALL_ICON)
 ```
 
-PocketJS's own 3DS Makefile (`hosts/3ds/Makefile`) takes the same two
+PocketJS's own 3DS Makefile (`products/3ds/Makefile`) takes the same two
 variables, `ICON` and `SMALL_ICON`. Its iPod touch packager
 (`tools/ipodtouch4.ts`) takes `icon` in the application's description: give it
 `ios/Icon@2x.png`. That packager writes the 57-pixel file by reducing the one
@@ -103,7 +103,7 @@ by the build, and the copy is listed in `.gitignore`.
 
 ```sh
 bun tools/pocket3d-icon.ts --preview   # the ten files, and a sheet under .pocket-build/pocket3d-icon/
-bun tools/pocket3d-icon.ts --check     # what tests/pocket3d-icon.test.ts runs
+bun tools/pocket3d-icon.ts --check     # compare generated icons with the saved files
 ```
 
 The command rasterizes with `@napi-rs/canvas` at four samples per pixel in each

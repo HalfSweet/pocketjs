@@ -65,33 +65,34 @@ first_party_flags=(
 
 "$qcc" "${first_party_flags[@]}" \
   -DPOCKETJS_TARGET_ID=\""$POCKETJS_TARGET_ID"\" \
+  -include /build/pocket_host_profile.h \
   -DPOCKETJS_HOST_ABI="$POCKETJS_HOST_ABI" \
   -DPOCKET_RASTER_DENSITY="$POCKET_RASTER_DENSITY" \
-  -I/repo/engine/quickjs-c \
-  -I/repo/engine/ui-cabi/include \
+  -I/repo/programs/native/quickjs \
+  -I/repo/engine/guest-quickjs/include -I/repo/programs/native/cabi/include \
   -I/repo/contracts/generated \
   -I"$quickjs" \
-  -c /repo/engine/quickjs-c/pocket_runtime.c \
+  -c /repo/programs/native/quickjs/pocket_runtime.c \
   -o "$objects/pocket_runtime.o"
 
 "$qcc" "${first_party_flags[@]}" \
-  -I/repo/hosts/blackberry-classic \
-  -I/repo/contracts/generated \
-  -c /repo/hosts/blackberry-classic/pocket_input.c \
-  -o "$objects/pocket_input.o"
+  -I/repo/engine/guest-quickjs/include -I/repo/contracts/generated -I"$quickjs" \
+  -c /repo/engine/guest-quickjs/src/guest.c -o "$objects/pocket_guest_quickjs.o"
 
 "$qcc" "${first_party_flags[@]}" \
-  -c /repo/engine/quickjs-c/rust_eh_personality.c \
-  -o "$objects/rust_eh_personality.o"
+  -I/repo/engine/runtime/include \
+  -I/repo/contracts/generated \
+  -c /repo/engine/runtime/compat/input.c \
+  -o "$objects/pocket_input.o"
 
 "$qcc" "${first_party_flags[@]}" \
   -DPOCKET_BUILD_ID=\""$POCKET_BUILD_ID"\" \
   -DPOCKET_LOGICAL_WIDTH="$POCKET_LOGICAL_WIDTH" \
   -DPOCKET_LOGICAL_HEIGHT="$POCKET_LOGICAL_HEIGHT" \
-  -I/repo/engine/quickjs-c \
-  -I/repo/hosts/blackberry-classic \
+  -I/repo/programs/native/quickjs \
+  -I/repo/engine/runtime/include \
   -I/repo/contracts/generated \
-  -c /repo/hosts/blackberry-classic-qnx/main.c \
+  -c /repo/programs/blackberry-classic/main.c \
   -o "$objects/main.o"
 
 "$qcc" "${qnx_target[@]}" \
@@ -103,8 +104,8 @@ first_party_flags=(
   -o "$staging/pocketjs-classic" \
   "$objects/main.o" \
   "$objects/pocket_runtime.o" \
+  "$objects/pocket_guest_quickjs.o" \
   "$objects/pocket_input.o" \
-  "$objects/rust_eh_personality.o" \
   /build/libquickjs.a \
   /build/libpocketjs_symbian_core.a \
   -lbps \

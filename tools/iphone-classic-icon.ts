@@ -1,4 +1,4 @@
-import { rasterizeIconSvg } from "./icon-raster.ts";
+import { rasterizeIconSvg } from "../tools/icon-raster.ts";
 import { createCanvas, loadImage, type Canvas } from "@napi-rs/canvas";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 const REPOSITORY = fileURLToPath(new URL("..", import.meta.url));
 
 /** Precomposed classic iOS icons carry their own transparent corner mask. */
-export const IPHONE_CLASSIC_ICON_SOURCE = resolve(REPOSITORY, "hosts/iphone2g/Icon.png");
-export const IPHONE_CLASSIC_RETINA_SOURCE = resolve(REPOSITORY, "hosts/iphone4s/Icon.svg");
+export const IPHONE_CLASSIC_ICON_SOURCE = resolve(REPOSITORY, "programs/iphone2g/Icon.png");
+export const IPHONE_CLASSIC_RETINA_SOURCE = resolve(REPOSITORY, "programs/iphone4s/Icon.svg");
 export const IPHONE_CLASSIC_ICON_FILE = "PocketClassic-v6.png";
 export const IPHONE_CLASSIC_RETINA_ICON_FILE = "PocketClassic-v6@2x.png";
 export const IPHONE_USER_ICON_FILE = "PocketClassic-User-v7.png";

@@ -1,5 +1,5 @@
 import { reportAppAction } from "@pocketjs/framework/host";
-import Hero from "../hero/app.tsx";
+import Hero from "../../apps/hero/app.tsx";
 
 export default function IPhone4SHero() {
   return (

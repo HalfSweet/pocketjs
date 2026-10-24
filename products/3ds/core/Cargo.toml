@@ -1,0 +1,20 @@
+# Product runtime archive with private recovery package inspection.
+# The minimal program links pocket-runtime-cabi without this wrapper.
+[package]
+name = "pocketjs-3ds-core"
+edition = "2021"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PocketJS 3ds core component"
+publish = false
+
+[lib]
+name = "pocketjs_3ds_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+pocket-runtime-cabi = { workspace = true }
+pocket-package = { workspace = true, default-features = true }

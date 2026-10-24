@@ -277,15 +277,16 @@ See also: [Architecture](https://pocketjs.pocket.nexus/docs/architecture/) ·
 
 PocketJS has booted on every operating system below, on the real machine. What
 changes between them is one native host, never the application, and each row
-links to the post or pull request that brought it up. Pocket Museum repairs and
-maintains the older machines used to develop and test PocketJS.
+links to the post or pull request that brought it up. Device programs, profiles
+and build tools are maintained in this repository; see
+[Device native builds](./docs/DEVICE_BUILDS.md).
 
 | Operating system | Native host | Receipt |
 | --- | --- | --- |
 | PSP system software | MIPS, 32 MB | [Introducing PocketJS](https://pocketjs.pocket.nexus/blog/introducing-pocketjs/) |
 | PS Vita system software | ARM, GXM | [Twice the pixels, zero forks](https://pocketjs.pocket.nexus/blog/pocketjs-on-ps-vita/) |
 | iPhone OS 3.1.3 | ARMv6, GL ES 1.1 | [The first iPhone](https://pocketjs.pocket.nexus/blog/pocketjs-on-the-first-iphone/) |
-| iOS 6.1.3 | ARMv7 | [`hosts/iphone4s`](./hosts/iphone4s) |
+| iOS 6.1.3 | ARMv7 | [iPhone 4S runbook](./docs/IPHONE4S.md) |
 | iOS 12.5.8 | arm64 | [#278](https://github.com/pocket-nexus/pocketjs/pull/278) |
 | iOS, current | NativeScript host | [#256](https://github.com/pocket-nexus/pocketjs/pull/256) |
 | macOS | Metal window and widget | [#293](https://github.com/pocket-nexus/pocketjs/pull/293) |
@@ -358,13 +359,17 @@ scaffolding options and target toolchains:
 ```sh
 bun add -g @pocketjs/cli       # or: npm install -g @pocketjs/cli
 pocket target add psp          # install the PSP toolchain the framework pins
-pocket create my-app
-pocket check --target psp --manifest apps/my-app/pocket.json
-pocket build --target psp --manifest apps/my-app/pocket.json -- --release
+pocket create my-app           # a standalone project; `bun run check` and `bun run build` wrap the CLI
+cd my-app && bun install
+bun run build                  # pocket compile: the application's .pocket package
 ```
 
-Vita packaging additionally requires VitaSDK and the pinned Rust toolchain
-documented in [`hosts/vita/README.md`](./hosts/vita/README.md). Guest builds can
+**The native device program builds from a checkout:** `pocket build --target
+psp --pocket <application.pocket> --out dist/psp` embeds a compiled package
+in the PSP program; `pocket psp <app> --release` does the same for a demo
+under `apps/`. Vita packaging additionally requires VitaSDK and the pinned
+Rust toolchain documented in
+[`programs/vita/README.md`](./programs/vita/README.md). Guest builds can
 be packaged as inspectable, target-thinnable
 [`.pocket` files](./docs/PLATFORM.md) instead of per-port directories. The
 [Getting started](https://pocketjs.pocket.nexus/docs/getting-started/) guide
@@ -411,8 +416,10 @@ repository or the Rust AOT build.
 | [`pocket3d/`](./pocket3d/) | The Pocket3D entry point: its design and a map of where its code lives |
 | [`microts/`](./microts/) | The MicroTS ahead-of-time compiler |
 | [`contracts/`](./contracts/) | Generated wire specs, capability registry, manifests, build plans and package formats |
-| [`hosts/`](./hosts/) | PSP, Vita, 3DS, web, desktop, e-reader, phone and MCU host integrations |
-| [`hosts/esp-idf/`](./hosts/esp-idf/) | Composable package, QuickJS, UI, RGB565, PPA and runner components for P4/S3 firmware |
+| [`programs/`](./programs/) | Runtime composition, entry points and native build recipes |
+| [`profiles/`](./profiles/) | Software contracts identified by content hashes |
+| [`platforms/`](./platforms/) | Operating-system, SDK and fixed-console drivers |
+| [`platforms/esp-idf/`](./platforms/esp-idf/) | Runtime, QuickJS, display, PPA, input and runner components |
 | [`apps/`](./apps/) | Framework demos and system applications used by the launcher and acceptance suites |
 | [`tools/`](./tools/) | Build, package, launcher, device, DevTools, benchmark and release commands |
 | [`tests/`](./tests/) | Contract, compiler, simulation, emulator, package and golden verification |

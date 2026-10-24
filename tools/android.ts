@@ -1,3 +1,7 @@
+import { repositoryPath, REPOSITORY_ROOT } from "./repository.ts";
+import motoToolchain from "./build/toolchains/moto-g-play.ts";
+import redmiToolchain from "./build/toolchains/redmi-1s.ts";
+import { applicationBundle, prepareCompiledApplication } from "./build/programs/application.ts";
 import {
   cpSync,
   copyFileSync,
@@ -11,10 +15,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   buildGuestBundle,
-  buildGuestBundleFromPlan,
   ensureQuickJsCheckout,
   type GuestBundle,
   type GuestBundleRequest,
@@ -24,7 +26,6 @@ import {
   printCheck,
   quickJsCheckout,
   quickJsCheckoutStatus,
-  readGuestBundle,
   renderTemplate,
   runCommand,
   sha256File,
@@ -33,11 +34,16 @@ import {
 
 import { MOTO_G_PLAY_CONTRACTS, MOTO_G_PLAY_TARGET, resolveMotoGPlayBuildPlan } from "./moto-g-play-profile.ts";
 import { REDMI_1S_CONTRACTS, REDMI_1S_TARGET, resolveRedmi1sBuildPlan } from "./redmi-1s-profile.ts";
-import { ANDROID_DEFAULT_ICON, bakeAndroidLauncherIcons } from "./android-icon.ts";
+import { ANDROID_DEFAULT_ICON, bakeAndroidLauncherIcons } from "../tools/android-icon.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
+import type { PocketProfile } from "../framework/src/profile.ts";
+import redmiProfile from "../profiles/redmi-1s-dev.ts";
+import motoProfile from "../profiles/moto-g-play-dev.ts";
+import { writeHostProfileHeader } from "../tools/host-profile.ts";
 
 /** The target values the native library is compiled with: the same for every app of a profile. */
 interface NativeInputs {
+  readonly profile: PocketProfile;
   readonly target: string;
   readonly hostAbi: number;
   readonly rasterDensity: number;
@@ -45,10 +51,10 @@ interface NativeInputs {
 }
 
 /**
- * One Android host (hosts/android), built for a named device profile. A
+ * One Android host (programs/android), built for a named device profile. A
  * profile is its target id, the resolver of that target, the target's
  * contract (where `runtime` reads the native inputs), and the toolchain file
- * `tools/cli/<profile>-toolchain.json`.
+ * `tools/build/toolchains/<profile>/manifest.json`.
  */
 const PROFILES: Readonly<Record<string, {
   readonly target: string;
@@ -58,22 +64,24 @@ const PROFILES: Readonly<Record<string, {
   "moto-g-play": {
     target: MOTO_G_PLAY_TARGET,
     resolvePlan: resolveMotoGPlayBuildPlan,
-    nativeInputs: () => contractInputs(MOTO_G_PLAY_TARGET, MOTO_G_PLAY_CONTRACTS.targets[MOTO_G_PLAY_TARGET]),
+    nativeInputs: () => contractInputs(motoProfile, MOTO_G_PLAY_CONTRACTS.targets[MOTO_G_PLAY_TARGET]),
   },
   "redmi-1s": {
     target: REDMI_1S_TARGET,
     resolvePlan: resolveRedmi1sBuildPlan,
-    nativeInputs: () => contractInputs(REDMI_1S_TARGET, REDMI_1S_CONTRACTS.targets[REDMI_1S_TARGET]),
+    nativeInputs: () => contractInputs(redmiProfile, REDMI_1S_CONTRACTS.targets[REDMI_1S_TARGET]),
   },
 };
-function contractInputs(target: string, contract: {
+function contractInputs(profile: PocketProfile, contract: {
   readonly hostAbi: number;
   readonly display: { readonly logicalViewports: readonly (readonly [number, number])[]; readonly rasterDensity: number };
 }): NativeInputs {
+  const target = profile.id;
   if (contract.display.logicalViewports.length !== 1) {
     throw new Error(`${target}: a runtime is built for one logical viewport, and the contract lists ${contract.display.logicalViewports.length}`);
   }
   return {
+    profile,
     target,
     hostAbi: contract.hostAbi,
     rasterDensity: contract.display.rasterDensity,
@@ -91,7 +99,8 @@ if (!(profile in PROFILES)) {
 }
 const LABEL = `PocketJS Android (${profile})`;
 const { target, resolvePlan } = PROFILES[profile];
-const repository = fileURLToPath(new URL("..", import.meta.url));
+const repository = REPOSITORY_ROOT;
+
 const command = argv.find(a => !a.startsWith("--")) ?? "doctor";
 /** A resolved plan for the profile's target, in place of the toolchain file's manifest. */
 const planOption = option("plan");
@@ -111,12 +120,7 @@ interface AndroidAbi {
   readonly cFlags?: readonly string[];
   readonly linkFlags?: readonly string[];
 }
-const toolchain = JSON.parse(
-  readFileSync(
-    join(repository, `tools/cli/${profile}-toolchain.json`),
-    "utf8",
-  ),
-) as {
+const toolchain = (profile === "moto-g-play" ? motoToolchain : redmiToolchain) as {
   readonly toolchainVersion: string;
   readonly cachePath: string;
   readonly quickjs: {
@@ -179,7 +183,7 @@ const androidJar = join(
   `android-${toolchain.android.apiLevel}`,
   "android.jar",
 );
-const appHost = join(repository, "hosts/android/app");
+const appHost = join(repository, "programs/android/app");
 const build = join(repository, `.pocket-build/${profile}`);
 const staging = join(build, "staging");
 const appOutput = outOption ? resolve(outOption) : join(repository, toolchain.app.output);
@@ -395,7 +399,7 @@ function compileActivity(): void {
     `/android-sdk/platforms/android-${toolchain.android.apiLevel}/android.jar`,
     "-d",
     "/build/classes",
-    "/repo/hosts/android/app/src/dev/pocketnexus/android/PocketActivity.java",
+    "/repo/programs/android/app/src/dev/pocketnexus/android/PocketActivity.java",
   ]);
   runJava(["jar", "cf", "/build/classes.jar", "-C", "/build/classes", "."]);
   runJava([
@@ -520,15 +524,16 @@ function buildRustCore(abi: AndroidAbi): string {
       "--locked",
       "--target",
       abi.rustTarget,
-      "--features",
-      "bare-platform",
+      "--no-default-features", "--features",
+      "standalone-extension-provider,bare-platform",
       "--target-dir",
       rustTarget,
     ],
-    join(repository, "engine/ui-cabi"),
+    repositoryPath("programs/native/cabi"),
     {
       ...process.env,
       CARGO_PROFILE_RELEASE_LTO: "false",
+      CARGO_PROFILE_RELEASE_PANIC: "abort",
       [`CARGO_TARGET_${abi.rustTarget.toUpperCase().replace(/-/g, "_")}_LINKER`]: clangFor(abi),
     },
   );
@@ -588,31 +593,40 @@ function buildNativeLibrary(abi: AndroidAbi, inputs: NativeInputs, quickJsLibrar
     "-Werror",
     "-Wno-unused-parameter",
     "-DPOCKET_OFFLOAD_POSIX",
-    `-I${join(repository, "hosts/shared")}`,
+    `-I${repositoryPath("platforms/linux/offload")}`,
+    `-I${repositoryPath("engine/modules/offload/include")}`,
   ];
   const portableRuntime = join(objects, "pocket_runtime.o");
   mustRun(clang, [
     ...cFlags,
+    "-include", writeHostProfileHeader(objects, inputs.profile),
     `-DPOCKETJS_TARGET_ID="${inputs.target}"`,
     `-DPOCKETJS_HOST_ABI=${inputs.hostAbi}`,
     `-DPOCKET_RASTER_DENSITY=${inputs.rasterDensity}`,
-    `-I${join(repository, "engine/quickjs-c")}`,
-    `-I${join(repository, "engine/ui-cabi/include")}`,
-    `-I${join(repository, "contracts/generated")}`,
+    `-I${repositoryPath("programs/native/quickjs")}`,
+    `-I${repositoryPath("programs/native/cabi/include")}`,
+    `-I${repositoryPath("engine/guest-quickjs/include")}`,
+    `-I${repositoryPath("contracts/generated")}`,
     `-I${quickJs.source}`,
     "-c",
-    join(repository, "engine/quickjs-c/pocket_runtime.c"),
+    repositoryPath("programs/native/quickjs/pocket_runtime.c"),
     "-o",
     portableRuntime,
   ]);
+  const guestAdapter = join(objects, "pocket_guest_quickjs.o");
+  mustRun(clang, [...cFlags,
+    `-I${repositoryPath("engine/guest-quickjs/include")}`,
+    `-I${repositoryPath("contracts/generated")}`, `-I${quickJs.source}`,
+    "-c", repositoryPath("engine/guest-quickjs/src/guest.c"), "-o", guestAdapter]);
   const androidRuntime = join(objects, "android_runtime.o");
   mustRun(clang, [
     ...cFlags,
     `-DPOCKET_LOGICAL_WIDTH=${inputs.logical[0]}`,
     `-DPOCKET_LOGICAL_HEIGHT=${inputs.logical[1]}`,
-    `-I${join(repository, "engine/quickjs-c")}`,
-    `-I${join(repository, "hosts/blackberry-classic")}`,
-    `-I${join(repository, "contracts/generated")}`,
+    `-I${repositoryPath("programs/native/quickjs")}`,
+    `-I${repositoryPath("engine/runtime/include")}`,
+    `-I${repositoryPath("platforms/android/include")}`,
+    `-I${repositoryPath("contracts/generated")}`,
     "-c",
     join(appHost, "jni/runtime.c"),
     "-o",
@@ -621,19 +635,20 @@ function buildNativeLibrary(abi: AndroidAbi, inputs: NativeInputs, quickJsLibrar
   const sharedSources: Array<{ name: string; source: string; includes: string[] }> = [
     {
       name: "pocket_input",
-      source: join(repository, "hosts/blackberry-classic/pocket_input.c"),
+      source: repositoryPath("engine/runtime/compat/input.c"),
       includes: [
-        `-I${join(repository, "hosts/blackberry-classic")}`,
-        `-I${join(repository, "contracts/generated")}`,
+        `-I${repositoryPath("engine/runtime/include")}`,
+        `-I${repositoryPath("platforms/android/include")}`,
+        `-I${repositoryPath("contracts/generated")}`,
       ],
     },
-    {
-      name: "rust_eh_personality",
-      source: join(repository, "engine/quickjs-c/rust_eh_personality.c"),
-      includes: [],
-    },
-    { name: "offload_posix", source: join(repository, "hosts/shared/offload_posix.c"), includes: [] },
+    { name: "offload_posix", source: repositoryPath("platforms/linux/offload/offload_posix.c"), includes: [] },
   ];
+  for (const name of ["input", "jni", "hooks"]) {
+    sharedSources.push({ name: `android_${name}`, source: repositoryPath(`platforms/android/src/${name}.c`),
+      includes: [`-I${repositoryPath("platforms/android/include")}`, `-I${repositoryPath("engine/runtime/include")}`,
+        `-I${repositoryPath("contracts/generated")}`] });
+  }
   const sharedObjects = sharedSources.map(({ name, source, includes }) => {
     const object = join(objects, `${name}.o`);
     mustRun(clang, [
@@ -660,6 +675,7 @@ function buildNativeLibrary(abi: AndroidAbi, inputs: NativeInputs, quickJsLibrar
     ...(abi.linkFlags ?? []),
     androidRuntime,
     portableRuntime,
+    guestAdapter,
     ...sharedObjects,
     quickJsLibrary,
     coreLibrary,
@@ -689,33 +705,25 @@ function elfSummary(library: string): string {
 }
 
 /**
- * The guest of this build: the plan `--plan` names, compiled from
- * `--project-root`, or the bundle `build-demo` left for the toolchain file's
- * manifest.
+ * The compiled package selected by this native invocation.
  */
 function guestBundle(): GuestBundle {
-  if (!planOption) return readGuestBundle(guest);
-  return buildGuestBundleFromPlan({
-    label: LABEL,
-    repository,
-    target,
-    planPath: resolve(planOption),
-    projectRoot,
-    outputDirectory: join(build, "guest"),
-  });
+  const selectedProfile = profile === "moto-g-play" ? motoProfile : redmiProfile;
+  return applicationBundle(prepareCompiledApplication(selectedProfile, argv, join(repository, ".pocket-build/native-inputs", profile)), target);
 }
 
 async function buildApp(): Promise<void> {
+  const bundle = guestBundle();
   requireToolchain();
   resetBuild();
   // Before any compile: an icon the tool refuses stops the build here.
-  const iconSource = iconOption ? resolve(iconOption) : join(repository, ANDROID_DEFAULT_ICON);
+  const iconSource = iconOption ? resolve(iconOption) : repositoryPath(ANDROID_DEFAULT_ICON);
   if (!existsSync(iconSource)) throw new Error(`${LABEL}: no icon at ${iconSource}`);
   const resources = join(build, "resources");
   cpSync(join(appHost, "res"), resources, { recursive: true });
   const icons = await bakeAndroidLauncherIcons(iconSource, resources);
-  const bundle = guestBundle();
   const libraries = buildNativeLibraries({
+    profile: bundle.inputs.profile,
     target: bundle.inputs.target,
     hostAbi: bundle.inputs.hostAbi,
     rasterDensity: bundle.inputs.viewport.rasterDensity,
@@ -833,18 +841,16 @@ async function buildRuntime(): Promise<void> {
   copyFileSync(join(appHost, "AndroidManifest.xml"), join(out, "AndroidManifest.xml"));
   mkdirSync(join(out, "res/values"), { recursive: true });
   copyFileSync(join(appHost, "res/values/strings.xml"), join(out, "res/values/strings.xml"));
-  await bakeAndroidLauncherIcons(join(repository, ANDROID_DEFAULT_ICON), join(out, "res"));
+  await bakeAndroidLauncherIcons(repositoryPath(ANDROID_DEFAULT_ICON), join(out, "res"));
   console.log(`${LABEL}: runtime -> ${out} (${inputs.target}, host ABI ${inputs.hostAbi}, ${inputs.logical.join("x")} at ${inputs.rasterDensity})`);
 }
 
 const USAGE =
   `usage: bun tools/android.ts [--profile=${Object.keys(PROFILES).join("|")}] <doctor|setup|build-demo|build-app|build|runtime>\n` +
-  `       build-app [--plan=<plan.json> [--project-root=<dir>]] [--out=<file.apk>] [--icon=<png|svg>] [--release]\n` +
+  `       build-app --pocket=<application.pocket> [--out=<file.apk>] [--icon=<png|svg>] [--release]\n` +
   `       runtime --out=<directory>`;
 
-if (planOption && command !== "build-app" && command !== "build") {
-  throw new Error(`${LABEL}: --plan goes with build-app\n${USAGE}`);
-}
+if (planOption) throw new Error(`${LABEL}: native builds take --pocket; compile the application separately with pocket compile`);
 if (iconOption && !/\.(png|svg)$/i.test(iconOption)) {
   throw new Error(`${LABEL}: --icon names a .png or an .svg file`);
 }
@@ -866,7 +872,6 @@ switch (command) {
     await buildApp();
     break;
   case "build":
-    if (!planOption) buildGuestBundle(guest);
     await buildApp();
     break;
   case "runtime":

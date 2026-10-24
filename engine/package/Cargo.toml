@@ -1,0 +1,13 @@
+[package]
+name = "pocket-package"
+edition = "2021"
+description = "PocketJS package admission, asset pack readers, and package identity hashing"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocket-spec = { workspace = true, default-features = true }
+pocket-drivers = { workspace = true, default-features = true }

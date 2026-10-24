@@ -2,7 +2,7 @@
 // tarball (tools/cli/package.json "files").
 
 export type CreateFramework = "solid" | "vue-vapor" | "octane";
-export type CreateTarget = "psp" | "vita" | "pocketbook" | "web-app" | "macos-app" | "linux-app" | "esp-idf";
+export type CreateTarget = "psp" | "vita" | "web-app" | "macos-app" | "linux-app" | "esp-idf";
 
 export const FRAMEWORKS: readonly CreateFramework[];
 export const TARGETS: readonly CreateTarget[];
@@ -15,7 +15,6 @@ export interface CreateOptions {
   readonly name: string;
   readonly framework: CreateFramework;
   readonly target: CreateTarget;
-  readonly hostProfile: string | undefined;
 }
 
 export function parseCreateArgs(argv: readonly string[]): CreateOptions;
@@ -38,7 +37,8 @@ export interface CreateResult {
   readonly standalone: boolean;
   readonly target: CreateTarget;
   readonly framework: CreateFramework;
-  readonly hostProfilePath: string | undefined;
+  readonly runtimeConfigPath: string | undefined;
+  readonly manifestPath: string;
   readonly files: readonly string[];
 }
 

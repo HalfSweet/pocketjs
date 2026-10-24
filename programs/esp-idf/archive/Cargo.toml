@@ -1,0 +1,18 @@
+[package]
+name = "pocket-idf-runtime"
+edition = "2021"
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PocketJS idf runtime component"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+[dependencies]
+pocket-runtime-cabi = { workspace = true }
+pocket-render-esp-ppa = { workspace = true, default-features = true, features = ["cabi"] }
+[features]
+default = ["std"]
+std = ["pocket-runtime-cabi/std"]

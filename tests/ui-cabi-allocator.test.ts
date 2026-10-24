@@ -1,3 +1,4 @@
+import { BUILD_STD_NIGHTLY } from "../tools/build/toolchains/rust.ts";
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,10 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const repository = fileURLToPath(new URL("..", import.meta.url));
 const build = mkdtempSync(join(tmpdir(), "pocketjs-ui-cabi-allocator-"));
-const crate = join(repository, "engine/ui-cabi");
-const config = Bun.TOML.parse(readFileSync(join(crate, "rust-toolchain.toml"), "utf8")) as {
-  toolchain: { channel: string };
-};
+const crate = join(repository, "programs/native/cabi");
 
 afterAll(() => rmSync(build, { recursive: true, force: true }));
 
@@ -21,29 +19,29 @@ function run(command: string[], env: NodeJS.ProcessEnv = process.env): string {
     stderr: "pipe",
   });
   expect(
-    result.exitCode,
+    result.success,
     `${command.join(" ")} (signal=${result.signalCode})\n${result.stdout}${result.stderr}`,
-  ).toBe(0);
+  ).toBe(true);
   return result.stdout.toString().trim();
 }
 
 test("real CAllocator uploads textures through malloc and host callbacks", () => {
   // Resolve both binaries: a Homebrew rustc earlier on PATH must not turn a
   // pinned nightly Cargo invocation into a stable no_std build.
-  const cargo = run(["rustup", "which", "--toolchain", config.toolchain.channel, "cargo"]);
-  const rustc = run(["rustup", "which", "--toolchain", config.toolchain.channel, "rustc"]);
+  const cargo = run(["rustup", "which", "--toolchain", BUILD_STD_NIGHTLY, "cargo"]);
+  const rustc = run(["rustup", "which", "--toolchain", BUILD_STD_NIGHTLY, "rustc"]);
   const cc = Bun.which("cc");
   expect(cc).not.toBeNull();
 
   for (const hostAllocator of [false, true]) {
-    const features = ["bare-platform", "software-only"];
+    const features = ["standalone-extension-provider", "bare-platform", "software-only"];
     if (hostAllocator) features.push("host-allocator");
     run([
       cargo, "build", "--locked", "--release",
       "--manifest-path", join(crate, "Cargo.toml"),
       "--target-dir", join(build, "target"),
-      "--features", features.join(","),
-    ], { ...process.env, RUSTC: rustc });
+      "--no-default-features", "--features", features.join(","),
+    ], { ...process.env, RUSTC: rustc, CARGO_PROFILE_RELEASE_PANIC: "abort", CARGO_PROFILE_RELEASE_LTO: "true" });
 
     const binary = join(build, hostAllocator ? "host-allocator" : "malloc");
     run([

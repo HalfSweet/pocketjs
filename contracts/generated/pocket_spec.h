@@ -4,6 +4,9 @@
 #ifndef POCKET_SPEC_H
 #define POCKET_SPEC_H
 
+/* Generated guest/native binding contract; independent of profile identity. */
+#define POCKET_BINDING_GENERATION 12U
+
 /* Portable button bitmask — identical on every host. Native hosts map
  * their platform key codes onto these bits; the guest only sees the mask. */
 #define POCKET_BTN_SELECT 0x0001U
@@ -24,5 +27,18 @@
 /* frame(buttons, analog): analog packs a stick as (x << 8) | y, each axis
  * 0..255 with 128 = center. Hosts without a stick pass this value. */
 #define POCKET_ANALOG_CENTER 0x8080U
+
+/* Closed DrawList operation set; word layouts are specified in spec.ts. */
+#define POCKET_DRAW_LIST_VERSION 1U
+#define POCKET_DRAW_OP_RECT 1U
+#define POCKET_DRAW_OP_GRAD_RECT 2U
+#define POCKET_DRAW_OP_GLYPH_RUN 3U
+#define POCKET_DRAW_OP_TEX_QUAD 4U
+#define POCKET_DRAW_OP_SCISSOR 5U
+#define POCKET_DRAW_OP_SCISSOR_POP 6U
+#define POCKET_DRAW_OP_TRI 7U
+#define POCKET_DRAW_OP_TEX_TRI 8U
+#define POCKET_DRAW_OP_TEXT_RUN 9U
+#define POCKET_DRAW_OP_SURFACE_QUAD 10U
 
 #endif

@@ -47,7 +47,7 @@ const log = (line: string) => {
 async function command(args: string[], env: Record<string, string> = {}): Promise<string> {
   const child = Bun.spawn(args, { cwd: ROOT, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  if (code !== 0) throw new Error(`${args.join(" ")} exited ${code}\n${stdout}${stderr}`);
+  if (code !== 0 || child.signalCode) throw new Error(`${args.join(" ")} exited ${code}\n${stdout}${stderr}`);
   return stdout.trim();
 }
 

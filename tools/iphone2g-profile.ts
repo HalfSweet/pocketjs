@@ -1,3 +1,6 @@
+import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
+import softwareProfile from "../profiles/iphone2g-dev.ts";
+import { targetProfile } from "../profiles/contract.ts";
 import {
   POCKET_CAPABILITIES,
   definePlatformContractRegistry,
@@ -14,25 +17,14 @@ import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.t
  * application owns the original 320x480 display and receives touch input in
  * the same logical coordinate space.
  */
-export const IPHONE2G_DEV_TARGET_ID = "iphone2g-dev";
-export const IPHONE2G_DEV_HOST_ABI = 6;
-export const IPHONE2G_VIEWPORT = [320, 480] as const;
+export const IPHONE2G_DEV_TARGET_ID = softwareProfile.id;
+export const IPHONE2G_DEV_HOST_ABI = POCKET_BINDING_GENERATION;
+export const IPHONE2G_VIEWPORT = softwareProfile.display.logicalViewports[0];
 
 export const IPHONE2G_DEV_CONTRACTS = definePlatformContractRegistry(
   POCKET_CAPABILITIES,
   defineTargetRegistry({
-    [IPHONE2G_DEV_TARGET_ID]: {
-      hostAbi: IPHONE2G_DEV_HOST_ABI,
-      platform: "ios",
-      form: "takeover",
-      display: {
-        physicalViewport: IPHONE2G_VIEWPORT,
-        logicalViewports: [IPHONE2G_VIEWPORT],
-        presentations: ["native"],
-        rasterDensity: 1,
-      },
-      capabilities: ["input.touch", "text.glyphs.baked"],
-    },
+    [IPHONE2G_DEV_TARGET_ID]: targetProfile(softwareProfile),
   }),
 );
 

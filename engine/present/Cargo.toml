@@ -1,0 +1,15 @@
+[package]
+name = "pocket-present"
+edition = "2021"
+description = "Damage tracking, composition and presentation transactions for PocketJS"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocket-draw-ops = { workspace = true, default-features = true }
+pocket-spec = { workspace = true, default-features = true }
+pocket-drivers = { workspace = true, default-features = true }
+pocket-raster = { workspace = true, default-features = true }

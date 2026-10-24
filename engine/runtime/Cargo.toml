@@ -1,0 +1,16 @@
+[package]
+name = "pocket-runtime"
+edition = "2021"
+description = "PocketJS application instances, profile facts, input encoding, package admission, and frame scheduling"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocketjs-core = { workspace = true, default-features = true }
+pocket-drivers = { workspace = true, default-features = true }
+pocket-spec = { workspace = true, default-features = true }
+pocket-package = { workspace = true, default-features = true }
+pocket-present = { workspace = true, default-features = true }

@@ -18,6 +18,9 @@ import {
   type PocketPackageVariant,
 } from "../../../contracts/spec/pocket-package.ts";
 import type { ApkSigner } from "./apk-sign.ts";
+import { canonicalProfileJson, pocketProfileSchema, PROFILE_HASH_FIELDS, type PocketProfile } from "../../../contracts/spec/profile.ts";
+import { validateSchema, type ContractDiagnostic } from "../../../framework/src/manifest/schema.ts";
+import { POCKET_BINDING_GENERATION } from "../../../contracts/spec/binding-generation.ts";
 
 export interface RepackIdentity {
   /** Reverse-DNS application id; must equal the `.pocket` variant's app id. */
@@ -48,6 +51,8 @@ export interface RuntimeManifest {
   readonly pocketjs: string;
   /** The device profile the runtime was built for. */
   readonly profile: string;
+  /** SHA-256 of the program's complete seven-field software profile. */
+  readonly profileHash: string;
   /** Every other file of the runtime directory: size and SHA-256 (hex). */
   readonly files: Readonly<Record<string, { readonly bytes: number; readonly sha256: string }>>;
   /** Target-specific facts about the program (the iPod's build id, executable
@@ -84,10 +89,20 @@ export async function readRuntime(
   if (!Number.isInteger(manifest.hostAbi) || manifest.hostAbi < 1) {
     throw new Error(`repack: ${RUNTIME_MANIFEST} has no host ABI`);
   }
+  requireCurrentRuntime(manifest);
+  if (typeof manifest.profileHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(manifest.profileHash)) {
+    throw new Error(`repack: ${RUNTIME_MANIFEST} has no valid profileHash; rebuild the runtime`);
+  }
   if (!manifest.files || typeof manifest.files !== "object") {
     throw new Error(`repack: ${RUNTIME_MANIFEST} lists no files`);
   }
+  for (const name of runtime.keys()) {
+    if (name !== RUNTIME_MANIFEST && !Object.hasOwn(manifest.files, name))
+      throw new Error(`repack: the runtime contains an unlisted file: ${name}`);
+  }
   for (const [name, expected] of Object.entries(manifest.files)) {
+    if (name === RUNTIME_MANIFEST || name.includes("\\") || name.split("/").some(part => !part || part === "." || part === ".."))
+      throw new Error(`repack: invalid runtime file path: ${name}`);
     const bytes = runtime.get(name);
     if (!bytes) throw new Error(`repack: the runtime is missing ${name}`);
     if (bytes.length !== expected.bytes || (await sha256Hex(bytes)) !== expected.sha256) {
@@ -112,11 +127,12 @@ export interface AdmittedPocket {
  * refuse a different host ABI, a variant without identity, plan or
  * JavaScript, or an app id other than the identity's.
  */
-export function admitPocket(
+export async function admitPocket(
   pocket: Uint8Array,
   runtime: RuntimeManifest,
   identity: RepackIdentity,
-): AdmittedPocket {
+): Promise<AdmittedPocket> {
+  requireCurrentRuntime(runtime);
   let decoded;
   try {
     decoded = decodePocketPackage(pocket);
@@ -133,12 +149,16 @@ export function admitPocket(
       `repack: the .pocket's ${runtime.target} variant is for host ABI ${variant.hostAbi}; this runtime is ABI ${runtime.hostAbi}`,
     );
   }
+  if (variant.profileHash !== runtime.profileHash) {
+    throw new Error(`repack: the .pocket's ${runtime.target} profileHash does not match this runtime`);
+  }
   const identitySection = findSection(variant, POCKET_SECTION.identity);
   const planSection = findSection(variant, POCKET_SECTION.plan);
   const javascript = findSection(variant, POCKET_SECTION.js);
   if (!identitySection || !planSection || !javascript || javascript.length === 0) {
     throw new Error(`repack: the .pocket's ${runtime.target} variant lacks its identity, plan or JavaScript`);
   }
+  if (javascript[javascript.length - 1] !== 0) throw new Error("repack: application JavaScript must be NUL-terminated");
   const packageIdentity = decodeIdentity(identitySection);
   if (packageIdentity.id !== identity.id) {
     throw new Error(
@@ -155,6 +175,19 @@ export function admitPocket(
   if (target?.id !== runtime.target || target.hostAbi !== runtime.hostAbi) {
     throw new Error(`repack: the .pocket's ${runtime.target} plan resolves another target or ABI`);
   }
+  const profile = plan.profile as PocketProfile;
+  const diagnostics: ContractDiagnostic[] = [];
+  validateSchema(profile, pocketProfileSchema, "/profile", diagnostics);
+  let profileHash: string | undefined;
+  try {
+    if (!diagnostics.length && profile.id === runtime.target &&
+      Object.keys(profile).every(key => (PROFILE_HASH_FIELDS as readonly string[]).includes(key))) {
+      profileHash = `sha256:${await sha256Hex(new TextEncoder().encode(canonicalProfileJson(profile)))}`;
+    }
+  } catch { /* Invalid profile data is rejected with the identity error below. */ }
+  if (profileHash !== runtime.profileHash || plan.profileHash !== runtime.profileHash) {
+    throw new Error(`repack: the .pocket's ${runtime.target} plan has an invalid profile identity`);
+  }
   let thinned: Uint8Array | undefined;
   return {
     get bytes() {
@@ -165,6 +198,12 @@ export function admitPocket(
     identity: packageIdentity,
     plan,
   };
+}
+
+function requireCurrentRuntime(runtime: RuntimeManifest): void {
+  if (runtime.hostAbi !== POCKET_BINDING_GENERATION) {
+    throw new Error(`repack: runtime binding generation ${runtime.hostAbi} is unsupported; rebuild for ${POCKET_BINDING_GENERATION}`);
+  }
 }
 
 /** Identity fields every package needs, checked once for every target. */

@@ -1,5 +1,5 @@
 // tests/3ds-transition.test.ts — the 3DS host's app-switch overlay
-// (hosts/3ds/src/transition.c), compiled for the build machine: the phases'
+// (products/3ds/src/transition.c), compiled for the build machine: the phases'
 // timing, the scrim's opacity, and the indicator's dots.
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -27,9 +27,9 @@ describe("Nintendo 3DS switch transition", () => {
       "-Wall",
       "-Wextra",
       "-Werror",
-      `-I${join(ROOT, "hosts/3ds/src")}`,
+      `-I${join(ROOT, "products/3ds/src")}`,
       join(ROOT, "tests/fixtures/3ds-transition.c"),
-      join(ROOT, "hosts/3ds/src/transition.c"),
+      join(ROOT, "products/3ds/src/transition.c"),
       "-lm",
       "-o",
       binary,

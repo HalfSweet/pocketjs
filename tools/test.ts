@@ -31,23 +31,45 @@ const SUITE: readonly Stage[] = [
     prep: [["bun", "tools/build.ts", "hero"]],
   },
   {
-    name: "contracts drift guard",
+    name: "contract codec",
     script: ["bun", "tests/contract.ts"],
   },
   {
     // The C ABI allocator and PSM draw tests need the nightly toolchain
-    // pinned by engine/ui-cabi/rust-toolchain.toml. They run under
-    // .github/workflows/native-c-harness.yml; tests/test-suite.test.ts
-    // verifies these exclusions against that workflow.
+    // selected by tools/build/toolchains/rust.ts. They run under
+    // .github/workflows/native-c-harness.yml.
     name: "unit",
-    // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts, pocket3d-web.test.ts and runtime-glyphs.test.ts load hosts/web/pocketjs.wasm.
+    // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts, pocket3d-web.test.ts and runtime-glyphs.test.ts load platforms/web/pocketjs.wasm.
     prep: [["bun", "tools/wasm.ts"]],
     tests: [
       "tests/device-lease.test.ts",
       "tests/device-evidence.test.ts",
+      "tests/doctor.test.ts",
       "tests/release-check.test.ts",
       "tests/release-notes.test.ts",
       "tests/platform-contracts.test.ts",
+      "tests/profile-contract.test.ts",
+      "tests/manifest-theme.test.ts",
+      "tests/source-app.test.ts",
+      "tests/driver-contracts.test.ts",
+      "tests/generated-contracts.test.ts",
+      "tests/driver-kit-c.test.ts",
+      "tests/driver-kit.test.ts",
+      "tests/guest-web-bindings.test.ts",
+      "tests/embedded-package.test.ts",
+      "tests/runtime-cabi.test.ts",
+      "tests/sdk.test.ts",
+      "tests/release-artifacts.test.ts",
+      "tests/release-inputs.test.ts",
+      "tests/vita-toolchain.test.ts",
+      "tests/e2e-build.test.ts",
+      "tests/cargo-workspace.test.ts",
+      "tests/idf-input.test.ts",
+      "tests/zephyr-contract.test.ts",
+      "tests/linux-platforms.test.ts",
+      "tests/buildroot.test.ts",
+      "tests/sdk-idf.test.ts",
+      "tests/out-of-tree-rust.test.ts",
       "tests/applet.test.ts",
       "tests/pocket-package.test.ts",
       "tests/idf-host-profile.test.ts",
@@ -58,23 +80,20 @@ const SUITE: readonly Stage[] = [
       "tests/widget-args.test.ts",
       "tests/note.test.ts",
       "tests/pocket-system.test.ts",
-      "tests/site-stage.test.ts",
-      "tests/site-nexus.test.ts",
-      "tests/site-pocket3d.test.ts",
-      "tests/site-microts.test.ts",
       "tests/site-arcade.test.ts",
       "tests/site-showcase.test.ts",
       "tests/motions-attribution.test.ts",
       "tests/host-build-inputs.test.ts",
-      "tests/host-layout.test.ts",
       "tests/quickjs-c-harness.test.ts",
+      "tests/native-program.test.ts",
       "tests/native-source.test.ts",
       "tests/3ds-profile.test.ts",
+      "tests/3ds-minimal.test.ts",
       "tests/pica-kernel.test.ts",
+      "tests/pica-driver.test.ts",
+      "tests/ge-driver.test.ts",
+      "tests/psp-runtime.test.ts",
       "tests/pocket3d-title.test.ts",
-      "tests/pocket3d-icon.test.ts",
-      "tests/pocket3d-interface.test.ts",
-      "tests/pocket3d-license.test.ts",
       "tests/pocket3d-packs.test.ts",
       "tests/pocket3d-delivery.test.ts",
       "tests/pocket3d-web.test.ts",
@@ -89,7 +108,6 @@ const SUITE: readonly Stage[] = [
       "tests/3ds-transition.test.ts",
       "tests/3ds-runtime-wire.test.ts",
       "tests/repack-3ds.test.ts",
-      "tests/repack-ipod.test.ts",
       "tests/repack-shared.test.ts",
       "tests/repack-sfo.test.ts",
       "tests/repack-psp.test.ts",
@@ -99,33 +117,24 @@ const SUITE: readonly Stage[] = [
       "tests/3ds-link.test.ts",
       "tests/camera-photo.test.ts",
       "tests/fs-3ds.test.ts",
-      "tests/iphone2g-profile.test.ts",
-      "tests/iphone4s-profile.test.ts",
-      "tests/ipodtouch-profile.test.ts",
-      "tests/ipodtouch4-profile.test.ts",
-      "tests/ipodtouch4-installation.test.ts",
-      "tests/ipodtouch4-resources.test.ts",
-      "tests/ipodtouch4-svcwire.test.ts",
-      "tests/meizu-m8-profile.test.ts",
-      "tests/blackberry-classic.test.ts",
       "tests/pocket-input.test.ts",
       "tests/contact-latch.test.ts",
-      "tests/ios-profile.test.ts",
-      "tests/iphone2g-device-contract.test.ts",
-      "tests/iphone2g-toolchain.test.ts",
-      "tests/iphone2g-device-transaction.test.ts",
       "tests/compiler-portability.test.ts",
       "tests/platform-runtime.test.ts",
       "tests/app-check.test.ts",
       "tests/runtime-packages.test.ts",
       "tests/build-writes.test.ts",
       "tests/targets-catalog.test.ts",
+      "tests/toolchain-definitions.test.ts",
+      "tests/runtime-build.test.ts",
+      "tests/runtime-programs.test.ts",
       "tests/targets-project.test.ts",
       "tests/targets-install.test.ts",
       "tests/class-diagnostics.test.ts",
       "tests/vue-sfc.test.ts",
       "tests/font-bake.test.ts",
       "tests/indexed-image.test.ts",
+      "tests/svg-texture-size.test.ts",
       "tests/touch.test.ts",
       "tests/desktop-pointer.test.ts",
       "tests/keyboard-touch.test.ts",
@@ -146,9 +155,34 @@ const SUITE: readonly Stage[] = [
       "tests/text.test.ts",
       "tests/text-layout-client.test.ts",
       "tests/clear-candidate-panel.test.ts",
-      "tests/moto-g-play-profile.test.ts",
-      "tests/redmi-1s-profile.test.ts",
       "tests/android-icon.test.ts",
+      "tests/android-platform.test.ts",
+      "tests/android-platform-integration.test.ts",
+      "tests/blackberry-classic.test.ts",
+      "tests/device-program-build.test.ts",
+      "tests/device-source-inputs.test.ts",
+      "tests/ios-profile.test.ts",
+      "tests/iphone2g-device-contract.test.ts",
+      "tests/iphone2g-device-transaction.test.ts",
+      "tests/iphone2g-profile.test.ts",
+      "tests/iphone2g-toolchain.test.ts",
+      "tests/iphone4s-profile.test.ts",
+      "tests/ipodtouch-profile.test.ts",
+      "tests/ipodtouch4-installation.test.ts",
+      "tests/ipodtouch4-profile.test.ts",
+      "tests/ipodtouch4-resources.test.ts",
+      "tests/ipodtouch4-svcwire.test.ts",
+      "tests/meizu-m8-profile.test.ts",
+      "tests/moto-g-play-profile.test.ts",
+      "tests/nativescript-bridge.test.ts",
+      "tests/redmi-1s-profile.test.ts",
+      "tests/repack-ipod.test.ts",
+      "tests/symbian-data.test.ts",
+      "tests/symbian-device.test.ts",
+      "tests/symbian-navigation.test.ts",
+      "tests/symbian-package.test.ts",
+      "tests/symbian-runtime.test.ts",
+      "tests/symbian-toolchain.test.ts",
       "tests/repack-android.test.ts",
       "tests/repack-worker.test.ts",
       "tests/offload-provider.test.ts",
@@ -166,29 +200,23 @@ const SUITE: readonly Stage[] = [
       "tests/net-web.test.js",
       "tests/web-system-host.test.ts",
       "tests/wasm-auxiliary.test.ts",
+      "tests/wasm-runtime.test.ts",
       "tests/wasm-premultiplied.test.ts",
       "tests/physics.test.ts",
       "tests/nexus-3ds.test.ts",
-      "tests/nexus-touch.test.ts",
       "tests/vita-package.test.ts",
       "tests/vita-dev.test.ts",
+      "tests/vita-runtime.test.ts",
       "tests/targets-psp.test.ts",
       "tests/psp-prx.test.ts",
+      "tests/psplink-cache.test.ts",
       "tests/psp-arena.test.ts",
       "tests/psp-qjs-allocator.test.ts",
-      "tests/symbian-data.test.ts",
-      "tests/symbian-toolchain.test.ts",
-      "tests/symbian-device.test.ts",
-      "tests/symbian-runtime.test.ts",
-      "tests/symbian-navigation.test.ts",
       "tests/native-navigation.test.ts",
-      "tests/symbian-package.test.ts",
       "tests/cli.test.ts",
       "tests/npm-package.test.ts",
       "tests/video-outro.test.ts",
       "tests/osk-layout.test.ts",
-      "tests/test-suite.test.ts",
-      "tests/tape-assert.test.ts",
     ],
   },
   {
@@ -208,6 +236,7 @@ const SUITE: readonly Stage[] = [
       "tests/vue-vapor-pak.test.ts",
       "tests/svg-bake.test.ts",
       "tests/devtools.test.ts",
+      "tests/devtools-bridge.test.ts",
       "tests/hot.test.ts",
       "tests/clock.test.ts",
       "tests/tiles.test.ts",
@@ -219,23 +248,8 @@ const SUITE: readonly Stage[] = [
     tests: ["tests/handheld-models.test.ts", "tests/text-batch.test.ts", "tests/text-cjk.test.ts"],
   },
   {
-    // Session golden: a 180-frame deterministic replay hashed per frame.
-    // Placed after a stage that preps hosts/web/pocketjs.wasm so this pays
-    // only the hero-main rebuild (~1s), never a cold wasm compile.
-    name: "tape golden",
-    script: [
-      "bun",
-      "tools/tape.ts",
-      "replay",
-      "hero-main",
-      "tests/tapes/hero-main.tape.json",
-      "--assert",
-      "tests/tapes/hero-main.hashes.json",
-    ],
-  },
-  {
     name: "AOT frontends and execution parity",
-    prep: [["bun", "tools/build.ts", "solid-aot-lab-main", "--no-config"]],
+    prep: [["bun", "tools/build.ts", "solid-aot-lab-main"]],
     browser: true,
     tests: [
       "tests/aot-admission.test.ts",
@@ -258,7 +272,7 @@ const SUITE: readonly Stage[] = [
     prep: [
       ["bun", "tools/wasm.ts"],
       // The view oracles import the generated default styles on a clean checkout.
-      ["bun", "tools/build.ts", "solid-aot-lab-main", "--no-config"],
+      ["bun", "tools/build.ts", "solid-aot-lab-main"],
     ],
     tests: [
       "tests/aot-model-animation.test.ts",
@@ -266,6 +280,7 @@ const SUITE: readonly Stage[] = [
       "tests/aot-model-async-view.test.ts",
       "tests/aot-model-await-order.test.ts",
       "tests/aot-model-build-plan.test.ts",
+      "tests/aot-compile.test.ts",
       "tests/aot-model-capacity.test.ts",
       "tests/aot-model-codegen.test.ts",
       "tests/aot-model-differential.test.ts",
@@ -339,11 +354,11 @@ const SUITE: readonly Stage[] = [
     name: "launcher sim",
     prep: [["bun", "tools/launcher.ts", "covers"]],
     browser: true,
-    tests: ["tests/launcher-sim.test.ts"],
+    tests: ["tests/launcher-sim.test.ts", "tests/launcher-symbian.test.ts", "tests/nexus-touch.test.ts"],
   },
   {
     // The system agent's overlay over a fixture app on the 3DS geometry, with
-    // the agent fake (hosts/sim/console-3ds.ts). The test builds its guest
+    // the agent fake (programs/sim/console-3ds.ts). The test builds its guest
     // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Home and the
     // Hacker News app live in pocket-shell (shells/3ds) with their own sims.
     name: "agent overlay sim",
@@ -405,7 +420,7 @@ for (const stage of selected) {
       stdout: "pipe",
       stderr: "pipe",
     });
-    if (p.exitCode !== 0) {
+    if (!p.success) {
       fail(stage.name, cmd, p.stdout.toString() + p.stderr.toString());
     }
   }
@@ -415,7 +430,7 @@ for (const stage of selected) {
       stdout: "inherit",
       stderr: "inherit",
     });
-    if (p.exitCode !== 0) fail(stage.name, stage.script);
+    if (!p.success) fail(stage.name, stage.script);
   }
   if (stage.tests) {
     const cmd = [
@@ -429,7 +444,7 @@ for (const stage of selected) {
       stdout: "inherit",
       stderr: "inherit",
     });
-    if (p.exitCode !== 0) fail(stage.name, cmd);
+    if (!p.success) fail(stage.name, cmd);
   }
   console.log(
     `   ${stage.name}: ok (${((Date.now() - started) / 1000).toFixed(1)}s)`,

@@ -36,13 +36,16 @@ by the browser host and headless Bun.
 
 Two places in the repo decide what you can build for:
 
-- `hosts/` holds one directory per host implementation, from consoles and
-  e-readers through phones, ESP-IDF firmware, and the browser.
-- `contracts/spec/platforms.ts` registers the stock targets that
-  `pocket build --target <id>` accepts, each with its host ABI, logical
-  viewport, raster density, presentations, and capability set. A host outside
-  that registry builds through its own host profile or a resolved build plan —
-  see [Platform contracts](/docs/platform-contracts/).
+- `programs/` contains phone, music-player, reader, console and reference
+  program composition. `platforms/` provides OS and SDK drivers; `devices/`
+  provides GPU mechanisms and renderers. These programs and their profiles
+  share the main repository.
+- `profiles/` defines the software profiles accepted by
+  `pocket compile --target <id>`, including logical viewports, raster density,
+  presentations and capabilities. A program outside the repository exports a
+  profile module through its `pocket.runtime-config.ts`. The compiler accepts
+  that module without a registry entry. See
+  [Platform contracts](/docs/platform-contracts/).
 
 Layout runs in one place — the Rust core — so a screen lays out the same
 everywhere. The browser and Bun hosts share one rasterizer, which is what makes

@@ -1,0 +1,13 @@
+[package]
+name = "pocket-draw-ops"
+edition = "2021"
+description = "Borrowed DrawList decoding and clipping for PocketJS renderers"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocket-drivers = { workspace = true, default-features = true }
+pocket-spec = { workspace = true, default-features = true }

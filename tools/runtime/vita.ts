@@ -6,23 +6,26 @@
 //   eboot.bin                                 the program; started without a game, it
 //                                             says on screen that app0:app.pocket is missing
 //   sce_sys/icon0.png, sce_sys/livearea/...   PocketJS's default bubble and LiveArea
-//                                             (hosts/vita/assets/sce_sys/)
+//                                             (programs/vita/assets/sce_sys/)
 //   runtime.json                              { target, hostAbi, pocketjs, profile, files }
 //
-// At startup the program reads app0:app.pocket (hosts/vita/src/package_file.rs).
+// At startup the program reads app0:app.pocket (programs/vita/src/package_file.rs).
 // tools/repack/vita.ts gives it a game: param.sfo, icon and the game's .pocket.
 
-import { $ } from "bun";
+import { buildVita } from "../vita.ts";
+import type { RuntimeBuildContext } from "../../framework/src/runtime-config.ts";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { POCKET_TARGETS } from "../../contracts/spec/platforms.ts";
 import { VITA_ICON, VITA_LIVEAREA, VITA_RUNTIME_FILE, VITA_RUNTIME_TARGET } from "../repack/vita.ts";
 import { DEFAULT_VITA_PACKAGE_ASSETS } from "../vita-package.ts";
 import { writeRuntimeManifest } from "./manifest.ts";
+import profile from "../../profiles/vita.ts";
+import { hashPocketProfile } from "../../framework/src/profile.ts";
 
 const repository = resolvePath(new URL("../..", import.meta.url).pathname);
 
-export async function buildRuntimeVita(argv: readonly string[] = []): Promise<string> {
+export async function buildRuntimeVita(argv: readonly string[] = [], context?: RuntimeBuildContext): Promise<string> {
   let out = join(repository, "dist/runtime/vita");
   for (const argument of argv) {
     if (argument.startsWith("--out=")) out = resolvePath(argument.slice("--out=".length));
@@ -31,7 +34,7 @@ export async function buildRuntimeVita(argv: readonly string[] = []): Promise<st
   mkdirSync(join(repository, ".pocket-build"), { recursive: true });
   const build = mkdtempSync(join(repository, ".pocket-build/vita-runtime-"));
   try {
-    await $`bun tools/vita.ts --runtime --no-usb-debug --release --package-outdir=${build}`.cwd(repository);
+    await buildVita(["--runtime", "--no-usb-debug", "--release", `--package-outdir=${build}`], context);
     rmSync(out, { recursive: true, force: true });
     mkdirSync(out, { recursive: true });
     copyFileSync(join(build, "pocket-runtime.self"), join(out, VITA_RUNTIME_FILE));
@@ -47,6 +50,7 @@ export async function buildRuntimeVita(argv: readonly string[] = []): Promise<st
     target: VITA_RUNTIME_TARGET,
     hostAbi: POCKET_TARGETS.vita.hostAbi,
     profile: "vita",
+    profileHash: hashPocketProfile(profile),
     files: [VITA_RUNTIME_FILE, ...assets],
   });
   console.log(`output: ${join(out, VITA_RUNTIME_FILE)} (${manifest.files[VITA_RUNTIME_FILE]!.bytes} bytes, PocketJS ${manifest.pocketjs})`);

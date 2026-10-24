@@ -1,3 +1,6 @@
+import { REPOSITORY_ROOT } from "../repository.ts";
+import motoToolchain from "../build/toolchains/moto-g-play.ts";
+import redmiToolchain from "../build/toolchains/redmi-1s.ts";
 // The generic Android runtime: what tools/android.ts build-app compiles for
 // every game of a profile, built once, with no game in it, and linked by
 // aapt2 into one unsigned template APK.
@@ -23,14 +26,17 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { linkAndroidApk } from "../android-link.ts";
-import { ANDROID_TEMPLATE, ANDROID_TEMPLATE_SOURCES, androidTemplateJob } from "../repack/android.ts";
-import { RUNTIME_MANIFEST, type RuntimeManifest } from "../repack/shared/runtime.ts";
+import { linkAndroidApk } from "../../tools/android-link.ts";
+import { ANDROID_TEMPLATE, ANDROID_TEMPLATE_SOURCES, androidTemplateJob } from "../../tools/repack/android.ts";
+import { RUNTIME_MANIFEST, type RuntimeManifest } from "../../tools/repack/shared/runtime.ts";
 import { MOTO_G_PLAY_CONTRACTS, MOTO_G_PLAY_TARGET } from "../moto-g-play-profile.ts";
 import { REDMI_1S_CONTRACTS, REDMI_1S_TARGET } from "../redmi-1s-profile.ts";
-import { writeRuntimeManifest } from "./manifest.ts";
+import { writeRuntimeManifest } from "../../tools/runtime/manifest.ts";
+import redmiProfile from "../../profiles/redmi-1s-dev.ts";
+import motoProfile from "../../profiles/moto-g-play-dev.ts";
+import { hashPocketProfile, type PocketProfile } from "../../framework/src/profile.ts";
 
-const repository = resolve(import.meta.dir, "../..");
+const repository = REPOSITORY_ROOT;
 
 interface Contract {
   readonly hostAbi: number;
@@ -38,9 +44,9 @@ interface Contract {
 }
 
 /** The Android profiles a runtime can be built for, by tools/android.ts profile name. */
-export const ANDROID_RUNTIME_PROFILES: Readonly<Record<string, { readonly target: string; readonly contract: Contract }>> = {
-  "redmi-1s": { target: REDMI_1S_TARGET, contract: REDMI_1S_CONTRACTS.targets[REDMI_1S_TARGET] },
-  "moto-g-play": { target: MOTO_G_PLAY_TARGET, contract: MOTO_G_PLAY_CONTRACTS.targets[MOTO_G_PLAY_TARGET] },
+export const ANDROID_RUNTIME_PROFILES: Readonly<Record<string, { readonly target: string; readonly contract: Contract; readonly profile: PocketProfile }>> = {
+  "redmi-1s": { target: REDMI_1S_TARGET, contract: REDMI_1S_CONTRACTS.targets[REDMI_1S_TARGET], profile: redmiProfile },
+  "moto-g-play": { target: MOTO_G_PLAY_TARGET, contract: MOTO_G_PLAY_CONTRACTS.targets[MOTO_G_PLAY_TARGET], profile: motoProfile },
 };
 
 function walk(directory: string): string[] {
@@ -76,8 +82,8 @@ export async function buildRuntimeAndroid(argv: readonly string[] = []): Promise
       stdout: "inherit",
       stderr: "inherit",
     });
-    if (build.exitCode !== 0) throw new Error(`runtime android: tools/android.ts runtime exited ${build.exitCode}`);
-    const toolchain = JSON.parse(readFileSync(join(repository, `tools/cli/${profile}-toolchain.json`), "utf8"));
+    if (!build.success) throw new Error(`runtime android: tools/android.ts runtime failed: ${build.signalCode ?? build.exitCode}`);
+    const toolchain = profile === "redmi-1s" ? redmiToolchain : motoToolchain;
     const sdk = {
       apiLevel: toolchain.android.apiLevel,
       buildToolsVersion: toolchain.android.buildToolsVersion,
@@ -99,6 +105,7 @@ export async function buildRuntimeAndroid(argv: readonly string[] = []): Promise
       target: chosen.target,
       hostAbi: chosen.contract.hostAbi,
       profile,
+      profileHash: hashPocketProfile(chosen.profile),
       files: [ANDROID_TEMPLATE, ...ANDROID_TEMPLATE_SOURCES].sort(),
       extra: {
         viewport: { logical: chosen.contract.display.logicalViewports[0], rasterDensity: chosen.contract.display.rasterDensity },

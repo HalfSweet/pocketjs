@@ -25,6 +25,7 @@
         ],
         "presentation": "integer-fit"
       }
-    }
+    },
+    "theme": "./theme.ts"
   }
 }

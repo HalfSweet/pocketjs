@@ -23,7 +23,7 @@
 #include "pocket_ui_cabi.h"
 
 /* PR #407 adds this declaration to pocket_ui_cabi.h; the symbol
- * already ship in the main-branch archive (engine/ui-cabi/src/lib.rs,
+ * already ship in the main-branch archive (programs/native/cabi/src/lib.rs,
  * ui_render_scaled/ui_render_incremental_scaled). The d211 device calls
  * ui_render_incremental_scaled(POCKET_RASTER_DENSITY). Drop these once the
  * PR #407 header lands in main. */
@@ -32,9 +32,6 @@ const uint8_t *ui_render_incremental_scaled(uint32_t scale);
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-/* panic=abort no_std archive: any unwinding attempt must fail the run. */
-void rust_eh_personality(void) { abort(); }
 
 enum {
   PSM_5650 = 0,
@@ -125,7 +122,7 @@ static int run_small(uint32_t psm, const char *name) {
   ui_insert_before(root, image, 0); /* 0 = append */
 
   /* One core tick performs layout; render_incremental composites. This is
-   * the exact sequence pocket_runtime_tick runs on the d211 device. */
+   * the exact sequence pocket_legacy_runtime_tick runs on the d211 device. */
   ui_tick();
   const uint8_t *framebuffer = ui_render_incremental_scaled(1);
   if (framebuffer == NULL) {

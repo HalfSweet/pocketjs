@@ -1,0 +1,13 @@
+[package]
+name = "pocket-glyph-pages"
+edition = "2021"
+description = "Borrowed font coverage expansion, bounded pages, and A8 masks for PocketJS"
+
+version.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pocket-drivers = { workspace = true, default-features = true }
+pocket-spec = { workspace = true, default-features = true }
