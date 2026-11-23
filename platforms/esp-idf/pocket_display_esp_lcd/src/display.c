@@ -192,7 +192,9 @@ typedef uint32_t __attribute__((may_alias)) pixel_word;
  * strip buffer is 128-byte aligned and a row holds an even number of bytes,
  * so `pixels` is 2-byte aligned. */
 static void swap_pixel_bytes(uint8_t *pixels, size_t bytes) {
-  if (((uintptr_t)pixels & 2U) && bytes >= 2) {
+  if (bytes < 2)
+    return;
+  if ((uintptr_t)pixels & 2U) {
     uint8_t a = pixels[0];
     pixels[0] = pixels[1];
     pixels[1] = a;
