@@ -36,7 +36,11 @@ impl Rng {
 }
 
 pub struct Tex {
+    /// Texel bytes after `offset` bytes of padding: odd offsets give the
+    /// rasterizer storage that starts off a word boundary.
     pixels: Vec<u8>,
+    offset: usize,
+    palette_offset: usize,
     w: u32,
     h: u32,
     psm: u32,
@@ -69,11 +73,14 @@ impl RenderResources for Fixture {
     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         let tex = self.textures.get(usize::try_from(handle).ok()?)?;
         Some(TexView {
-            pixels: &tex.pixels,
+            pixels: &tex.pixels[tex.offset..],
             w: tex.w,
             h: tex.h,
             psm: tex.psm,
-            palette: tex.palette.as_deref(),
+            palette: tex
+                .palette
+                .as_deref()
+                .map(|palette| &palette[tex.palette_offset..]),
             linear: tex.linear,
         })
     }
@@ -90,8 +97,8 @@ impl RenderResources for Fixture {
 }
 
 /// Handles `VALID_TEXTURES..` are degenerate views every routine skips.
-const VALID_TEXTURES: i32 = 14;
-const TEXTURES: i32 = 18;
+const VALID_TEXTURES: i32 = 20;
+const TEXTURES: i32 = 24;
 const FONTS: u32 = 3;
 
 pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
@@ -103,10 +110,12 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
             psm::PSM_T8 => 1,
             _ => 2,
         };
-        let mut pixels = rng.bytes((w * h) as usize * bpp);
+        // Every other texture starts one to three bytes into its storage.
+        let offset = [0, 1, 0, 2, 0, 3][textures.len() % 6];
+        let mut pixels = rng.bytes(offset + (w * h) as usize * bpp);
         if format == psm::PSM_8888 {
             // Opaque, transparent and translucent texels.
-            for texel in pixels.chunks_exact_mut(4) {
+            for texel in pixels[offset..].chunks_exact_mut(4) {
                 match rng.below(4) {
                     0 => texel[3] = 255,
                     1 => texel[3] = 0,
@@ -114,9 +123,10 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
                 }
             }
         }
+        let palette_offset = [0, 1][textures.len() % 2];
         let palette = palette.then(|| {
-            let mut entries = rng.bytes(1024);
-            for entry in entries.chunks_exact_mut(4) {
+            let mut entries = rng.bytes(palette_offset + 1024);
+            for entry in entries[palette_offset..].chunks_exact_mut(4) {
                 match rng.below(4) {
                     0 => entry[3] = 255,
                     1 => entry[3] = 0,
@@ -127,6 +137,8 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
         });
         textures.push(Tex {
             pixels,
+            offset,
+            palette_offset,
             w,
             h,
             psm: format,
@@ -148,12 +160,20 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
     texture(&mut rng, 32, 32, psm::PSM_5650, false, false);
     texture(&mut rng, 31, 2, psm::PSM_4444, false, false);
     texture(&mut rng, 2, 33, psm::PSM_T8, false, true);
+    texture(&mut rng, 9, 9, psm::PSM_8888, true, false);
+    texture(&mut rng, 12, 5, psm::PSM_5650, true, false);
+    texture(&mut rng, 5, 12, psm::PSM_4444, true, false);
+    texture(&mut rng, 6, 7, psm::PSM_T8, true, true);
+    texture(&mut rng, 10, 3, psm::PSM_5650, false, false);
+    texture(&mut rng, 3, 10, psm::PSM_4444, false, false);
     assert_eq!(textures.len() as i32, VALID_TEXTURES);
     // Degenerate views: an unknown format and T8 without its palette. (A
     // view without texels panics in the nearest clamp, in the oracle too.)
     let mut texture = |rng: &mut Rng, w: u32, h: u32, format: u32, linear: bool| {
         textures.push(Tex {
             pixels: rng.bytes((w * h * 4) as usize),
+            offset: 0,
+            palette_offset: 0,
             w,
             h,
             psm: format,
@@ -243,7 +263,8 @@ fn modulate(rng: &mut Rng) -> u32 {
 /// reject with an error (T8 without a palette, no texels).
 fn handle(rng: &mut Rng, strict: bool) -> u32 {
     if strict {
-        [rng.below(16), TEXTURES as u32][(rng.below(12) == 0) as usize]
+        // Valid views, the two of an unknown format, or no texture.
+        [rng.below(VALID_TEXTURES as u32 + 2), TEXTURES as u32][(rng.below(12) == 0) as usize]
     } else {
         rng.below(TEXTURES as u32 + 1)
     }

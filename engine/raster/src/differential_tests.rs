@@ -433,6 +433,7 @@ fn check_surface(
     padding: usize,
     clip: Clip,
     clear: bool,
+    lead: usize,
     background: &[u8],
     what: &str,
 ) {
@@ -442,7 +443,9 @@ fn check_surface(
     let row_bytes = (region.x1 - region.x0) as usize * bpp;
     let stride = row_bytes + padding;
     let rows = (region.y1 - region.y0) as usize;
-    let mut bytes = vec![0xa5u8; stride * (rows - 1) + row_bytes];
+    // `lead` bytes in front move the pixels off the allocation's alignment.
+    let mut storage = vec![0xa5u8; lead + stride * (rows - 1) + row_bytes];
+    let bytes = &mut storage[lead..];
     for row in 0..rows {
         let from = (((region.y0 + row as i32) * pw + region.x0) as usize) * bpp;
         bytes[row * stride..row * stride + row_bytes]
@@ -450,7 +453,7 @@ fn check_surface(
     }
     {
         let mut surface = Surface::new(
-            &mut bytes,
+            bytes,
             Rect::new(
                 region.x0 as u32,
                 region.y0 as u32,
@@ -514,6 +517,7 @@ fn acquired_surfaces_match_the_per_pixel_oracle() {
                             0,
                             clip,
                             rng.chance(50),
+                            rng.below(4) as usize,
                             background,
                             &label(seed, case, scale, &format!("{format:?} strip {strip}")),
                         );
@@ -537,6 +541,7 @@ fn acquired_surfaces_match_the_per_pixel_oracle() {
                             rng.range(0, 5) as usize,
                             clip,
                             rng.chance(50),
+                            rng.below(4) as usize,
                             background,
                             &label(seed, case, scale, &format!("{format:?} region")),
                         );
@@ -556,6 +561,7 @@ fn acquired_surfaces_match_the_per_pixel_oracle() {
                         rng.range(1, 6) as usize,
                         random_clip(&mut rng, region),
                         rng.chance(50),
+                        rng.below(4) as usize,
                         background,
                         &label(seed, case, scale, &format!("{format:?} padded rows")),
                     );
