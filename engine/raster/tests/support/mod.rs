@@ -270,13 +270,69 @@ fn handle(rng: &mut Rng, strict: bool) -> u32 {
     }
 }
 
+/// Two quads that share an edge, each fanned into two triangles that share
+/// a diagonal, with vertices on the pixel grid and sides at 0, 45 or about
+/// 18 and 27 degrees: pixel centres lie on the shared edges and diagonals,
+/// where the top-left fill rule decides the one triangle that covers them.
+/// The triangles are translucent, so a centre covered twice or not at all
+/// differs from one covered once.
+fn fans(rng: &mut Rng, words: &mut Vec<u32>, width: i32, height: i32, strict: bool) {
+    let (x, y) = (rng.range(-4, width), rng.range(-4, height));
+    let k = rng.range(1, 6);
+    let (e, f) = match rng.below(4) {
+        0 => ((k, 0), (0, k)),
+        1 => ((k, k), (-k, k)),
+        2 => ((3 * k, k), (-k, 3 * k)),
+        _ => ((2 * k, -k), (k, 2 * k)),
+    };
+    let reverse = rng.chance(50);
+    let textured = rng.chance(50);
+    let texture = handle(rng, strict);
+    let translucent = |rng: &mut Rng| ((0x40 + rng.below(0x80)) << 24) | (rng.next() & 0x00ff_ffff);
+    let flat = rng.chance(50);
+    let first = translucent(rng);
+    let colors: [u32; 4] = core::array::from_fn(|_| if flat { first } else { translucent(rng) });
+    let modulate = if rng.chance(50) {
+        0xffff_ffff
+    } else {
+        translucent(rng) | 0x00ff_ffff
+    };
+    for neighbour in 0..2 {
+        let origin = (x + neighbour * e.0, y + neighbour * e.1);
+        let mut corners = [
+            (origin, (0.0f32, 0.0f32)),
+            ((origin.0 + e.0, origin.1 + e.1), (1.0, 0.0)),
+            ((origin.0 + e.0 + f.0, origin.1 + e.1 + f.1), (1.0, 1.0)),
+            ((origin.0 + f.0, origin.1 + f.1), (0.0, 1.0)),
+        ];
+        if reverse {
+            corners.swap(1, 3);
+        }
+        for triangle in [[0, 1, 2], [0, 2, 3]] {
+            if textured {
+                words.extend([draw_op::TEX_TRI, texture]);
+                for corner in triangle {
+                    let ((px, py), (u, v)) = corners[corner];
+                    words.extend([xy(px, py), u.to_bits(), v.to_bits()]);
+                }
+                words.push(modulate);
+            } else {
+                words.push(draw_op::TRI);
+                words.extend(triangle.map(|corner| xy(corners[corner].0 .0, corners[corner].0 .1)));
+                words.extend(triangle.map(|corner| colors[corner]));
+            }
+        }
+    }
+}
+
 /// A DrawList the decoder accepts: balanced scissors, at most 32 deep.
 pub fn random_list(rng: &mut Rng, width: i32, height: i32, strict: bool) -> Vec<u32> {
     let mut words = Vec::new();
     let mut depth = 0;
     for _ in 0..rng.range(1, 28) {
         let (x, y) = (coordinate(rng, width), coordinate(rng, height));
-        match rng.below(20) {
+        match rng.below(23) {
+            20..=22 => fans(rng, &mut words, width, height, strict),
             0..=2 => words.extend([
                 draw_op::RECT,
                 xy(x, y),

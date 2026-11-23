@@ -1144,6 +1144,22 @@ fn orient(ax: i64, ay: i64, bx: i64, by: i64, px: i64, py: i64) -> i64 {
     (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 }
 
+/// Smallest edge weight a covered pixel centre may have on edge `u -> v` of a
+/// counter-clockwise triangle (top-left rule): 0 on a left edge (the weight
+/// grows with x) or a top edge (horizontal, the weight grows with y), 1 on
+/// every other edge. A centre exactly on an edge shared by two triangles is
+/// covered by one of them, so a fanned quad blends each pixel once.
+#[inline]
+fn edge_bias(u: (i64, i64), v: (i64, i64)) -> i64 {
+    let left = v.1 < u.1;
+    let top = v.1 == u.1 && v.0 > u.0;
+    if left || top {
+        0
+    } else {
+        1
+    }
+}
+
 /// `n / d` for `n >= 0` and `d > 0`. Operands that fit 32 bits divide as
 /// such: a 32-bit target has no 64-bit divide instruction.
 #[inline]
@@ -1156,9 +1172,10 @@ fn div_nonnegative(n: i64, d: i64) -> i64 {
 }
 
 /// Exact covered interval on one pixel row of a counter-clockwise triangle.
-/// Each doubled-coordinate edge is linear in x. Intersect its nonnegative
-/// half-line with the clip, then advance the original integer weights by
-/// addition. Thin rotated images no longer scan their whole bounding box.
+/// Each doubled-coordinate edge is linear in x. Intersect the half-line where
+/// it reaches its `edge_bias` with the clip, then advance the original integer
+/// weights by addition. Thin rotated images no longer scan their whole
+/// bounding box.
 struct TriangleRow {
     x: i32,
     end: i32,
@@ -1176,26 +1193,35 @@ impl TriangleRow {
             orient(a.0, a.1, b.0, b.1, sx, sy),
         ];
         let step = [-2 * (c.1 - b.1), -2 * (a.1 - c.1), -2 * (b.1 - a.1)];
-        Self::from_weights(weights, step, min_x, max_x)
+        let bias = [edge_bias(b, c), edge_bias(c, a), edge_bias(a, b)];
+        Self::from_weights(weights, step, bias, min_x, max_x)
     }
 
     /// The row whose edge weights at the centre of pixel `min_x` are
-    /// `weights` and change by `step` per pixel.
-    fn from_weights(mut weights: [i64; 3], step: [i64; 3], min_x: i32, max_x: i32) -> Self {
+    /// `weights` and change by `step` per pixel; a covered centre has at
+    /// least `bias` on every edge.
+    fn from_weights(
+        mut weights: [i64; 3],
+        step: [i64; 3],
+        bias: [i64; 3],
+        min_x: i32,
+        max_x: i32,
+    ) -> Self {
         let mut first = 0i64;
         let mut end = (max_x as i64 - min_x as i64).max(0);
-        for (&w, &dx) in weights.iter().zip(&step) {
+        for ((&w, &dx), &bias) in weights.iter().zip(&step).zip(&bias) {
             if dx > 0 {
-                if w < 0 {
-                    first = first.max(div_nonnegative(-w + dx - 1, dx));
+                if w < bias {
+                    // bias - w >= 1: the numerator is positive.
+                    first = first.max(div_nonnegative(bias - w + dx - 1, dx));
                 }
             } else if dx < 0 {
-                if w < 0 {
+                if w < bias {
                     end = 0;
                 } else {
-                    end = end.min(div_nonnegative(w, -dx) + 1);
+                    end = end.min(div_nonnegative(w - bias, -dx) + 1);
                 }
-            } else if w < 0 {
+            } else if w < bias {
                 end = 0;
             }
         }
@@ -1237,11 +1263,13 @@ impl Iterator for TriangleRow {
 
 /// The rows of one triangle from a first row down. An edge function is
 /// linear in y as in x, so the weights at the clip's first column advance
-/// from row to row by one addition each.
+/// from row to row by one addition each. The `edge_bias` of an edge is the
+/// same on every row.
 struct TriangleRows {
     weights: [i64; 3],
     step: [i64; 3],
     row_step: [i64; 3],
+    bias: [i64; 3],
     min_x: i32,
     max_x: i32,
 }
@@ -1258,6 +1286,7 @@ impl TriangleRows {
             ],
             step: [-2 * (c.1 - b.1), -2 * (a.1 - c.1), -2 * (b.1 - a.1)],
             row_step: [2 * (c.0 - b.0), 2 * (a.0 - c.0), 2 * (b.0 - a.0)],
+            bias: [edge_bias(b, c), edge_bias(c, a), edge_bias(a, b)],
             min_x,
             max_x,
         }
@@ -1266,7 +1295,13 @@ impl TriangleRows {
     /// The covered interval of the current row; moves to the row below.
     #[inline]
     fn next_row(&mut self) -> TriangleRow {
-        let row = TriangleRow::from_weights(self.weights, self.step, self.min_x, self.max_x);
+        let row = TriangleRow::from_weights(
+            self.weights,
+            self.step,
+            self.bias,
+            self.min_x,
+            self.max_x,
+        );
         for (w, &dy) in self.weights.iter_mut().zip(&self.row_step) {
             *w += dy;
         }
@@ -1330,9 +1365,10 @@ fn tri<T: RenderTarget>(target: &mut T, stride: i32, scale: i32, clip: Clip, p: 
         return;
     }
     // Integer barycentric interpolation, round-to-nearest:
-    // (v0*w0 + v1*w1 + v2*w2 + half) / area per channel. The covered
-    // weights are nonnegative and sum to `area`, so the numerator is at
-    // most 255 * area + half. When that fits 32 bits (every triangle below
+    // (v0*w0 + v1*w1 + v2*w2 + half) / area per channel. A covered centre
+    // has every weight at or above its `edge_bias` (0 or 1), so the weights
+    // are nonnegative, and they sum to `area`: the numerator is at most
+    // 255 * area + half. When that fits 32 bits (every triangle below
     // two million pixels) the numerators step by addition along the row
     // and divide as u32: the same quotients without 64-bit arithmetic.
     if area

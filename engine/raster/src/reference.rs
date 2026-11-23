@@ -2,8 +2,9 @@
 //! fast-path loops, kept as the oracle of `differential_tests`: every routine
 //! below writes one pixel per `RenderTarget::blend` call (flat opaque
 //! triangles one pixel per `fill_opaque` call) and evaluates each sample with
-//! the arithmetic the goldens were pinned on. The targets are the
-//! full-frame ones; their fills write pixel by pixel.
+//! the arithmetic the goldens were pinned on, the top-left fill rule of
+//! `edge_bias` included. The targets are the full-frame ones; their fills
+//! write pixel by pixel.
 //!
 //! Change this file only together with the goldens.
 #![allow(dead_code, clippy::all)]
@@ -435,6 +436,22 @@ pub(crate) fn orient(ax: i64, ay: i64, bx: i64, by: i64, px: i64, py: i64) -> i6
     (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 }
 
+/// Smallest edge weight a covered pixel centre may have on edge `u -> v` of a
+/// counter-clockwise triangle (top-left rule): 0 on a left edge (the weight
+/// grows with x) or a top edge (horizontal, the weight grows with y), 1 on
+/// every other edge. A centre exactly on an edge shared by two triangles is
+/// covered by one of them, so a fanned quad blends each pixel once.
+#[inline]
+pub(crate) fn edge_bias(u: (i64, i64), v: (i64, i64)) -> i64 {
+    let left = v.1 < u.1;
+    let top = v.1 == u.1 && v.0 > u.0;
+    if left || top {
+        0
+    } else {
+        1
+    }
+}
+
 pub(crate) struct TriangleRow {
     x: i32,
     end: i32,
@@ -452,20 +469,21 @@ impl TriangleRow {
             orient(a.0, a.1, b.0, b.1, sx, sy),
         ];
         let step = [-2 * (c.1 - b.1), -2 * (a.1 - c.1), -2 * (b.1 - a.1)];
+        let bias = [edge_bias(b, c), edge_bias(c, a), edge_bias(a, b)];
         let mut first = 0i64;
         let mut end = (max_x as i64 - min_x as i64).max(0);
-        for (&w, &dx) in weights.iter().zip(&step) {
+        for ((&w, &dx), &bias) in weights.iter().zip(&step).zip(&bias) {
             if dx > 0 {
-                if w < 0 {
-                    first = first.max((-w + dx - 1) / dx);
+                if w < bias {
+                    first = first.max((bias - w + dx - 1) / dx);
                 }
             } else if dx < 0 {
-                if w < 0 {
+                if w < bias {
                     end = 0;
                 } else {
-                    end = end.min(w / -dx + 1);
+                    end = end.min((w - bias) / -dx + 1);
                 }
-            } else if w < 0 {
+            } else if w < bias {
                 end = 0;
             }
         }
