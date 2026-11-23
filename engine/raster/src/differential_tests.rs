@@ -77,7 +77,9 @@ fn oracle_frame(
     match format {
         PixelFormat::Rgb565 => {
             let mut pixels: Vec<u16> = background
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
             let mut target = reference::Rgb565Target {
@@ -165,7 +167,9 @@ fn full_frame_targets_match_the_per_pixel_oracle() {
                     match format {
                         PixelFormat::Rgb565 => {
                             let mut pixels: Vec<u16> = actual
-                                .chunks_exact(2)
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                                 .collect();
                             let mut target = Rgb565Target {
@@ -294,7 +298,9 @@ fn public_full_frame_entrypoints_match_the_per_pixel_oracle() {
                 false,
             );
             let mut actual: Vec<u16> = background[..pixels * 2]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
             super::render_scaled_rgb565_over(&fixture, &words, &mut actual, scale);
@@ -349,7 +355,9 @@ fn public_full_frame_entrypoints_match_the_per_pixel_oracle() {
                 match format {
                     PixelFormat::Rgb565 => {
                         let mut pixels: Vec<u16> = actual
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                             .collect();
                         super::render_scaled_rgb565_regions(

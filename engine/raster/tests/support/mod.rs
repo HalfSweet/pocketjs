@@ -115,7 +115,7 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
         let mut pixels = rng.bytes(offset + (w * h) as usize * bpp);
         if format == psm::PSM_8888 {
             // Opaque, transparent and translucent texels.
-            for texel in pixels[offset..].chunks_exact_mut(4) {
+            for texel in pixels[offset..].as_chunks_mut::<4>().0.iter_mut() {
                 match rng.below(4) {
                     0 => texel[3] = 255,
                     1 => texel[3] = 0,
@@ -126,7 +126,7 @@ pub fn fixture(seed: u64, width: i32, height: i32) -> Fixture {
         let palette_offset = [0, 1][textures.len() % 2];
         let palette = palette.then(|| {
             let mut entries = rng.bytes(palette_offset + 1024);
-            for entry in entries[palette_offset..].chunks_exact_mut(4) {
+            for entry in entries[palette_offset..].as_chunks_mut::<4>().0.iter_mut() {
                 match rng.below(4) {
                     0 => entry[3] = 255,
                     1 => entry[3] = 0,
@@ -371,8 +371,6 @@ pub fn random_list(rng: &mut Rng, width: i32, height: i32, strict: bool) -> Vec<
             }
         }
     }
-    for _ in 0..depth {
-        words.push(draw_op::SCISSOR_POP);
-    }
+    words.extend(core::iter::repeat_n(draw_op::SCISSOR_POP, depth));
     words
 }
